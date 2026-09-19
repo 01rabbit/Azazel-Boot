@@ -19,6 +19,7 @@ repository governance. Nothing here is implemented or verified.
 | --- | --- |
 | Product code, installer, image builder | **does not exist** |
 | Python package and CLI | a **non-operational status scaffold only** — `azazel-boot status` reports what this repository is and does nothing else |
+| Interface inventory and commissioning | **parsing and refusal logic only** (`azazel_boot.inventory`, `azazel_boot.commissioning`): reads a sysfs tree, builds composite identities, and reports what an operator would have to settle. It reads no real NIC — the permanent MAC needs an ioctl, which the bootstrap may not perform — assigns no role, and confirms nothing. See [#9](https://github.com/01rabbit/Azazel-Boot/issues/9) |
 | Azazel-Fabric pin | exact tag `v0.9.0rc1` (a release candidate), consumed in one boundary module; its absence degrades the reported status and grants nothing |
 | Architecture decision records | see [docs/adr/](docs/adr/) |
 | CI | documentation links, plus static checks, unit tests and a dependency-lock check on the declared Python matrix |
