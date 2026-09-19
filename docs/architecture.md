@@ -136,17 +136,28 @@ The RAM classes measured and reported by the program are 8, 16, 32, and 64 GB.
 
 **The selector thresholds are decided at program level, not by Boot.** The
 program plan (§5 R2) fixes one product-local selector over usable RAM in MiB
-after firmware reservation: below 8192 diagnostic, 8192-16383 `core`,
-16384-32767 `lite`, 32768 and above `standard`. This paragraph previously said
-the thresholds were "not decided" and called Nexus's table a reference point
-rather than an inherited value; that was wrong, and it read as licence for Boot
-to pick its own numbers.
+after firmware reservation: below 7168 diagnostic, 7168-15359 `core`,
+15360-31743 `lite`, 31744 and above `standard`.
 
-What is *not* settled is the clause the plan attaches to them — "subject to the
-measured Core reserve". Boot's Core reserve on removable media has never been
-measured, so the thresholds are decided and their qualifier is not. A measured
-reserve may move where a tier begins; it does not license Boot to invent a
-different selector.
+Each boundary is the nominal size it admits **minus a 1024 MiB
+firmware-reservation allowance** (8192-1024, 16384-1024, 32768-1024). The
+boundaries used to sit at the nominal sizes themselves, which meant a host of a
+given nominal class never reached the tier named after it — a nominal 16 GB
+machine measured 16,095 MiB usable and selected `core`. That is program-plan
+finding OF-01, resolved 2026-09-19.
+
+The allowance matters to Boot more than to Nexus, because Boot runs on
+**borrowed laptops**, where an integrated GPU commonly reserves 512 MiB and the
+operator cannot change firmware settings to reclaim it. A machine whose
+firmware reserves more than 1024 MiB still falls a tier below its nominal
+class. That is a stated limit, not a defect to work around locally: Boot raises
+a finding rather than adjusting the selector.
+
+What is *not* settled is the clause the plan attaches to the selector —
+"subject to the measured Core reserve". Boot's Core reserve on removable media
+has never been measured (issue #8), so the thresholds are decided and their
+qualifier is not. A measured reserve may move where a tier begins; it does not
+license Boot to invent a different selector.
 
 ### 3.2 Topology profile
 
