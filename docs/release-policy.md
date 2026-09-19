@@ -12,7 +12,8 @@ Related: [ADR index](adr/README.md) · [ADR-0002 image builder](adr/0002-image-b
 [ADR-0003 immutable A/B update](adr/0003-immutable-ab-update.md) ·
 [ADR-0004 Fabric pin](adr/0004-exact-tag-fabric-consumption.md) ·
 [Threat model](threat-model.md) · [Compatibility](compatibility.md) ·
-[Security policy](../SECURITY.md)
+[Support matrix](support-matrix.md) · [Update channel](update-channel.md) ·
+[Recovery](recovery.md) · [Security policy](../SECURITY.md)
 
 ## 1. What does not exist
 
@@ -23,15 +24,18 @@ Related: [ADR index](adr/README.md) · [ADR-0002 image builder](adr/0002-image-b
 | A signing key, root, or delegated role for Boot | **none** |
 | An SBOM for anything in this repository | **none** |
 | A provenance attestation | **none** |
-| A release channel or update server | **none** |
-| A support matrix | **empty** — [compatibility](compatibility.md) §4 has no rows |
-| A recovery procedure | **not written** |
+| A release channel or update server | **none** — the policy is written in [update channel](update-channel.md); no channel, key, or published manifest exists |
+| A support matrix | **published and empty of support** — [support matrix](support-matrix.md); nothing is supported, and [compatibility](compatibility.md) §4 has no rows |
+| A recovery procedure | **written, never exercised** — [recovery](recovery.md); no recovery path has been built or run |
 | Reproducibility evidence | **none** — no build has been reproduced, because no build has been performed |
 
 The R0 exit criteria require that "Nexus and Boot publish their own security
 policy, support matrix, license, update channel, and recovery procedure before a
-release is called supported" (R0 baseline, line 68). Boot has the security
-policy and the license. It has none of the other three.
+release is called supported" (R0 baseline, line 68). All five documents now
+exist. None of them governs anything: there is no release for a support matrix
+to describe, no artifact for a channel to carry, and no system on which a
+recovery procedure has ever been run. Publishing them removes a precondition;
+it does not move Azazel-Boot toward *supported* (§9).
 
 ## 2. What a release must carry
 
