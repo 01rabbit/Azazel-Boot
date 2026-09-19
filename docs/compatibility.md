@@ -46,10 +46,18 @@ supported", and that is the honest state.
 These constrain what may eventually be qualified. They are not themselves
 qualifications.
 
+The firmware row changed on 2026-09-19. It read "UEFI boot path" and cited the
+program plan, which says no such thing: the roadmaps contain no occurrence of
+`UEFI`, `Secure Boot`, `CSM` or `legacy BIOS`. What the plan actually fixes is
+"use firmware verification where the supported hardware permits" (§6.7 item 2)
+and the three media/platform trust classes (§5 R7). A boot path is Boot's own
+scoping decision and is not yet made, so citing the plan for it laundered an
+assumption into an inherited decision.
+
 | Boundary | Value | Source |
 | --- | --- | --- |
 | Architecture | x86_64 | R0 baseline product definition |
-| Firmware | UEFI boot path | program plan §6.7, R7 |
+| Firmware | boot path **not yet decided** | Boot-local; see [ADR-0001](adr/0001-x86_64-uefi-compatibility.md) |
 | Media | removable USB SSD | product definition |
 | Host storage | untouched by default; internal block devices quarantined from initramfs entry | R7 Boot deliverables |
 | Internal behavior | zero content writes to internal block devices until an operator approves an export target; unavoidable firmware NVRAM change reported separately | program plan §5 R7 exit gate, §8 |

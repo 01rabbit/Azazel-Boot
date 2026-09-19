@@ -82,8 +82,17 @@ Fabric `provisioning_contracts`, which **does not exist yet**. They are target
 contracts. Boot must not invent a local canonical shape for them in the
 meantime, and must not adopt a provisioning pin before Fabric releases one.
 
-Boot has **no Fabric pin at all today**: no version, no branch, no submodule,
-no copied source. Adopting one is a program-gated decision, not a convenience.
+Boot pins Azazel-Fabric at exactly `v0.8.0`
+([ADR-0004](adr/0004-exact-tag-fabric-consumption.md)): an optional extra, one
+exact tag, no branch pin, no submodule, no copied source. It is imported in
+`src/azazel_boot/fabric_projection.py` and nowhere else, and a static test
+fails the build on a second import site.
+
+The pin is not a provisioning pin. `azazel_fabric.provisioning_contracts`, to
+which the program plan assigns Boot's `HardwareInventory`, `ResourceProfile`,
+`TopologyProfile` and `CommissioningRecord`, **does not exist at that tag**.
+Fabric's absence, or a missing submodule, degrades the reported status and
+grants nothing.
 
 ## 3. Capability model
 
@@ -124,9 +133,20 @@ Deception Lite means the host has room for it. It does not mean Deception Lite
 is eligible.
 
 The RAM classes measured and reported by the program are 8, 16, 32, and 64 GB.
-The exact selector thresholds for Boot are **not decided**; Nexus's table is a
-reference point, not an inherited value, because Boot's Core reserve on
-removable media is not yet measured.
+
+**The selector thresholds are decided at program level, not by Boot.** The
+program plan (§5 R2) fixes one product-local selector over usable RAM in MiB
+after firmware reservation: below 8192 diagnostic, 8192-16383 `core`,
+16384-32767 `lite`, 32768 and above `standard`. This paragraph previously said
+the thresholds were "not decided" and called Nexus's table a reference point
+rather than an inherited value; that was wrong, and it read as licence for Boot
+to pick its own numbers.
+
+What is *not* settled is the clause the plan attaches to them — "subject to the
+measured Core reserve". Boot's Core reserve on removable media has never been
+measured, so the thresholds are decided and their qualifier is not. A measured
+reserve may move where a tier begins; it does not license Boot to invent a
+different selector.
 
 ### 3.2 Topology profile
 
@@ -257,8 +277,10 @@ role.
 
 ## 5. What this document does not establish
 
-- That any of the above exists. None of it is implemented.
-- Which Fabric version Boot will pin. None is chosen.
+- That any of the above exists. None of it is implemented. The package that
+  does exist reports this absence; it does not reduce it.
+- When Boot will consume Fabric's provisioning contracts. The tag is pinned;
+  the contracts it would need are not in it.
 - The RAM thresholds, the Core reserve on removable media, or the startup-time
   budget. None is measured.
 - That the boot path works on any laptop. See

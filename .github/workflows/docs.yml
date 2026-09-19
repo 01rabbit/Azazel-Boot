@@ -16,10 +16,6 @@ permissions:
   contents: read
 
 jobs:
-  # This repository is documentation-stage: no package, no dependencies, and no
-  # tests. The only thing worth checking mechanically today is that the
-  # documents actually reference each other correctly. A test job is added when
-  # there are tests, not before.
   links:
     name: Internal documentation links
     runs-on: ubuntu-latest
@@ -34,3 +30,97 @@ jobs:
 
       - name: Check internal Markdown links
         run: python3 tools/check_docs_links.py
+
+  package:
+    name: Package (${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The declared Python matrix. `requires-python = ">=3.11"` in
+        # pyproject.toml is the claim; this job is what makes it true.
+        python-version: ["3.11", "3.12"]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # Installed against the lock, so a transitive bump cannot silently change
+      # what the checks below ran against.
+      - name: Install with locked development dependencies
+        run: pip install -c constraints-dev.txt -e ".[dev]"
+
+      - name: Verify the installed set matches the lock
+        run: |
+          python3 - <<'EOF'
+          import re
+          import subprocess
+          import sys
+
+          frozen = subprocess.run(
+              [sys.executable, "-m", "pip", "freeze"], capture_output=True, text=True, check=True
+          ).stdout
+          installed = dict(
+              line.split("==", 1) for line in frozen.splitlines() if "==" in line
+          )
+          failures = []
+          for raw in open("constraints-dev.txt", encoding="utf-8"):
+              line = raw.split("#", 1)[0].strip()
+              if not line:
+                  continue
+              name, _, pinned = line.partition("==")
+              actual = installed.get(re.sub(r"[-_.]+", "-", name).lower()) or installed.get(name)
+              if actual != pinned:
+                  failures.append(f"{name}: locked {pinned}, installed {actual}")
+          if failures:
+              raise SystemExit("dependency lock drift:\n  " + "\n  ".join(failures))
+          print("dependency lock matches the installed set")
+          EOF
+
+      - name: Static checks
+        run: ruff check src tests tools
+
+      - name: Unit tests
+        run: python -m pytest tests -q
+
+      # The scaffold has to stand where nothing optional is installed, which is
+      # the state a responder's machine is most likely to be in. Fabric is never
+      # installed in this job, so this is also the guard's real absence case.
+      - name: Import and run the CLI with no optional dependency present
+        run: |
+          python -c "import azazel_boot; from azazel_boot.status import current_status; assert current_status().is_operational() is False"
+          azazel-boot status
+
+  fabric-projection:
+    name: Fabric projection at the pinned tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # The `package` job never installs Fabric, so without this job the
+      # projection's success path would never run anywhere and the tests that
+      # cover it would skip in silence. Installing the extra is also what
+      # checks that the pinned tag still resolves.
+      - name: Install with the fabric extra at its exact tag
+        run: pip install -c constraints-dev.txt -e ".[dev,fabric]"
+
+      - name: Unit tests with Fabric present
+        run: python -m pytest tests -q
+
+      - name: Fail if any Fabric test was skipped
+        run: |
+          python -m pytest tests -q -rs 2>&1 | tee /tmp/pytest.out
+          if grep -q "SKIPPED" /tmp/pytest.out; then
+            echo "a Fabric test skipped in the job that exists to run it" >&2
+            exit 1
+          fi

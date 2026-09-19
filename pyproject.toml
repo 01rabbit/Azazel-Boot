@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "azazel-boot"
+version = "0.0.0"
+description = "Azazel-Boot Responder (AZ-03) -- non-operational status scaffold"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+# The scaffold is stdlib-only on purpose: it has to stand on a machine where
+# nothing optional is installed. Everything else is an extra.
+dependencies = []
+
+[project.optional-dependencies]
+# Exactly one verified tag, no branch pin, no submodule, no copied source
+# (issue #1; ADR-0004). Boot imports it in one module only, and its absence
+# degrades the reported status rather than failing anything.
+fabric = ["azazel-fabric @ git+https://github.com/01rabbit/Azazel-Fabric.git@v0.8.0"]
+dev = ["pytest==8.3.4", "ruff==0.8.4"]
+
+[project.scripts]
+azazel-boot = "azazel_boot.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests", "tools"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
