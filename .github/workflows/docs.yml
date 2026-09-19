@@ -1,0 +1,36 @@
+name: Docs
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # This repository is documentation-stage: no package, no dependencies, and no
+  # tests. The only thing worth checking mechanically today is that the
+  # documents actually reference each other correctly. A test job is added when
+  # there are tests, not before.
+  links:
+    name: Internal documentation links
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check internal Markdown links
+        run: python3 tools/check_docs_links.py
