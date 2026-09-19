@@ -91,8 +91,9 @@ that is the correct outcome.
 - [Release policy](docs/release-policy.md) — what a release will have to carry,
   what a signature does and does not attest, and why none of it exists yet.
 - [Support matrix](docs/support-matrix.md) — what a release will be able to say
-  it supports; the hardware list is empty, firmware and Secure Boot are
-  undeclared, and the only checkable rows describe the status scaffold.
+  it supports; the hardware list is empty, the firmware frame is decided but
+  measured on no machine — UEFI assumed, Secure Boot enabled the target — and the
+  only checkable rows describe the status scaffold.
 - [Update channel](docs/update-channel.md) — why an update to removable media is
   a media rewrite or a new medium rather than a service update, why the offline
   path matters more than the online one, and why no channel exists.

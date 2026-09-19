@@ -4,6 +4,15 @@ Status: **accepted (2026-09-19)** — this ADR decides the *admission policy* fo
 the laptop compatibility set. It qualifies no hardware, names no candidate, and
 does not decide the firmware boot path.
 
+> **Partly superseded.** The statement below that the firmware boot path is
+> undecided — the *Not decided above this repository* subsection, and the second
+> bullet of *What this ADR does not establish* — records the state as of this
+> ADR's acceptance and is kept as the historical record. The program resolved it
+> later the same day as finding **OF-03**, which is the "program-level statement"
+> that bullet names as a trigger; Boot adopts the resulting frame in
+> [ADR-0005](0005-uefi-secure-boot-posture.md). This ADR's admission policy — D1
+> through D7 — is untouched and remains in force.
+
 Scope item 3 of [Azazel-Boot #1](https://github.com/01rabbit/Azazel-Boot/issues/1).
 
 Related: [Compatibility](../compatibility.md) · [Threat model](../threat-model.md) ·

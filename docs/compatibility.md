@@ -46,18 +46,19 @@ supported", and that is the honest state.
 These constrain what may eventually be qualified. They are not themselves
 qualifications.
 
-The firmware row changed on 2026-09-19. It read "UEFI boot path" and cited the
-program plan, which says no such thing: the roadmaps contain no occurrence of
-`UEFI`, `Secure Boot`, `CSM` or `legacy BIOS`. What the plan actually fixes is
-"use firmware verification where the supported hardware permits" (§6.7 item 2)
-and the three media/platform trust classes (§5 R7). A boot path is Boot's own
-scoping decision and is not yet made, so citing the plan for it laundered an
-assumption into an inherited decision.
+The firmware row changed twice on 2026-09-19. It first read "UEFI boot path"
+and cited the program plan, which at that point said no such thing — the
+roadmaps contained no occurrence of `UEFI`, `Secure Boot`, `CSM` or `legacy
+BIOS` — so the citation laundered a Boot assumption into an inherited decision,
+and the row was corrected to read "not yet decided". Later the same day the
+program closed that gap as finding **OF-03**, and the row below records the
+frame it decided. The frame is decided; what any particular machine does with
+it is measured into a qualified entry under §3.3, not declared here.
 
 | Boundary | Value | Source |
 | --- | --- | --- |
 | Architecture | x86_64 | R0 baseline product definition |
-| Firmware | boot path **not yet decided** | Boot-local; see [ADR-0001](adr/0001-x86_64-uefi-compatibility.md) |
+| Firmware | **UEFI is the assumed boot path**, and booting with **Secure Boot enabled** through a signed shim chain is the target. Disabling Secure Boot is a fallback, never the default; no key is enrolled into a host's firmware. The state on any given machine is **measured** (§3.3), never declared | program plan §15 OF-03, restated in §5 R2; adopted for Boot in [ADR-0005](adr/0005-uefi-secure-boot-posture.md) |
 | Media | removable USB SSD | product definition |
 | Host storage | untouched by default; internal block devices quarantined from initramfs entry | R7 Boot deliverables |
 | Internal behavior | zero content writes to internal block devices until an operator approves an export target; unavoidable firmware NVRAM change reported separately | program plan §5 R7 exit gate, §8 |
@@ -65,6 +66,49 @@ assumption into an inherited decision.
 | Capability rule | resource ∩ topology ∩ verified assets ∩ trust/health; RAM alone enables nothing | R0 baseline capability rules |
 
 Nothing here says any particular machine satisfies them.
+
+### 2.1 What the firmware row says, and what it does not
+
+The frame is the program's, quoted rather than paraphrased (program plan §15,
+finding OF-03, resolved 2026-09-19):
+
+1. "**Booting with Secure Boot enabled is the target**, via the standard signed
+   chain: a Microsoft-UEFI-CA-signed `shim` as the first stage, which verifies
+   the next stage against a certificate embedded in the shim itself… UEFI is the
+   assumed boot path."
+2. "**Disabling Secure Boot is a fallback, never the default**, and it is
+   permitted only with the machine owner's explicit agreement, only after the
+   location of the host's disk-encryption recovery key has been established, and
+   it must be restored at the end of the session."
+3. "**Enrolling a product key into the host (MOK) is not adopted.** It writes a
+   key into someone else's firmware and survives the session."
+4. "**A qualified hardware entry records the Secure Boot state that was
+   observed**", which is §3.3's "firmware settings required to reach the media…
+   including Secure Boot state" and is not restated here.
+
+**Why the fallback is hedged, in the one sentence that matters on a borrowed
+laptop.** Windows BitLocker with a TPM protector is by default sealed against a
+PCR that measures the Secure Boot state: turning Secure Boot off changes that
+measurement, the TPM does not release the key, and the next Windows boot demands
+the recovery key. **Booting from USB does not by itself do this — only changing
+the Secure Boot state does.** "Put the USB first in the boot order" and "turn
+Secure Boot off" are two actions with very different consequences for the
+machine's owner, and an operator who reads them as one action may take a
+clinic's data away from it on a day the clinic is already in trouble. The second
+cost is access: on managed clinic, municipal and corporate laptops a firmware
+password is common and the responder does not have it, so a plan that requires
+firmware changes does not run on those machines at all.
+
+**What the row does not say.** "UEFI is the assumed boot path" is not "every
+UEFI machine is supported", and "Secure Boot enabled is the target" is not
+"Secure Boot has been observed to work". No image has been built, no machine has
+been booted, and no Secure Boot state has been measured; §4 is still empty and
+§1 still governs. The frame also states an assumption, not an exclusion — it
+says nothing about `CSM` or legacy BIOS, and this document does not turn the
+assumption into a prohibition. And "the state of the industry transition away from the
+expiring Microsoft UEFI CA 2011 certificate must be checked against firmware in
+hand rather than assumed" (program plan §15 OF-03) — no firmware has been in
+anyone's hand, so nothing here asserts which certificate any firmware trusts.
 
 ## 3. The shape of a qualified entry
 
@@ -167,6 +211,8 @@ will be recorded when a test program exists to move them through.
 ## 6. What this document does not establish
 
 - That Azazel-Boot boots on anything.
+- That any machine boots with Secure Boot enabled, or that a non-UEFI or legacy
+  path is excluded. §2 records a decided frame and no measurement.
 - That any laptop's internal storage is left unchanged. No such test has run.
 - That the 120-second Core-ready objective is achievable on laptop hardware.
 - That a class of machines can be qualified together. Until evidence says
