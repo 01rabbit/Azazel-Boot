@@ -106,8 +106,8 @@ None of the following is fixed by the program plan, and none is fixed here:
 | Slot layout on the media, number of retained generations, and how a slot is addressed | The image builder selection ([ADR-0002](0002-image-builder.md)); layout is a builder output before it is an updater input |
 | Boot metadata format, how the two copies are placed, and how a torn write is detected | Same, plus the signing story ([release policy](../release-policy.md)) |
 | Digest and signature algorithms, and the envelope a signature is carried in | [Release policy](../release-policy.md); currently open everywhere in the program |
-| **What "health-confirmed" measures** — which checks must pass, in what time, before a trial is promoted | Nothing upstream defines it. It needs its own ADR, and it is the single most consequential open item here: an over-eager health check promotes a broken image, an over-strict one strands a working responder on the previous generation |
-| Trial-boot timeout and how many failed attempts precede a permanent fallback | Same |
+| ~~**What "health-confirmed" measures**~~ | **Decided** by [ADR-0006](0006-trial-boot-health-confirmation.md) (2026-09-19). Six signals, ambiguity fails toward fallback |
+| ~~Trial-boot timeout and how many failed attempts precede a permanent fallback~~ | **Decided** by [ADR-0006](0006-trial-boot-health-confirmation.md): a 300-second window and one attempt. Both are values, not principles, and are the first things to revisit against real hardware |
 | Persistence migration snapshot format and restore path | The persistence design, which does not exist |
 
 ## Rationale
@@ -143,8 +143,11 @@ meaningful after deployment rather than only at build time.
 - The power-loss obligation (D2) reaches the audit chain, not just the image: the
   last valid audit checkpoint must survive a cut at every write point. Checkpoint
   design and update design cannot be sequenced independently.
-- "Health-confirmed" (D4) is a decision someone must make before an updater can
-  be written, and it must not be settled silently inside an implementation PR.
+- "Health-confirmed" (D4) was a decision someone had to make before an updater
+  could be written, and it must not be settled silently inside an
+  implementation PR. It was not: [ADR-0006](0006-trial-boot-health-confirmation.md)
+  makes it, in the open, with its own reasoning about why the two failure modes
+  are not symmetric.
 
 ## What this ADR does not establish
 
@@ -152,7 +155,9 @@ meaningful after deployment rather than only at build time.
   implemented and nothing has been tested.
 - That the R7 exit-gate conditions in D2 are met, or that they have been
   attempted.
-- That the mechanism details in D4 have a preferred answer. They are open.
+- That the remaining mechanism details in D4 have a preferred answer. They are
+  open. The two health-related rows are no longer among them — see
+  [ADR-0006](0006-trial-boot-health-confirmation.md).
 - That an A/B design alone preserves the host laptop. The no-host-storage-write
   property is a separate mechanism — the initramfs quarantine
   ([threat model](../threat-model.md) §3) — and A/B neither provides nor
