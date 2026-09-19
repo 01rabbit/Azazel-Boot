@@ -21,12 +21,14 @@ a reason: Fabric not installed, the needed submodule missing, or the
 projection itself raising. Nothing here propagates an exception to a caller
 that only wanted to know what this repository is.
 
-The missing submodule is not hypothetical. The program plan assigns Boot's
-provisioning records -- `HardwareInventory`, `ResourceProfile`,
-`TopologyProfile`, `CommissioningRecord` -- to `azazel_fabric.
-provisioning_contracts`, **which does not exist in the pinned tag**. That is
-today's real state, and it is what the guard is tested against rather than a
-condition invented to exercise it.
+The program plan assigns Boot's provisioning records -- `HardwareInventory`,
+`ResourceProfile`, `TopologyProfile`, `CommissioningRecord` -- to
+`azazel_fabric.provisioning_contracts`. That module did not exist at the
+previously pinned `v0.8.0`, which is what the guard was tested against. It
+exists at the pin recorded below (ADR-0007), so `missing_planned` is now empty
+and the guard is tested against *that* fact instead. The mechanism is unchanged
+and still does the same job: a module Boot would consume and cannot is
+reported, never assumed.
 """
 
 from __future__ import annotations
@@ -36,15 +38,24 @@ from typing import Any
 
 from azazel_boot.status import BootStatus, current_status
 
-#: The exact tag this module is written against (ADR-0004). No branch pin, no
-#: submodule, no copied source.
-FABRIC_PIN = "v0.8.0"
+#: The exact tag this module is written against (ADR-0007, superseding
+#: ADR-0004 D1). No branch pin, no submodule, no copied source. A release
+#: candidate is still an exact tag; it promises no stability, so this moves to
+#: `v0.9.0` when Fabric cuts it.
+FABRIC_PIN = "v0.9.0rc1"
 
-#: Fabric submodules Boot would consume. `provisioning_contracts` is absent
-#: from the pinned tag; it is listed because an unmet requirement that is
-#: written down can be tracked, and one that is omitted cannot.
+#: What this module needs to produce a projection at all.
 REQUIRED_FABRIC_MODULES = ("azazel_fabric.view",)
-PLANNED_FABRIC_MODULES = ("azazel_fabric.provisioning_contracts",)
+
+#: Fabric submodules Boot would consume but does not yet. Both arrived in the
+#: pinned tag, so this survey now reports nothing missing. They stay listed
+#: because the list is what makes an unmet requirement trackable -- and because
+#: the next consumer to be written (per-host commissioning, Azazel-Boot#9) has
+#: to reach them through this module and no other.
+PLANNED_FABRIC_MODULES = (
+    "azazel_fabric.provisioning_contracts",
+    "azazel_fabric.mio_contracts",
+)
 
 
 @dataclass(frozen=True)

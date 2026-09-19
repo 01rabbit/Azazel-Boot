@@ -187,7 +187,7 @@ Two honest qualifications:
 
 | Property | Value | Source |
 | --- | --- | --- |
-| Pin | `azazel-fabric @ git+https://github.com/01rabbit/Azazel-Fabric.git@v0.8.0` | `pyproject.toml`, `[project.optional-dependencies]` `fabric` |
+| Pin | `azazel-fabric @ git+https://github.com/01rabbit/Azazel-Fabric.git@v0.9.0rc1` — a release **candidate**: pinnable, no stability promise ([ADR-0007](adr/0007-repin-fabric-to-v0-9-0rc1.md)) | `pyproject.toml`, `[project.optional-dependencies]` `fabric` |
 | Form | an **optional extra**, never a runtime requirement; no branch pin, no submodule, no copied source | [ADR-0004](adr/0004-exact-tag-fabric-consumption.md) D1, D2 |
 | Import sites | exactly one: `src/azazel_boot/fabric_projection.py`, enforced by `tests/unit/test_boundary_static.py` | [ADR-0004](adr/0004-exact-tag-fabric-consumption.md) D3 |
 | Behavior when absent | the reported status degrades and says why; the scaffold does not crash; **no authority is granted** | [ADR-0004](adr/0004-exact-tag-fabric-consumption.md) D4 |

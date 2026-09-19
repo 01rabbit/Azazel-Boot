@@ -79,12 +79,14 @@ def test_a_projection_that_raises_is_contained(monkeypatch):
     assert projection.view is None
 
 
-def test_the_planned_provisioning_module_is_reported_absent_not_fatal():
+def test_the_planned_modules_are_present_at_the_pinned_tag():
     """Today's real state, not an invented condition.
 
     The program plan assigns Boot's provisioning records to
-    `azazel_fabric.provisioning_contracts`; the pinned tag has no such module.
-    The scaffold must say so and keep working.
+    `azazel_fabric.provisioning_contracts`. That module did not exist at the
+    previously pinned `v0.8.0` and this test asserted its absence; it exists at
+    `v0.9.0rc1` (ADR-0007), so the assertion is inverted rather than deleted.
+    The survey mechanism is unchanged — what changed is what it finds.
 
     Needs Fabric installed: with Fabric absent the projection stops at the
     first failure and never gets far enough to survey the planned modules,
@@ -94,7 +96,38 @@ def test_the_planned_provisioning_module_is_reported_absent_not_fatal():
     projection = project_status()
 
     assert "azazel_fabric.provisioning_contracts" in PLANNED_FABRIC_MODULES
-    assert "azazel_fabric.provisioning_contracts" in projection.missing_planned
+    assert projection.missing_planned == (), (
+        f"the pinned tag {FABRIC_PIN} is missing {projection.missing_planned}; "
+        "a planned module that vanished is a re-pin problem, not a scaffold one"
+    )
+
+
+def test_every_planned_module_is_importable_at_the_pinned_tag():
+    """The survey reports on import-ability, so check it directly too.
+
+    `missing_planned` being empty and the modules actually importing are two
+    claims. A survey that silently stopped finding anything would satisfy the
+    first without the second.
+    """
+    pytest.importorskip("azazel_fabric", reason="needs the optional fabric extra")
+    import importlib
+
+    for name in PLANNED_FABRIC_MODULES:
+        assert importlib.import_module(name) is not None
+
+
+def test_the_pin_is_the_first_tag_carrying_the_provisioning_contracts():
+    """Guard the reason for the pin, not only its value.
+
+    ADR-0007 re-pinned to reach `provisioning_contracts`. If a later change
+    moves the pin back to a tag without it, the commissioning work this pin
+    exists for breaks — and it should break here, loudly, rather than at the
+    point where a consumer silently loses a contract.
+    """
+    pytest.importorskip("azazel_fabric", reason="needs the optional fabric extra")
+    from azazel_fabric.provisioning_contracts import InterfaceIdentity, InterfaceIdentitySelector
+
+    assert InterfaceIdentity is not None and InterfaceIdentitySelector is not None
 
 
 def test_the_pin_is_an_exact_tag():

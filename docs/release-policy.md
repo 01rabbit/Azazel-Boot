@@ -61,8 +61,10 @@ server, or a vendor endpoint does not satisfy §5 R8 for this product.
 components rather than copying source ([ADR-0004](adr/0004-exact-tag-fabric-consumption.md);
 program plan §1, line 13). Every one of them — the Edge package, any Knowledge
 Lite bundle, any Deception package, any model, and `azazel-fabric` at exactly
-`v0.8.0` — appears in the release record by exact version and digest, each with
-its own SBOM reference.
+`v0.9.0rc1` — appears in the release record by exact version and digest, each
+with its own SBOM reference. A Boot *release* would not carry a Fabric release
+candidate; re-pinning to a stable `v0.9.0` is a precondition of one, and no Boot
+release exists.
 
 ## 3. Reproducibility
 

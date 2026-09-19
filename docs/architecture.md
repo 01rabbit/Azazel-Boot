@@ -82,17 +82,23 @@ Fabric `provisioning_contracts`, which **does not exist yet**. They are target
 contracts. Boot must not invent a local canonical shape for them in the
 meantime, and must not adopt a provisioning pin before Fabric releases one.
 
-Boot pins Azazel-Fabric at exactly `v0.8.0`
-([ADR-0004](adr/0004-exact-tag-fabric-consumption.md)): an optional extra, one
-exact tag, no branch pin, no submodule, no copied source. It is imported in
+Boot pins Azazel-Fabric at exactly `v0.9.0rc1`
+([ADR-0007](adr/0007-repin-fabric-to-v0-9-0rc1.md), superseding
+[ADR-0004](adr/0004-exact-tag-fabric-consumption.md) D1): an optional extra, one
+exact tag, no branch pin, no submodule, no copied source. A release candidate is
+an exact tag and promises no stability; Boot re-pins to `v0.9.0` when Fabric
+cuts it. It is imported in
 `src/azazel_boot/fabric_projection.py` and nowhere else, and a static test
 fails the build on a second import site.
 
-The pin is not a provisioning pin. `azazel_fabric.provisioning_contracts`, to
-which the program plan assigns Boot's `HardwareInventory`, `ResourceProfile`,
-`TopologyProfile` and `CommissioningRecord`, **does not exist at that tag**.
-Fabric's absence, or a missing submodule, degrades the reported status and
-grants nothing.
+`azazel_fabric.provisioning_contracts` — to which the program plan assigns
+Boot's `HardwareInventory`, `ResourceProfile`, `TopologyProfile` and
+`CommissioningRecord` — **exists at this tag**; it did not at `v0.8.0`, which is
+why the pin moved. **Reachable is not consumed:** no Boot code reads a NIC,
+builds an inventory, or writes a commissioning record, and
+[#9](https://github.com/01rabbit/Azazel-Boot/issues/9) remains open. Fabric's
+absence, or a missing submodule, degrades the reported status and grants
+nothing.
 
 ## 3. Capability model
 
