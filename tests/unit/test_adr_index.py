@@ -103,7 +103,7 @@ def test_each_adr_titles_itself_with_its_own_number(files) -> None:
 def test_each_adr_states_a_status(files) -> None:
     """Rule 4: an ADR never promotes status — but it must declare one."""
 
-    for number, path in files.items():
+    for path in files.values():
         head = path.read_text(encoding="utf-8").splitlines()[:12]
         assert any(line.startswith("Status:") for line in head), (
             f"{path.name} has no 'Status:' line in its first 12 lines"
