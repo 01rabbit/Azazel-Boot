@@ -19,7 +19,7 @@ repository governance. Nothing here is implemented or verified.
 | --- | --- |
 | Product code, installer, image builder | **does not exist** |
 | Python package and CLI | a **non-operational status scaffold only** — `azazel-boot status` reports what this repository is and does nothing else |
-| Azazel-Fabric pin | exact tag `v0.8.0`, consumed in one boundary module; its absence degrades the reported status and grants nothing |
+| Azazel-Fabric pin | exact tag `v0.9.0rc1` (a release candidate), consumed in one boundary module; its absence degrades the reported status and grants nothing |
 | Architecture decision records | see [docs/adr/](docs/adr/) |
 | CI | documentation links, plus static checks, unit tests and a dependency-lock check on the declared Python matrix |
 | Laptop compatibility list | **empty** — see [compatibility](docs/compatibility.md) |

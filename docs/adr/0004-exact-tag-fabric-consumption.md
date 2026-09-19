@@ -26,6 +26,14 @@ has an explicit immutable Fabric pin or image lock."
 
 Boot had none. This ADR gives it one.
 
+> **D1 superseded by [ADR-0007](0007-repin-fabric-to-v0-9-0rc1.md)
+> (2026-09-19).** The pin is now `v0.9.0rc1`, the first tag carrying
+> `provisioning_contracts`. D1's *discipline* — an exact tag, no branch, no
+> submodule, no copied source — is adopted there unchanged; only the value
+> moves. **D2, D3 and D4 stand as written** and are why the re-pin was a
+> one-line change. The record below is retained as the reasoning that produced
+> that discipline.
+
 ## Decision
 
 **D1 — The pin is exactly `v0.8.0`.** `azazel-fabric` is declared as
@@ -93,6 +101,13 @@ module observed by listing a checkout is not necessarily a module present at the
 pin, and Boot must reason about the pin.
 
 ## The absent module is the point
+
+> **Historical (2026-09-19).** This section described the state at `v0.8.0`.
+> Fabric's `v0.9.0rc1` carries `provisioning_contracts`, so the guard in D4 now
+> reports nothing missing. It is retained because it records *why* the guard
+> was built and what it was first tested against — the mechanism did not become
+> decorative, it changed what it finds. See
+> [ADR-0007](0007-repin-fabric-to-v0-9-0rc1.md).
 
 The program plan §5 R1 (line 183) assigns to `provisioning_contracts` precisely
 the records Boot needs: `HardwareInventory`, `ResourceProfile`,
