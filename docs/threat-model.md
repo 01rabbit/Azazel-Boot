@@ -156,7 +156,100 @@ of the system an attacker with transient physical access will reach for.
 | Persistence migration loses data or cannot be rolled back | Migrations are backward compatible, or require a verified pre-trial snapshot and a restore path. A failed trial restores the snapshot. |
 | Passphrase loss makes evidence unrecoverable | A documented portable passphrase and recovery path exists, especially for the `UNVERIFIED_PLATFORM` case where platform-sealed key material is unavailable. Recovery authority cannot sign ordinary field checkpoints or hide a discontinuity. |
 
-## 6. Authority and capability threats
+## 6. Per-host commissioning
+
+Boot commissions **every host, every time**
+([architecture](architecture.md) §4). That section states the discipline; this
+one states what attacks it.
+
+Commissioning is where an attacker's cheapest lie lands. Defeating a
+deterministic arbiter is hard. Making a stressed operator confirm that the
+wrong cable is the observation interface, on a laptop nobody in the room has
+seen before, is not — and it produces the same result without touching the
+arbiter at all.
+
+**Boot's version of this problem is the hardest in the program.** A Nexus is
+commissioned once, by someone who owns the machine, for an installation they
+keep, and who can compare what they see against what was there yesterday. Boot
+is carried to a laptop it has never seen: someone else's, borrowed under time
+pressure, running an unknown operating system that may already be compromised,
+possibly a different machine tomorrow and possibly the same one again with a
+different dock attached. The operator has **no baseline for this hardware and
+no way to acquire one**. Every fact commissioning records is being recorded for
+the first time, against nothing.
+
+One boundary holds throughout and is not a mitigation but a definition: an
+operator confirming a role is **confirming a fact about the hardware** — that
+this adapter is the one plugged into that port — and is not granting permission
+to act. Azazel-Edge's deterministic arbiter decides and enforces exactly what it
+decided and enforced before the confirmation. A commissioning record, an
+inventory, and an interface assignment are descriptive; none of them authorizes
+anything (§7).
+
+| Threat | Intended mitigation |
+| --- | --- |
+| An interface is presented that matches on a weak subset of its identity — a spoofed MAC, a duplicated vendor/device pair, an adapter swapped for one that answers the same way | Identification uses the **composite identity** the program plan fixes: bus path, permanent MAC, VID/PID or PCI identity, serial where present, driver/firmware, wireless PHY, and the physical label the operator recorded (program plan §5 R2). **MAC-only matching is insufficient and MUST NOT be accepted** — a MAC is software-settable, is the field an attacker on the wire can choose freely, and is the one most likely to be reused by an operator trying to be helpful. |
+| An ambiguous or absent match is treated as close enough to continue | Matching is **fail-closed**: exactly one match identifies the interface. Zero matches or more than one match return the affected capability to `COMMISSIONING_REQUIRED` and report the competing candidates (program plan §5 R2; [architecture](architecture.md) §4.2). Boot never silently rebinds and never falls back to a kernel name or a default route. |
+| A commissioned capability survives a hardware change it was never confirmed against — a USB NIC moved to another port, a dock attached or removed, a renumbered PCI slot, a driver or firmware update | "Changed NIC identity returns the affected capability to `COMMISSIONING_REQUIRED`" (program plan §5 R2 exit gate). Identity is a continuing condition, not a one-time gate at startup, for the same reason the host-storage quarantine is (§3.2). On borrowed laptops this is expected to fire routinely rather than rarely. |
+| A role is inferred from something an attacker can arrange — an interface name, carrier or link state, the presence of a default route, an autoconfigured address, or any resource measurement | Roles are assigned **only** by explicit operator confirmation against the read-only inventory, and unassigned interfaces stay unassigned and have no capability ([architecture](architecture.md) §4.3). An attacker who can make an interface *look* like the protected one gains nothing, because looking like it is not how a role is assigned. |
+| Inventory itself becomes the disclosure — the host, or a hostile network, learns Boot is present before any role exists | Inventory reads hardware and interface facts and **writes nothing**, to the network or to host storage. Before activation completes Boot transmits no frame outside a bounded, operator-selected `ASSET_ACQUISITION` state, does not associate with a wireless network, does not forward or route, does not start capture, enforcement or Deception, and runs no DHCP, router solicitation, mDNS, or LLDP ([architecture](architecture.md) §4.1; program plan §5 R2 exit gate). A laptop radio must not associate, probe, or beacon during inventory; the default is that it is down. |
+| A previous host's or previous session's commissioning is reused on a machine it was never confirmed against | A commissioning record is bound to the host that produced it **and** to the session identity. Booting the same media on a different laptop does not reuse the previous host's roles, and USB cloning creates a new node and session identity carrying no active or one-shot lease ([architecture](architecture.md) §4.4; program plan §4.5). |
+| Commissioning is re-opened on a live system to widen roles — remotely, or by software alone | The commissioning service **closes after activation**. Re-entry requires a physical local action, strong administrator authentication, a maintenance state, and explicit handling of active leases before roles can change (program plan §5 R2). A remote path into role change is not a path that exists. |
+| Rendering falls back to something plausible when a role is unassigned or its identity is ambiguous | Generated configuration is rendered from commissioned logical roles only, into disposable output, and there is **no fallback**: rendering fails and the dependent capability stays unavailable. Boot MUST NOT substitute a physical interface name, a kernel device number, a default route, or a "first available" interface for a missing role ([architecture](architecture.md) §4.5). |
+| A confirmation is treated as an authorization — the operator "approved" the interface, therefore the action is approved | A confirmed role is a fact about hardware. It is not an approval, a lease, an intent, or a decision, and it cannot become one: descriptive records are recursively stripped of command, unit, route, firewall, device-path, executor, boolean-authorization, and trust-decision fields (§7 of this document). Edge's arbiter holds the same and only authority before and after commissioning. |
+| A stressed, non-technical operator confirms a topology they do not understand | The confirmation interface must present **physically checkable facts** — what is plugged in where, in terms the operator can verify by looking at the laptop. This raises the bar on the interface; it never lowers the bar to inference. It is a genuine residual risk that the design reduces and does not eliminate (§9). |
+| The host itself is hostile and shapes what inventory sees | Not defended against, and not claimed to be (§8). Boot's guarantee runs the other way: it protects the borrowed host from Boot. What commissioning limits is what an untrustworthy host can make Boot **assume** — no role is derived from anything the host presents — and the session's platform trust class states how little can be claimed below the running system (§2). |
+
+### 6.1 What must be demonstrated before this is more than a claim
+
+None of the above is implemented. There is no inventory, no composite-identity
+matcher, no confirmation interface, no commissioning record, and no
+`COMMISSIONING_REQUIRED` state that Boot can report — the status scaffold
+reports commissioning as `absent` and every capability dimension as unassessed.
+The mitigations in this section are intended behavior in the
+[handoff §7](https://github.com/01rabbit/Azazel/blob/main/docs/roadmaps/third-party-development-handoff.md)
+sense and nothing more.
+
+Four things are unproven for reasons beyond "nobody has written it yet", and
+each is worth naming separately:
+
+1. **Boot cannot represent a commissioning record at all.** The records this
+   section depends on — `HardwareInventory`, `InterfaceAssignment`,
+   `CommissioningRecord`, `TopologyProfile` — are assigned to
+   `azazel_fabric.provisioning_contracts`, which **does not exist at Boot's
+   pinned Fabric tag** ([architecture](architecture.md) §2.2;
+   [ADR-0004](adr/0004-exact-tag-fabric-consumption.md)). Boot must not invent a
+   local shape for them in the meantime, so the fail-closed matching rule has
+   nothing to match *on* yet.
+2. **"Physically checkable facts" has no defined form.** Nothing upstream says
+   what a sufficient confirmation looks like to a non-technical responder, and
+   the program's own test of it — civil emergency exercises with non-technical
+   operators (program plan §6.7 item 8) — has never been run. The R2 exit
+   gate's first condition, that "a nontechnical operator can complete a clean
+   installation or USB startup from the written quick-start guide", is unmet in
+   the most basic way: there is no quick-start guide.
+3. **The silence requirements are measurable and unmeasured.** The R2 exit gate
+   requires that observation roles "remain Layer-3 unnumbered and transmit zero
+   DHCP, RA, mDNS, LLDP, Wi-Fi probe, or other packets through link flap,
+   resume, and driver reload tests", and the program's service objectives set
+   "zero transmitted frames during a 10-minute link/RA/DHCP/resume stress
+   interval" (program plan §8). Those are pass/fail measurements against
+   hardware. No interface has ever been observed, on any machine.
+4. **Re-entry has undefined parts.** "Strong administrator authentication" and
+   "maintenance state" are inherited terms with no Boot-local definition, and
+   the guided setup flow that would establish an administrator identity
+   (program plan §5 R2) does not exist. Until it does, the re-entry mitigation
+   describes a door with no lock specified, in a building that has not been
+   built.
+
+One consequence of the composite-identity rule deserves recording rather than
+resolving: because driver and firmware version are identity fields, an ordinary
+driver update on a borrowed laptop changes the composite identity and therefore
+returns the affected capability to `COMMISSIONING_REQUIRED`. That follows from
+the rule as written and Boot does not soften it locally. How often it fires in
+the field, and what that costs a responder mid-incident, is unmeasured.
+
+## 7. Authority and capability threats
 
 These are not media threats, but they are the ones that make a compromised
 Boot dangerous rather than merely broken.
@@ -170,7 +263,7 @@ Boot dangerous rather than merely broken.
 | A stressed operator confirms something they do not understand | The confirmation interface must present physically checkable facts. This is a genuine residual risk: the design reduces it, and does not eliminate it. |
 | Enforcement severs the path used to supervise it | Management paths are out of ordinary action scope; high-impact changes require an independent management path or a physical local console plus a two-stage commit with operator acknowledgement inside the lease window. A single-NIC laptop therefore does not get enforcement eligibility. |
 
-## 7. What Azazel-Boot explicitly does not defend against
+## 8. What Azazel-Boot explicitly does not defend against
 
 Stating these plainly is part of the threat model. A product that pretends to
 cover them is more dangerous than one that does not cover them.
@@ -211,11 +304,11 @@ cover them is more dangerous than one that does not cover them.
   specific laptop, and a failure on an unqualified machine is not a defect
   against a promise that was never made.
 
-## 8. Residual risk this document does not resolve
+## 9. Residual risk this document does not resolve
 
 - Every mitigation above is unimplemented. The gap between this document and a
   running system is the entire product.
-- The non-technical-operator confirmation problem (§6) is reduced by design and
+- The non-technical-operator confirmation problem (§7) is reduced by design and
   not eliminated by it.
 - `UNVERIFIED_PLATFORM` is expected to be the common case in civil emergency
   use. The product must remain useful there while making weaker claims, and the

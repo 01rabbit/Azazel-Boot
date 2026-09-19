@@ -115,12 +115,17 @@ diverge silently.
 - Run them locally before pushing:
 
   ```bash
-  python3 tools/check_docs_links.py
+  python3 tools/check_docs_links.py                    # standard library only
+  pip install -c constraints-dev.txt -e ".[dev]"      # needed by the two below
   ruff check src tests tools
   python -m pytest tests -q
   ```
 
-  It needs only Python 3.9+ from the standard library.
+  Only the link check is standard-library-only. `ruff` and `pytest` come from
+  the locked development extra, and installing it requires **Python 3.11 or
+  newer** — `pyproject.toml` declares `requires-python = ">=3.11"` and pip
+  refuses the install below it. The versions CI actually exercises are listed
+  in the [support matrix](docs/support-matrix.md).
 - If you add a document, link it from `README.md`. An unreferenced document
   drifts.
 - State explicitly, in the PR body, what your change does **not** establish.

@@ -38,7 +38,7 @@ to re-derive it.
 > — program plan §6.7 item 2 (line 468), emphasis added
 
 §6.7 item 9 (line 475) lists "immutable A/B slots" among the properties Boot
-must enforce, and §11's cross-product table (line 626) records Boot's
+must enforce, and §12's cross-product table (line 626) records Boot's
 update/recovery unit as "image/persistence" — the image and the persistence are
 updated and recovered as separate things.
 

@@ -83,13 +83,22 @@ that is the correct outcome.
   commissioning, and what Boot deliberately does not inherit.
 - [Threat model](docs/threat-model.md) — removable-media trust classes,
   initramfs host-storage quarantine, surprise removal, persistence tampering,
-  and the attackers Boot does not defend against.
+  per-host commissioning, and the attackers Boot does not defend against.
 - [Compatibility](docs/compatibility.md) — the shape of the laptop
   compatibility envelope, and why its hardware list is empty.
 - [Architecture decision records](docs/adr/) — what is decided, what merely
   records a program-level decision, and what is deliberately still open.
 - [Release policy](docs/release-policy.md) — what a release will have to carry,
   what a signature does and does not attest, and why none of it exists yet.
+- [Support matrix](docs/support-matrix.md) — what a release will be able to say
+  it supports; the hardware list is empty, firmware and Secure Boot are
+  undeclared, and the only checkable rows describe the status scaffold.
+- [Update channel](docs/update-channel.md) — why an update to removable media is
+  a media rewrite or a new medium rather than a service update, why the offline
+  path matters more than the online one, and why no channel exists.
+- [Recovery](docs/recovery.md) — surprise removal, failed updates and power loss,
+  what leaving the host as found does and does not cover, and what survives a
+  failed session.
 - [Security policy](SECURITY.md) · [Contributing](CONTRIBUTING.md)
 
 ## Program context
