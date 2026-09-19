@@ -230,7 +230,7 @@ only through an explicitly selected, explicitly approved, per-session export
 target, and that approval is recorded. Persistence and export are encrypted, so
 theft of the medium must not yield plaintext evidence
 ([threat model](threat-model.md) §2.1); what encryption does not protect is
-availability of the only copy ([threat model](threat-model.md) §8).
+availability of the only copy ([threat model](threat-model.md) §9).
 
 ## 9. Recovery has to be executable by someone who did not build the system
 
@@ -248,7 +248,7 @@ installation:
   stress, on hardware they have never seen. A confirmation interface must
   present physically checkable facts — what is plugged in where, in terms the
   operator can verify by looking at the laptop. That reduces the residual risk
-  in [threat model](threat-model.md) §9 and does not eliminate it, and no
+  in [threat model](threat-model.md) §10 and does not eliminate it, and no
   recovery procedure written here may assume it does.
 
 There is no such procedure to run today. There is no offline medium to run it

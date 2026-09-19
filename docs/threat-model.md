@@ -197,8 +197,8 @@ anything (§7).
 | Commissioning is re-opened on a live system to widen roles — remotely, or by software alone | The commissioning service **closes after activation**. Re-entry requires a physical local action, strong administrator authentication, a maintenance state, and explicit handling of active leases before roles can change (program plan §5 R2). A remote path into role change is not a path that exists. |
 | Rendering falls back to something plausible when a role is unassigned or its identity is ambiguous | Generated configuration is rendered from commissioned logical roles only, into disposable output, and there is **no fallback**: rendering fails and the dependent capability stays unavailable. Boot MUST NOT substitute a physical interface name, a kernel device number, a default route, or a "first available" interface for a missing role ([architecture](architecture.md) §4.5). |
 | A confirmation is treated as an authorization — the operator "approved" the interface, therefore the action is approved | A confirmed role is a fact about hardware. It is not an approval, a lease, an intent, or a decision, and it cannot become one: descriptive records are recursively stripped of command, unit, route, firewall, device-path, executor, boolean-authorization, and trust-decision fields (§7 of this document). Edge's arbiter holds the same and only authority before and after commissioning. |
-| A stressed, non-technical operator confirms a topology they do not understand | The confirmation interface must present **physically checkable facts** — what is plugged in where, in terms the operator can verify by looking at the laptop. This raises the bar on the interface; it never lowers the bar to inference. It is a genuine residual risk that the design reduces and does not eliminate (§9). |
-| The host itself is hostile and shapes what inventory sees | Not defended against, and not claimed to be (§8). Boot's guarantee runs the other way: it protects the borrowed host from Boot. What commissioning limits is what an untrustworthy host can make Boot **assume** — no role is derived from anything the host presents — and the session's platform trust class states how little can be claimed below the running system (§2). |
+| A stressed, non-technical operator confirms a topology they do not understand | The confirmation interface must present **physically checkable facts** — what is plugged in where, in terms the operator can verify by looking at the laptop. This raises the bar on the interface; it never lowers the bar to inference. It is a genuine residual risk that the design reduces and does not eliminate (§10). |
+| The host itself is hostile and shapes what inventory sees | Not defended against, and not claimed to be (§9). Boot's guarantee runs the other way: it protects the borrowed host from Boot. What commissioning limits is what an untrustworthy host can make Boot **assume** — no role is derived from anything the host presents — and the session's platform trust class states how little can be claimed below the running system (§2). |
 
 ### 6.1 What must be demonstrated before this is more than a claim
 
@@ -263,7 +263,30 @@ Boot dangerous rather than merely broken.
 | A stressed operator confirms something they do not understand | The confirmation interface must present physically checkable facts. This is a genuine residual risk: the design reduces it, and does not eliminate it. |
 | Enforcement severs the path used to supervise it | Management paths are out of ordinary action scope; high-impact changes require an independent management path or a physical local console plus a two-stage commit with operator acknowledgement inside the lease window. A single-NIC laptop therefore does not get enforcement eligibility. |
 
-## 8. What Azazel-Boot explicitly does not defend against
+## 8. Update promotion: what each wrong answer costs
+
+A trial boot that is promoted when it should not be, or held back when it
+should not be, is a threat to the responder rather than to the media. The two
+are not symmetric, and [ADR-0006](adr/0006-trial-boot-health-confirmation.md)
+decides the health check from that asymmetry.
+
+| Wrong answer | What the responder is left holding | Recoverable in the field? | Consequence for the design |
+| --- | --- | --- | --- |
+| **False promote** — a broken generation becomes default | No working system. The A/B fallback fired during the trial and was consumed, so the next boot lands on the broken generation again. | **No.** Recovery needs a second machine, a network, or an expert — the three things §1 assumes are absent. | Every health signal is a positive assertion, and anything that cannot be evaluated counts as a failure. |
+| **False fallback** — a healthy generation is not promoted | The previous generation, which was the running one and is therefore known to boot. An older Boot, not a dead laptop. | **Yes**, trivially: they are working. The update is re-offered later. | Fallback is the safe direction, so the check is allowed to be strict — provided the signals are ones a healthy generation produces every time. |
+| **A promote that cannot be recorded** | Boot metadata that describes neither generation coherently. | Depends entirely on the redundant-copy design, which is open ([ADR-0003](adr/0003-immutable-ab-update.md) D4). | The trial fails if the promotion record cannot be written and read back (ADR-0006 H5), before it can reach that state. |
+
+The specific threat this rules out is an update path that silently drops the
+host-storage quarantine of §3. A generation that boots but does not quarantine
+would damage the borrowed laptop through the mechanism meant to protect it, so
+the quarantine being established **and having held** are promotion conditions
+(ADR-0006 H2 and H3), not merely runtime properties.
+
+Residual risk: the 300-second window and the single attempt are values chosen
+against a program target that has never been measured on real hardware. Both
+can be wrong in the stranding direction, and neither has been tested.
+
+## 9. What Azazel-Boot explicitly does not defend against
 
 Stating these plainly is part of the threat model. A product that pretends to
 cover them is more dangerous than one that does not cover them.
@@ -304,7 +327,7 @@ cover them is more dangerous than one that does not cover them.
   specific laptop, and a failure on an unqualified machine is not a defect
   against a promise that was never made.
 
-## 9. Residual risk this document does not resolve
+## 10. Residual risk this document does not resolve
 
 - Every mitigation above is unimplemented. The gap between this document and a
   running system is the entire product.
