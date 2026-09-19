@@ -1,0 +1,5 @@
+# Exact development dependency set. CI installs with this as a constraint and
+# then verifies the resolved versions match, so a transitive bump cannot change
+# what the checks ran against without the change appearing in this file.
+pytest==8.3.4
+ruff==0.8.4

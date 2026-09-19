@@ -18,10 +18,10 @@ repository governance. Nothing here is implemented or verified.
 | Fact | State |
 | --- | --- |
 | Product code, installer, image builder | **does not exist** |
-| Python package, CLI, dependency manifest, lockfile | **does not exist** |
-| Azazel-Fabric pin | **not adopted** — no pin, no submodule, no copied source |
-| Architecture decision records | **not written** |
-| CI | a documentation internal-link check only; there are no tests to run |
+| Python package and CLI | a **non-operational status scaffold only** — `azazel-boot status` reports what this repository is and does nothing else |
+| Azazel-Fabric pin | exact tag `v0.8.0`, consumed in one boundary module; its absence degrades the reported status and grants nothing |
+| Architecture decision records | see [docs/adr/](docs/adr/) |
+| CI | documentation links, plus static checks, unit tests and a dependency-lock check on the declared Python matrix |
 | Laptop compatibility list | **empty** — see [compatibility](docs/compatibility.md) |
 | Hardware, boot, or no-host-write evidence | **none** |
 
@@ -86,6 +86,10 @@ that is the correct outcome.
   and the attackers Boot does not defend against.
 - [Compatibility](docs/compatibility.md) — the shape of the laptop
   compatibility envelope, and why its hardware list is empty.
+- [Architecture decision records](docs/adr/) — what is decided, what merely
+  records a program-level decision, and what is deliberately still open.
+- [Release policy](docs/release-policy.md) — what a release will have to carry,
+  what a signature does and does not attest, and why none of it exists yet.
 - [Security policy](SECURITY.md) · [Contributing](CONTRIBUTING.md)
 
 ## Program context

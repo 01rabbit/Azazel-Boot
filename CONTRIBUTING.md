@@ -16,10 +16,13 @@ achieves.
 
 ## This is a documentation-stage repository
 
-There is no product code, no package, no dependency manifest, no Fabric pin,
-and no image builder. Nothing is implemented or verified. Contributions today
-are documentation, governance, and the small stdlib-only tooling that checks
-them.
+There is no operational product code and no image builder. What exists is a
+**non-operational status scaffold** — a package that reports what this
+repository is, a guarded Azazel-Fabric boundary, and the tests and CI that hold
+both to their claims (issue #1). Nothing is implemented or verified in the
+sense of doing the product's job: `status.BootStatus.is_operational()` returns
+False by construction, and `tests/unit/test_boundary_static.py` fails the build
+if the package acquires a network, process or host-storage surface.
 
 That constrains what a pull request may claim. Write in the series status
 vocabulary from the
@@ -72,11 +75,21 @@ as current product authority.
 - **Do not let RAM enable anything.** Resource capacity selects an envelope.
   Capture, enforcement, and Deception additionally require topology, verified
   assets, and current trust, evaluated independently and intersected.
-- **Do not add a dependency.** A stdlib-only `tools/` script is fine. Anything
-  beyond that requires a dependency manifest and a recorded decision, neither
-  of which exists yet.
-- **Do not add a Fabric pin, package layout, or CI test job casually.** Each is
-  a program-level commitment tracked by issue #1 and the R0 exit criteria.
+- **Do not add a runtime dependency.** The scaffold is stdlib-only and must
+  stay that way: it has to stand on a machine where nothing optional is
+  installed. `azazel-fabric` is an **optional extra** pinned to an exact tag
+  (ADR-0004) and may be imported in `src/azazel_boot/fabric_projection.py`
+  alone; a static test fails the build on a second import site. A new
+  development dependency goes in `constraints-dev.txt` with an exact version,
+  and CI verifies the installed set against it.
+- **Do not add operational code.** No network, enforcement, installer,
+  model-fetch or container activation, per issue #1's last acceptance
+  criterion. This is enforced, not merely asked for.
+- **Do not name a laptop anywhere in this repository** until it has a ratified
+  compatibility row ([ADR-0001](docs/adr/0001-x86_64-uefi-compatibility.md) D7).
+  Not as a candidate, a target, an example, or in an issue or commit message. A
+  reader who sees their machine named will try it, and no machine has been
+  tested.
 
 ## Branch naming
 
@@ -95,11 +108,16 @@ diverge silently.
 ## Pull request rules
 
 - 1 PR = 1 purpose.
-- CI passes. Today that is one job: the documentation internal-link check.
-- Run it locally before pushing:
+- CI passes. That is the documentation internal-link check, plus static checks,
+  unit tests and a dependency-lock check on the declared Python matrix, plus a
+  job that installs the `fabric` extra so the projection's success path is
+  actually exercised rather than skipped.
+- Run them locally before pushing:
 
   ```bash
   python3 tools/check_docs_links.py
+  ruff check src tests tools
+  python -m pytest tests -q
   ```
 
   It needs only Python 3.9+ from the standard library.
