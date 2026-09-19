@@ -78,9 +78,17 @@ Fabric model.
 The provisioning records Boot needs — `HardwareInventory`, `ResourceProfile`,
 `TopologyProfile`, `InterfaceAssignment`, `CommissioningRecord`,
 `ProductManifest`, `AssetManifest`, `CompatibilityManifest` — are assigned to
-Fabric `provisioning_contracts`, which **does not exist yet**. They are target
-contracts. Boot must not invent a local canonical shape for them in the
-meantime, and must not adopt a provisioning pin before Fabric releases one.
+Fabric `provisioning_contracts`, which **exists at the pinned tag**
+([ADR-0007](adr/0007-repin-fabric-to-v0-9-0rc1.md)). Boot still must not invent
+a local canonical shape for any of them.
+
+`azazel_boot.inventory` therefore produces **plain observations, not a
+canonical record**: composite identity fields as read, with no schema version,
+no digest, and no claim to be a `HardwareInventory`. Turning observations into
+Fabric's records happens in `fabric_projection.py`, the one module permitted to
+import Fabric, and Fabric's own `resolve_interface_assignment` is what resolves
+an assignment — Boot does not reimplement the matching rule that fails closed
+on zero or multiple matches.
 
 Boot pins Azazel-Fabric at exactly `v0.9.0rc1`
 ([ADR-0007](adr/0007-repin-fabric-to-v0-9-0rc1.md), superseding
