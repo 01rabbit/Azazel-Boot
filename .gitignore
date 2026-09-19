@@ -1,0 +1,20 @@
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.coverage
+htmlcov/
+
+# Local scratch and media-build outputs. Nothing here is a release artifact.
+var/
+out/
+secrets/
+*.img
+*.iso
