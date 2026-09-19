@@ -59,7 +59,7 @@ for a support claim.
 | --- | --- | --- |
 | Instruction set | `x86_64` | R0 baseline product definition; [compatibility](compatibility.md) §2 |
 | Specific machines | **none** | [compatibility](compatibility.md) §4 is empty; [ADR-0001](adr/0001-x86_64-uefi-compatibility.md) D3 |
-| Firmware and boot mode | **undeclared** — see §3 | [ADR-0001](adr/0001-x86_64-uefi-compatibility.md) |
+| Firmware and boot mode | **UEFI assumed; Secure Boot enabled is the target** — frame decided, per-machine state unmeasured; see §3 | program plan §15 OF-03; [ADR-0005](adr/0005-uefi-secure-boot-posture.md) |
 | Media | removable USB SSD | product definition; [compatibility](compatibility.md) §2 |
 | Internal host storage | quarantined from initramfs entry; never a default write target | [threat model](threat-model.md) §3 |
 | Qualification granularity | per system **and** per firmware version | [ADR-0001](adr/0001-x86_64-uefi-compatibility.md) D2 |
@@ -79,47 +79,78 @@ section and are why it names nothing:
 `x86_64` is necessary and inherited. It is not sufficient, and it is the only
 hardware property Boot has ever declared.
 
-## 3. Firmware, boot mode, and Secure Boot — undeclared
+## 3. Firmware, boot mode, and Secure Boot — the frame is decided, the machine is not
 
-This is the row a reader most wants filled in, and it is empty on purpose.
+This is the row a reader most wants filled in. Three of its four questions were
+answered on 2026-09-19; one was not, and is left alone rather than forced.
 
-**The program plan does not decide the boot path.** It contains no occurrence of
-`UEFI`, `Secure Boot`, `CSM`, or `legacy BIOS`
-([ADR-0001](adr/0001-x86_64-uefi-compatibility.md), "Not decided above this
-repository"). Boot has not decided it either:
-[compatibility](compatibility.md) §2 records the firmware row as "boot path
-**not yet decided**", and ADR-0001 explicitly does not establish "that the
-firmware boot path is UEFI-only, that Secure Boot is required, permitted, or
-irrelevant, or that a non-UEFI path is excluded".
+**The program plan now decides the boot path.** It did not when §2's sources and
+[ADR-0001](adr/0001-x86_64-uefi-compatibility.md) were written: the plan
+contained no occurrence of `UEFI`, `Secure Boot`, `CSM`, or `legacy BIOS`, which
+is the gap Nexus and Boot each hit while writing these matrices. It was raised
+as program finding **OF-03** and resolved the same day by owner decision
+(program plan §15, `### OF-03`; restated as a blockquote in §5 R2). Boot adopts
+the result in [ADR-0005](adr/0005-uefi-secure-boot-posture.md). Quoted, not
+paraphrased:
+
+> 1. "**Booting with Secure Boot enabled is the target**, via the standard signed
+>    chain: a Microsoft-UEFI-CA-signed `shim` as the first stage, which verifies
+>    the next stage against a certificate embedded in the shim itself. This is how
+>    mainstream Linux live media already boot on Secure Boot machines. UEFI is the
+>    assumed boot path."
+> 2. "**Disabling Secure Boot is a fallback, never the default**, and it is
+>    permitted only with the machine owner's explicit agreement, only after the
+>    location of the host's disk-encryption recovery key has been established, and
+>    it must be restored at the end of the session."
+> 3. "**Enrolling a product key into the host (MOK) is not adopted.** It writes a
+>    key into someone else's firmware and survives the session."
+> 4. "**A qualified hardware entry records the Secure Boot state that was
+>    observed**… No product declares Secure Boot support for a machine nobody has
+>    tested."
 
 So this matrix declares:
 
 | Question | State |
 | --- | --- |
-| Is UEFI required, assumed, or supported? | **undeclared** |
-| Is a non-UEFI or legacy path excluded? | **undeclared** |
-| Is Secure Boot required, supported, tolerated, or incompatible? | **undeclared** |
-| Is shim, key enrollment, or a vendor signature in scope? | **undeclared** |
-| Does firmware verification give a stronger claim where it exists? | **yes, and that much is decided** — "use firmware verification where the supported hardware permits" (program plan §6.7 item 2), expressed as the three trust classes in [threat model](threat-model.md) §2 |
+| Is UEFI required, assumed, or supported? | **assumed** — "UEFI is the assumed boot path" (program plan §15 OF-03, item 1). Assumed is not tested and not supported: no machine has been booted |
+| Is a non-UEFI or legacy path excluded? | **still undeclared** — the frame states an assumption, not an exclusion, and says nothing about `CSM` or legacy BIOS. Boot does not convert the assumption into a prohibition covering machines nobody has tested |
+| Is Secure Boot required, supported, tolerated, or incompatible? | **enabled is the target**, through the signed shim chain (item 1). Disabling it is "a fallback, never the default", permitted only with the machine owner's explicit agreement, only after the location of the host's disk-encryption recovery key has been established, and restored at the end of the session (item 2). Nothing is declared *supported*: the state is measured per machine (item 4) |
+| Is shim, key enrollment, or a vendor signature in scope? | **shim yes, vendor signature yes, enrolling a key into a host no.** The first stage is "a Microsoft-UEFI-CA-signed `shim`… which verifies the next stage against a certificate embedded in the shim itself" (item 1); "**Enrolling a product key into the host (MOK) is not adopted**" (item 3) |
+| Does firmware verification give a stronger claim where it exists? | **yes, and that much was already decided** — "use firmware verification where the supported hardware permits" (program plan §6.7 item 2), expressed as the three trust classes in [threat model](threat-model.md) §2. OF-03 does not change them |
 
-The distinction is worth holding: the *trust classes* are decided, the *boot
-path* is not. A platform that verifies the media reaches `VERIFIED_FIRMWARE`
+The fourth row is a build requirement before it is a boot requirement: the
+image "must carry a signed shim and a chain that shim will verify, which in
+practice means building on a distribution whose shim and kernel signatures are
+already trusted, or completing shim review for a self-signed chain" (program
+plan §15 OF-03). No builder is selected —
+[ADR-0002](adr/0002-image-builder.md) is still open — and this constrains that
+selection rather than making it ([ADR-0005](adr/0005-uefi-secure-boot-posture.md)
+D6).
+
+The distinction is still worth holding, in both directions: the *trust classes*
+and the *boot path* are different questions, and deciding the second did not
+decide the first. A platform that verifies the media reaches `VERIFIED_FIRMWARE`
 and may claim integrity anchored below the operating system; a platform that
-does not reaches `EXTERNALLY_VERIFIED_MEDIA` or `UNVERIFIED_PLATFORM` and
-claims correspondingly less. None of that requires deciding in advance which
-firmware interface the image boots through.
+does not reaches `EXTERNALLY_VERIFIED_MEDIA` or `UNVERIFIED_PLATFORM` and claims
+correspondingly less. A machine that boots the shim chain has not thereby
+demonstrated a trust class, and a trust class is not a boot-path claim.
 
-**Why an undeclared row is the right answer rather than a gap.** Boot's
-operator is on borrowed hardware and **does not control the host's firmware
-settings**. They may not have the password, may not be permitted to change a
-setting on a clinic's or a city office's machine, and may be holding a laptop
-whose owner is standing next to them. A support claim about Secure Boot state
-is therefore a claim about what the operator will be *allowed* to do on a
-machine nobody has tested — the least evidenced and most consequential kind of
-guess this repository could make. [Compatibility](compatibility.md) §3.3
-already requires a qualified entry to record "firmware settings required to
-reach the media… including Secure Boot state" as a **measurement**. That field
-is filled in by a test, not by this document.
+**Why the per-machine state stays a measurement rather than a support row.**
+Boot's operator is on borrowed hardware and **does not control the host's
+firmware settings**. They may not have the password, may not be permitted to
+change a setting on a clinic's or a city office's machine, and may be holding a
+laptop whose owner is standing next to them. That is also why item 2 is hedged
+the way it is, and the reason has to travel with it: Windows BitLocker with a
+TPM protector is by default sealed against a PCR that measures the Secure Boot
+state, so turning Secure Boot off changes that measurement, the TPM does not
+release the key, and the next Windows boot demands the recovery key.
+**Booting from USB does not by itself do this — only changing the Secure Boot
+state does.** "Put the USB first and turn Secure Boot off" is two actions with
+very different risk profiles, and a reader who collapses them into one may take
+a clinic's data away from it. [Compatibility](compatibility.md) §3.3 already
+requires a qualified entry to record "firmware settings required to reach the
+media… including Secure Boot state" as a **measurement**. That field is filled
+in by a test, not by this document.
 
 Until then, an operator asking "will it boot on this laptop?" gets the honest
 answer: unknown, on every machine, in every firmware configuration.
@@ -222,9 +253,13 @@ separate report of any firmware NVRAM change — and then owner ratification of
 the row ([ADR-0001](adr/0001-x86_64-uefi-compatibility.md) D3). Evidence first,
 ratification second, and neither substitutes for the other.
 
-For the firmware and Secure Boot rows in §3, either a program-level statement
-to cite or the first ratified entry's measured boot path, whichever comes
-first, in an ADR of its own.
+For the firmware and Secure Boot rows in §3, the program-level statement arrived
+first (program plan §15 OF-03) and is recorded in an ADR of its own
+([ADR-0005](adr/0005-uefi-secure-boot-posture.md)). What is still outstanding is
+evidence: the first ratified entry's **measured** Secure Boot state
+([compatibility](compatibility.md) §3.3), which is also what would let the one
+row still marked undeclared — whether a non-UEFI or legacy path is excluded — be
+answered on something other than a guess.
 
 For the runtime rows in §4, nothing — they are already true, and they are also
 already the least interesting thing in this document.
@@ -235,9 +270,14 @@ already the least interesting thing in this document.
 - That Azazel-Boot boots. No boot has ever been attempted on any machine.
 - That the empty hardware table will ever have a row. That depends on a test
   program, hardware, and an owner decision, none of which exists.
-- That UEFI, Secure Boot, or any firmware configuration is supported,
-  required, or excluded. All four rows in §3 are undeclared, and this document
-  does not decide them.
+- That UEFI, Secure Boot, or any firmware configuration is supported on any
+  machine. §3 records a decided frame — UEFI assumed, Secure Boot enabled the
+  target — and not one measurement; whether a non-UEFI or legacy path is
+  excluded is still undeclared, and this document does not decide it.
+- Anything about the industry transition away from the expiring Microsoft UEFI
+  CA 2011 certificate. The program plan requires that be checked against
+  firmware in hand rather than assumed, and no firmware has been in anyone's
+  hand.
 - That the declared Python matrix says anything about the product. It describes
   a package that reports the product's absence.
 - That the Fabric pin gives Boot a validated provisioning record. The module
