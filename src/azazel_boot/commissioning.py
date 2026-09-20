@@ -25,9 +25,54 @@ from enum import Enum
 
 from azazel_boot.inventory import InterfaceObservation
 
-#: Roles an operator may confirm. Boot holds no role until one is confirmed,
-#: and `OBSERVE` is the only one a single-interface host can ever reach.
-ROLES = ("observe", "internal", "external", "management", "capture", "decoy")
+#: Azazel-Fabric's registered interface roles, mirrored locally.
+#:
+#: Named here rather than imported because commissioning is a CORE path and
+#: `azazel_fabric` reaches this repository only through one boundary module
+#: (ADR-0004 D3). `tests/unit/test_commissioning.py` pins this tuple against
+#: `azazel_fabric.provisioning_contracts.INTERFACE_ROLES`, so the mirror cannot
+#: drift from what it mirrors without going red.
+#:
+#: **This list replaced a Boot-local one**, and the correction is recorded
+#: rather than quietly applied. Boot held
+#: ``("observe", "internal", "external", "management", "capture", "decoy")``
+#: while Fabric registered the five below and Azazel-Nexus documented a third
+#: set. `management` was the only value all three shared, and two pairs were
+#: near-misses that read as agreement -- `observe`/`observation`,
+#: `decoy`/`deception_bridge`. A near-miss survives review; a clean difference
+#: does not.
+#:
+#: The old list mixed two questions:
+#:
+#: *What does the node do on this interface?* -- observation, management,
+#: deception bridging, asset acquisition. That is the **role**, it is what
+#: another product needs to know, and it is what Fabric registers.
+#:
+#: *Which side of the boundary does this interface face?* -- `internal`,
+#: `external`. That is **topology**, it is Boot's own, and it never crosses a
+#: product boundary as a role. It is not represented here at all: Boot assigns
+#: no zone today, and inventing a second local vocabulary to hold one would
+#: repeat the mistake this change is correcting.
+#:
+#: One distinction was **lost, deliberately**: `observe` and `capture` both map
+#: onto `observation`. Boot never said how they differed, and an interface
+#: commissioned to watch a segment without transmitting is the same interface
+#: either way. Keeping two words for one function is how a vocabulary starts
+#: meaning different things to different readers.
+INTERFACE_ROLES = (
+    "asset_acquisition",
+    "deception_bridge",
+    "management",
+    "observation",
+    "unassigned",
+)
+
+#: Of those, the ones an operator may actually confirm against an interface.
+#:
+#: `unassigned` is not offered because it is not a confirmation: it is what an
+#: interface is when no operator has confirmed anything, which is Boot's
+#: starting state and needs no one's agreement.
+ROLES = tuple(role for role in INTERFACE_ROLES if role != "unassigned")
 
 
 class CommissioningState(str, Enum):
@@ -174,7 +219,7 @@ def assess(observations: tuple[InterfaceObservation, ...]) -> Assessment:
             state=CommissioningState.OBSERVE_ONLY,
             reasons=tuple(reasons),
             commissionable_keys=keys,
-            offerable_roles=("observe",),
+            offerable_roles=("observation",),
         )
 
     reasons.append(

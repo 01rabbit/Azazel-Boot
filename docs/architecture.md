@@ -268,15 +268,43 @@ moved between ports, a docking station, and a driver difference between two
 otherwise identical machines all change the composite identity. Each returns
 the affected capability to `COMMISSIONING_REQUIRED` rather than guessing.
 
-### 4.3 Roles come from the operator
+### 4.3 Roles come from the operator, and the vocabulary is Fabric's
 
-Logical roles are `protected`, `observation`, `management`, `decoy`, and
-`egress/module`. A role is assigned only by explicit operator confirmation
-against the inventory.
+Logical roles are Azazel-Fabric's registered set: `asset_acquisition`,
+`deception_bridge`, `management`, `observation`, and `unassigned`
+(`azazel_fabric.provisioning_contracts.INTERFACE_ROLES`). An operator may
+confirm any of them except `unassigned`, which is what an interface is before
+anyone confirms anything. `azazel_boot.commissioning` mirrors the list locally
+because commissioning is a CORE path and Fabric reaches this repository through
+one boundary module only (ADR-0004 D3); a test pins the mirror against Fabric's
+list.
 
-Boot MUST NOT infer a role from an interface name, carrier or link state, the
-presence of a default route, an autoconfigured address, or any resource
-measurement. Unassigned interfaces stay unassigned and have no capability.
+**This paragraph previously named a different set**, and the correction is
+recorded rather than quietly applied. It read `protected`, `observation`,
+`management`, `decoy`, `egress/module` — which was not what this repository's
+own code held either. There were four lists in play: Fabric's, this document's,
+`commissioning.py`'s (`observe`, `internal`, `external`, `management`,
+`capture`, `decoy`), and Azazel-Nexus's. **`management` was the only value all
+four shared**, and no product consumed Fabric's list, so nothing had ever
+compared them.
+
+The old lists mixed two questions. *What does the node do on this interface?*
+is the **role**: it is what another product needs to know, and it is what
+Fabric registers. *Which side of the boundary does this interface face?* —
+`protected`, `internal`, `external`, `egress` — is **topology**: it is Boot's
+own, and it never crosses a product boundary as a role. Boot assigns no zone
+today and does not name one; inventing a second local vocabulary to hold one
+would repeat the mistake.
+
+One distinction was lost deliberately: `observe` and `capture` both become
+`observation`. Boot never said how they differed, and an interface commissioned
+to watch a segment without transmitting is the same interface either way.
+
+A role is assigned only by explicit operator confirmation against the
+inventory. Boot MUST NOT infer one from an interface name, carrier or link
+state, the presence of a default route, an autoconfigured address, or any
+resource measurement. Unassigned interfaces stay unassigned and have no
+capability.
 
 The operator here may be a non-technical civil responder under stress. That
 raises the bar on the confirmation interface — it must show what is physically

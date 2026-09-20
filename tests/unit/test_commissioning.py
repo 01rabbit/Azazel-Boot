@@ -7,6 +7,9 @@ about what is refused and what an operator would still have to settle.
 
 from __future__ import annotations
 
+import ast
+from pathlib import Path
+
 import pytest
 from conftest import mac_reader
 
@@ -68,7 +71,7 @@ def test_a_single_interface_host_is_observe_only_by_intent(sysfs_single_nic):
     assessment = assess(observations)
 
     assert assessment.state is CommissioningState.OBSERVE_ONLY
-    assert assessment.offerable_roles == ("observe",)
+    assert assessment.offerable_roles == ("observation",)
     assert len(assessment.commissionable_keys) == 1
     assert any("intended outcome, not a defect" in r for r in assessment.reasons)
 
@@ -160,3 +163,126 @@ def test_the_assessment_is_deterministic(sysfs_two_nics):
     first = assess(_observe(sysfs_two_nics, TWO_NIC_MACS))
     second = assess(_observe(sysfs_two_nics, TWO_NIC_MACS))
     assert first == second
+
+
+def _string_values(path: Path) -> set[str]:
+    """Every string this module *uses*, excluding prose.
+
+    Comments and docstrings are skipped on purpose. Naming a retired word in
+    order to record that it is retired is the opposite of using it, and a scan
+    that could not tell the difference would push the correction's own
+    explanation out of the file.
+    """
+
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    docstrings = {
+        id(node.body[0].value)
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.body
+        and isinstance(node.body[0], ast.Expr)
+        and isinstance(node.body[0].value, ast.Constant)
+        and isinstance(node.body[0].value.value, str)
+    }
+    return {
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and id(node) not in docstrings
+    }
+
+# --------------------------------------------------------------------------
+# The role vocabulary is Fabric's, and stays Fabric's
+# --------------------------------------------------------------------------
+
+
+#: What Boot held before adopting Fabric's list, copied literally.
+#:
+#: Kept so the correction stays legible rather than becoming invisible the
+#: moment it is made. Boot, Fabric and Azazel-Nexus each had a different list;
+#: `management` was the only value all three shared.
+RETIRED_BOOT_ROLES = ("observe", "internal", "external", "management", "capture", "decoy")
+
+#: Of those, the ones that actually went away. `management` did not: all three
+#: vocabularies agree on it, so it is still a value this package uses.
+#:
+#: Filtered here rather than skipped inside the test. A skip that fires on
+#: every run is a filter written in the wrong place -- and this repository's
+#: CI refuses a run in which any test skipped, so the wrong place would have
+#: been a red build.
+RETIRED_AND_GONE = tuple(role for role in RETIRED_BOOT_ROLES if role != "management")
+
+
+def test_the_role_mirror_still_matches_fabrics_registered_list():
+    """Two statements of one list; this is what keeps them the same one.
+
+    `commissioning.py` cannot import Fabric -- it is a CORE path and Fabric
+    reaches this repository through one boundary module only (ADR-0004 D3) --
+    so it names the roles itself. That is the shape that drifts, so that is the
+    shape that gets a test.
+
+    It skips without the optional extra, which is correct for a contributor
+    with no network and useless as a gate; CI installs the extra.
+    """
+
+    pytest.importorskip(
+        "azazel_fabric",
+        reason="the Fabric extra is optional; commissioning must work without it",
+    )
+    from azazel_fabric.provisioning_contracts import INTERFACE_ROLES as FABRIC_ROLES
+
+    from azazel_boot.commissioning import INTERFACE_ROLES
+
+    assert INTERFACE_ROLES == FABRIC_ROLES
+
+
+def test_unassigned_is_never_offered_as_something_to_confirm():
+    """It is what an interface is before anyone confirms anything.
+
+    Offering it would make "no role" a thing an operator actively chooses, and
+    Boot's starting state would then depend on someone having chosen it.
+    """
+
+    from azazel_boot.commissioning import INTERFACE_ROLES, ROLES
+
+    assert "unassigned" in INTERFACE_ROLES
+    assert "unassigned" not in ROLES
+    assert set(ROLES) == set(INTERFACE_ROLES) - {"unassigned"}
+
+
+@pytest.mark.parametrize("retired", RETIRED_AND_GONE)
+def test_no_retired_boot_role_word_survives_in_the_package(retired):
+    """The near-misses are the dangerous ones.
+
+    `observe` against `observation`, `decoy` against `deception_bridge`: both
+    read as agreement to anyone skimming, and a reader who saw one and expected
+    the other would not notice.
+    """
+
+    package = Path(__file__).resolve().parents[2] / "src" / "azazel_boot"
+    offenders = [
+        path.name
+        for path in sorted(package.rglob("*.py"))
+        if retired in _string_values(path)
+    ]
+    assert offenders == [], (
+        f"{offenders} still use the retired role {retired!r} as a value; Boot "
+        "uses Fabric's registered vocabulary"
+    )
+
+
+def test_topology_is_not_readmitted_as_a_role():
+    """`internal` and `external` answered a different question.
+
+    Which side of the boundary an interface faces is topology, it is Boot's
+    own, and it never crosses a product boundary as a role. Putting either back
+    into the role list would merge the two axes again -- which is how the three
+    vocabularies diverged in the first place.
+    """
+
+    from azazel_boot.commissioning import INTERFACE_ROLES, ROLES
+
+    for zone in ("internal", "external", "protected", "egress"):
+        assert zone not in ROLES
+        assert zone not in INTERFACE_ROLES
