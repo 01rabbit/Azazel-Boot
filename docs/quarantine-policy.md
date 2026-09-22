@@ -40,6 +40,9 @@ pin, which has resume enabled, or which ships an automount rule.
 
 `verify_initramfs` reports **every** fault it finds, worst first, rather than
 stopping at the first: a version-string typo must not mask resume being enabled.
+A refusal the severity order does not name sorts last instead of raising — a
+build gate that crashes past every `except` is worse than one that reports in an
+odd order — and a refusal with no faults at all is refused outright.
 
 This is [ADR-0002](adr/0002-image-builder.md) C5 written as a condition an image
 either meets or does not. It is **not yet a check performed on a built
@@ -67,16 +70,22 @@ identity is not the booted medium's is quarantined.
 **An unobserved device is blocked.** A device with no disposition is not a
 device with no rule.
 
-**A disposition never improves.** Once quarantined, a device stays quarantined
-for the session, even if it later presents itself as the medium. Refusing the
-medium is a broken product; allowing a host write is a broken promise, and only
-one of those is recoverable. Once the medium is bound, a second device asserting
-its identity is quarantined.
+**What a device says about itself decides nothing.** Classification is identity
+against identity. An earlier version consulted the class a device asserts, and a
+second review showed the consequence: one hostile or garbled observation could
+demote the medium for the rest of the session — an untrusted input could not
+promote anything, but it could destroy the session's only writable volume, and
+the audit showed nothing to distinguish that from an ordinary refusal. A caller
+can ask `medium_is_bound()` rather than inferring it from a refusal.
 
-**Two actions are refused everywhere, the medium included**: running a firmware
-updater, and resuming from a hibernation image. The threat model forbids a
-firmware updater without scoping it to host devices, and it is the most direct
-route to the firmware NVRAM changes the same document declares unpreventable.
+**Five actions are refused everywhere, the medium included**: running a firmware
+updater, resuming from a hibernation image, and assembling LVM volume groups, md
+arrays or ZFS pools. The threat model leaves exactly two of its bullets
+unqualified — the firmware updater and assembly — and both are here. Assembly
+earns it twice over: it is the only operation in that list that is not
+per-device, because a volume group scanned from the medium can pull in physical
+volumes living on host disks, and this module's per-device shape cannot express
+a cross-device write at all.
 
 | Device | What is allowed |
 | --- | --- |
@@ -93,9 +102,14 @@ implementation here**, and this module does not pretend to offer one.
 
 Identity is the only thing separating the medium from a host disk. An adversary
 with transient physical access who can present a device reporting the booted
-medium's stable identity *before the medium itself is seen* cannot be
-distinguished in software. What the rule does do is refuse a second claimant
-once the medium is bound, and never re-promote anything it has quarantined.
+medium's stable identity cannot be distinguished from the medium in software.
+
+An earlier version of this document claimed the rule would "refuse a second
+claimant once the medium is bound". It did not, and could not: nothing
+distinguishes a second device carrying one identity from the same device
+appearing twice. The claim is gone rather than dressed up, and the test that
+made it look true — it manufactured a state the API cannot produce — is gone
+with it.
 
 ## 4. The export path
 
@@ -111,7 +125,15 @@ a persisted preference".
 **An approval does not survive the device re-appearing.** A dock pulled and
 replaced by another disk reporting the same identity is not the device that was
 approved, so any re-observation withdraws the approval naming it. An approval
-also cannot be armed in advance for a device that has never appeared.
+also cannot be armed in advance for a device that has never appeared, and the
+medium's identity is never an approvable target — checked by identity as well as
+by disposition, because a review reached it through the disposition alone.
+
+**An approval covers its target for the rest of the session, not one write.** It
+is not consumed by an export; an operator who wants it to end calls
+`withdraw_export()`, and a re-appearance ends it automatically. The audit records
+the grant, any supersession, the withdrawal, and a withdrawal that had nothing
+to withdraw.
 
 The audit keeps the **quarantine's own conclusion** — not the class the device
 claimed, which an impostor sets freely — with the action and the verdict, and it

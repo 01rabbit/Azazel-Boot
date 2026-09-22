@@ -22,6 +22,7 @@ import pytest
 from azazel_boot.quarantine import (
     EARLY_HOOKS,
     EXCLUDED_FROM_THE_ZERO_WRITE_CLAIM,
+    IMAGE_REFUSAL_SEVERITY,
     NEVER_ALLOWED_ANYWHERE,
     POLICY_VERSION,
     UNBLOCKABLE_BY_APPROVAL,
@@ -88,6 +89,47 @@ def test_every_action_but_read_is_a_writing_action() -> None:
         member.value for member in Action
     } - {"read"}
     assert len(WRITING_ACTIONS) == len(Action) - 1
+
+
+def test_assembly_is_refused_everywhere_because_it_is_not_per_device() -> None:
+    """A volume group scanned from the medium can pull in host physical volumes.
+
+    `evaluate(device, action)` cannot express a cross-device write at all, so
+    assembly is refused everywhere rather than adjudicated per device.
+    """
+
+    assert {
+        Action.LVM_ASSEMBLY,
+        Action.MD_ASSEMBLY,
+        Action.ZFS_IMPORT,
+        Action.FIRMWARE_UPDATE,
+        Action.RESUME_FROM_HIBERNATION,
+    } == set(NEVER_ALLOWED_ANYWHERE)
+
+
+def test_the_severity_order_covers_every_refusal_an_image_check_can_raise() -> None:
+    """A refusal missing from the order used to crash the gate instead of refusing."""
+
+    raised = {
+        Refusal.RESUME_ENABLED,
+        Refusal.AUTOMOUNT_RULE_PRESENT,
+        Refusal.QUARANTINE_NOT_PERSISTENT,
+        Refusal.HOOK_MISSING,
+        Refusal.UNPINNED_HOOK,
+        Refusal.QUARANTINE_NOT_FIRST,
+        Refusal.HOOK_ORDER_CHANGED,
+        Refusal.WRONG_POLICY_VERSION,
+    }
+    assert set(IMAGE_REFUSAL_SEVERITY) == raised
+
+
+def test_a_refusal_outside_the_severity_order_does_not_crash_the_gate() -> None:
+    from azazel_boot.quarantine import ImageRefused
+
+    refused = ImageRefused(((Refusal.NOT_CONFIRMED, "not an image fault"),))
+    assert refused.refusal is Refusal.NOT_CONFIRMED
+    with pytest.raises(ValueError):
+        ImageRefused(())
 
 
 def test_the_quarantine_hook_is_the_first_one() -> None:

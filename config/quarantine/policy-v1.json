@@ -27,7 +27,10 @@
   "blocked_on_a_quarantined_device": "every action above, including read",
   "never_allowed_anywhere": [
     "firmware_update",
-    "resume_from_hibernation"
+    "resume_from_hibernation",
+    "lvm_assembly",
+    "md_assembly",
+    "zfs_import"
   ],
   "unblockable_by_approval": [
     "export_write"

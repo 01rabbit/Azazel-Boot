@@ -79,23 +79,36 @@ def test_a_device_claiming_to_be_the_boot_medium_is_quarantined() -> None:
     assert a_quarantine().observe(impostor) is Disposition.QUARANTINED
 
 
-def test_a_second_claimant_to_the_medium_identity_is_quarantined() -> None:
-    """Once the medium is bound, another device asserting it is not it."""
+@pytest.mark.parametrize("claimed", list(DeviceClass), ids=lambda c: c.value)
+def test_what_a_device_says_about_itself_changes_no_outcome(claimed: DeviceClass) -> None:
+    """The class is untrusted input, so nothing consults it.
 
+    A first version did, and one hostile observation could then demote the
+    medium for the rest of the session — an input that cannot promote anything
+    but can destroy the only writable volume.
+    """
+
+    quarantine = Quarantine(session_id="s1", boot_medium_identity=MEDIUM_ID)
+    assert quarantine.observe(Device(MEDIUM_ID, claimed)) is Disposition.BOOT_MEDIUM
+    assert quarantine.observe(Device("host-disk", claimed)) is Disposition.QUARANTINED
+
+
+def test_the_medium_survives_a_hostile_observation_of_its_identity() -> None:
     quarantine = a_quarantine()
-    second = Device(identity=MEDIUM_ID, device_class=DeviceClass.BOOT_MEDIUM)
-    quarantine._dispositions.pop(MEDIUM_ID)  # noqa: SLF001 - a device that never appeared
-    assert quarantine.observe(second) is Disposition.QUARANTINED
+    quarantine.observe(Device(identity=MEDIUM_ID, device_class=DeviceClass.HOST_STORAGE))
+    assert quarantine.evaluate(BOOT_MEDIUM, Action.WRITABLE_MOUNT) is Verdict.ALLOWED
+    assert quarantine.medium_is_bound() is True
 
 
-def test_a_disposition_never_improves() -> None:
-    """Refusing the medium is recoverable; allowing a host write is not."""
+def test_a_caller_can_ask_whether_the_medium_has_appeared() -> None:
+    """Otherwise "no medium" is indistinguishable from "a host disk was refused"."""
 
-    quarantine = a_quarantine()
-    demoted = Device(identity=MEDIUM_ID, device_class=DeviceClass.HOST_STORAGE)
-    assert quarantine.observe(demoted) is Disposition.QUARANTINED
-    assert quarantine.observe(BOOT_MEDIUM) is Disposition.QUARANTINED
-    assert quarantine.evaluate(BOOT_MEDIUM, Action.WRITABLE_MOUNT) is Verdict.BLOCKED
+    quarantine = Quarantine(session_id="s1", boot_medium_identity=MEDIUM_ID)
+    assert quarantine.medium_is_bound() is False
+    quarantine.observe(HOST_NVME)
+    assert quarantine.medium_is_bound() is False
+    quarantine.observe(BOOT_MEDIUM)
+    assert quarantine.medium_is_bound() is True
 
 
 def test_host_storage_present_at_boot_is_quarantined() -> None:
@@ -287,6 +300,25 @@ def test_the_medium_is_not_an_export_target() -> None:
     assert refused.value.refusal is Refusal.BOOT_MEDIUM_IS_NOT_AN_EXPORT_TARGET
 
 
+def test_the_medium_identity_is_never_an_export_target_whatever_its_disposition() -> None:
+    """A review approved an export to the medium's identity after a demotion."""
+
+    quarantine = a_quarantine()
+    quarantine.observe(Device(identity=MEDIUM_ID, device_class=DeviceClass.HOST_STORAGE))
+    with pytest.raises(ExportRefused) as refused:
+        quarantine.approve_export(approval(MEDIUM_ID))
+    assert refused.value.refusal is Refusal.BOOT_MEDIUM_IS_NOT_AN_EXPORT_TARGET
+
+
+def test_a_structural_fault_is_reported_before_an_operator_slip() -> None:
+    """Naming the medium is a mistake about the target; an unticked box is not."""
+
+    quarantine = a_quarantine()
+    with pytest.raises(ExportRefused) as refused:
+        quarantine.approve_export(approval(MEDIUM_ID, confirmed=False))
+    assert refused.value.refusal is Refusal.BOOT_MEDIUM_IS_NOT_AN_EXPORT_TARGET
+
+
 def test_a_replacement_approval_does_not_accumulate() -> None:
     quarantine = a_quarantine()
     quarantine.observe(HOST_NVME)
@@ -332,6 +364,22 @@ def test_an_unobserved_device_is_audited_as_unobserved() -> None:
     quarantine = a_quarantine()
     quarantine.evaluate(UNCLASSIFIABLE, Action.AUTOMOUNT)
     assert quarantine.audit()[-1].disposition == "unobserved"
+
+
+def test_a_superseded_approval_and_an_empty_withdrawal_are_recorded() -> None:
+    """The audit shows what happened to an approval, not only that one was made."""
+
+    quarantine = a_quarantine()
+    quarantine.observe(HOST_NVME)
+    quarantine.observe(DOCKED_DISK)
+    quarantine.approve_export(approval(HOST_NVME.identity))
+    quarantine.approve_export(approval(DOCKED_DISK.identity))
+    quarantine.withdraw_export()
+    quarantine.withdraw_export()
+    verdicts = [
+        entry.verdict for entry in quarantine.audit() if entry.action == "export_approval"
+    ]
+    assert verdicts == ["granted", "superseded", "granted", "withdrawn", "nothing_to_withdraw"]
 
 
 def test_an_approval_and_its_refusals_are_recorded() -> None:

@@ -16,12 +16,19 @@ place where a one-time implementation would be wrong", so there is no
 enumeration step: devices are observed as they arrive, and an unobserved device
 has no disposition to inherit.
 
-**A disposition never improves, and an approval does not survive a
-re-appearance.** The review's first finding: an approval was keyed on an
-identity string and nothing invalidated it, so a dock could be pulled, another
-disk could arrive reporting the same identity, and the write was still allowed.
-Re-observing a device now withdraws any approval naming it, and a device once
-quarantined is never re-promoted.
+**An approval does not survive a re-appearance.** The review's first finding: an
+approval was keyed on an identity string and nothing invalidated it, so a dock
+could be pulled, another disk could arrive reporting the same identity, and the
+write was still allowed. Re-observing a device now withdraws any approval naming
+it.
+
+**A device's own claim about itself decides nothing.** A second review found the
+opposite failure: because classification consulted the `device_class` a device
+asserts, one hostile or garbled observation could demote the medium for the rest
+of the session — an untrusted input could not promote anything, but it could
+destroy the session's only writable volume, and the audit showed nothing to
+distinguish that from an ordinary refusal. Classification is now identity
+against identity, and nothing a device says about itself changes an outcome.
 
 **An approval names a device that was actually seen.** The review's second
 finding: `approve_export` checked neither, so an approval could be armed in
@@ -35,10 +42,11 @@ changes the same document declares unpreventable.
 
 **What this cannot defend against.** Identity is the only thing that separates
 the medium from a host disk. If an adversary with transient physical access can
-present a device that reports the booted medium's stable identity *before the
-medium itself is seen*, software here cannot tell them apart. What it can do,
-and does, is refuse a second claimant once the medium is bound, and refuse to
-re-promote anything it has quarantined.
+present a device reporting the booted medium's stable identity, software here
+cannot tell it from the medium. An earlier version of this module claimed to
+refuse "a second claimant once the medium is bound"; it did not, and could not —
+nothing distinguishes a second device with one identity from the same device
+appearing twice. The claim is gone rather than dressed up.
 
 Nothing here has run. No initramfs has been built, no device has been
 quarantined, and no write has been prevented on any machine.
@@ -92,12 +100,28 @@ class Action(Enum):
 #: this module does not pretend to offer one.
 WRITING_ACTIONS = frozenset(set(Action) - {Action.READ})
 
-#: Refused on every device, the boot medium included. A firmware updater is
-#: forbidden by `docs/threat-model.md` section 3 without qualification, and
-#: resume is disabled unconditionally by the initramfs contract — neither
-#: becomes acceptable because the device is ours.
+#: Refused on every device, the boot medium included.
+#:
+#: `docs/threat-model.md` section 3 scopes four of its bullets to the host
+#: ("activate **host** swap", "automount any **non-Boot** device", "…on a
+#: **host** filesystem") and leaves two unqualified: running a firmware updater,
+#: and assembling LVM volume groups, md arrays or ZFS pools. Both unqualified
+#: ones are here.
+#:
+#: Assembly earns its place for a second reason. It is the only operation in
+#: that list that is not per-device: a volume group scanned from the medium can
+#: pull in physical volumes that live on host disks, which is exactly the
+#: mechanism section 3.2 names. This module's `evaluate(device, action)` shape
+#: cannot express a cross-device write at all, so assembly is refused
+#: everywhere rather than adjudicated per device.
 NEVER_ALLOWED_ANYWHERE = frozenset(
-    {Action.FIRMWARE_UPDATE, Action.RESUME_FROM_HIBERNATION}
+    {
+        Action.FIRMWARE_UPDATE,
+        Action.RESUME_FROM_HIBERNATION,
+        Action.LVM_ASSEMBLY,
+        Action.MD_ASSEMBLY,
+        Action.ZFS_IMPORT,
+    }
 )
 
 #: The only action an operator approval can unblock.
@@ -112,11 +136,13 @@ EXCLUDED_FROM_THE_ZERO_WRITE_CLAIM = (
 
 
 class DeviceClass(Enum):
-    """What a device says it is.
+    """What a device says it is. **Nothing consults it.**
 
-    This is an input, not a conclusion: an impostor sets it freely. The
-    quarantine's own conclusion is a `Disposition`, and that is what the audit
-    records.
+    It is an input an impostor sets freely, so it decides no outcome: the
+    quarantine classifies by identity alone, and `Disposition` is its own
+    conclusion. The field is kept because a caller may want to record what a
+    device claimed; `tests/unit/test_quarantine_harness.py` asserts that
+    changing it changes nothing.
 
     `HOST_STORAGE` rather than "internal": `internal` is a retired role word in
     this package (`tests/unit/test_commissioning.py`), it answered a different
@@ -178,7 +204,18 @@ class ImageRefused(Exception):
     """
 
     def __init__(self, faults: tuple[tuple[Refusal, str], ...]) -> None:
-        ordered = sorted(faults, key=lambda fault: IMAGE_REFUSAL_SEVERITY.index(fault[0]))
+        if not faults:
+            raise ValueError("an ImageRefused with no fault would say nothing")
+
+        def severity(fault: tuple[Refusal, str]) -> int:
+            # A refusal missing from the severity order sorts last rather than
+            # raising: a build gate that crashes past every `except
+            # ImageRefused` is worse than one that reports in the wrong order.
+            if fault[0] in IMAGE_REFUSAL_SEVERITY:
+                return IMAGE_REFUSAL_SEVERITY.index(fault[0])
+            return len(IMAGE_REFUSAL_SEVERITY)
+
+        ordered = sorted(faults, key=severity)
         self.faults = tuple(ordered)
         self.refusal = ordered[0][0]
         self.detail = ordered[0][1]
@@ -263,7 +300,10 @@ class Quarantine:
 
     The three pieces of state are `init=False`: an adversarial review built a
     `Quarantine` with a ready-made approval through the generated constructor
-    and bypassed every check in `approve_export` at once.
+    and bypassed every check in `approve_export` at once. That closes the
+    constructor and **not** attribute assignment — Python has no way to close
+    the latter, so this is defence against a careless caller, not against code
+    already running in the process.
     """
 
     session_id: str
@@ -271,41 +311,39 @@ class Quarantine:
     _dispositions: dict[str, Disposition] = field(default_factory=dict, init=False)
     _approval: ExportApproval | None = field(default=None, init=False)
     _audit: list[AuditEntry] = field(default_factory=list, init=False)
-    _medium_bound: bool = field(default=False, init=False)
 
     def observe(self, device: Device) -> Disposition:
-        """Classify a device on appearance.
+        """Classify a device on appearance, by identity and nothing else.
 
-        A disposition never improves: once quarantined, a device stays
-        quarantined for the session, even if it later presents itself as the
-        medium. Refusing the medium is a broken product; allowing a host write
-        is a broken promise, and only one of those is recoverable.
+        The medium is the identity the initramfs marked. Everything else is
+        quarantined. What a device claims to be is not consulted: a first
+        version did consult it, and one hostile or garbled observation could
+        then demote the medium permanently — an input that cannot promote
+        anything but can destroy the session's only writable volume.
         """
 
         previous = self._dispositions.get(device.identity)
-        claims_medium = (
-            device.device_class is DeviceClass.BOOT_MEDIUM
-            and device.identity == self.boot_medium_identity
+        disposition = (
+            Disposition.BOOT_MEDIUM
+            if device.identity == self.boot_medium_identity
+            else Disposition.QUARANTINED
         )
-        proposed = Disposition.BOOT_MEDIUM if claims_medium else Disposition.QUARANTINED
-
-        if claims_medium and self._medium_bound and previous is not Disposition.BOOT_MEDIUM:
-            # The medium is already bound; a second claimant is not it.
-            proposed = Disposition.QUARANTINED
-
-        if previous is Disposition.QUARANTINED or proposed is Disposition.QUARANTINED:
-            disposition = Disposition.QUARANTINED
-        else:
-            disposition = Disposition.BOOT_MEDIUM
-
-        if disposition is Disposition.BOOT_MEDIUM:
-            self._medium_bound = True
 
         if previous is not None:
             self._withdraw_on_reappearance(device.identity, disposition)
 
         self._dispositions[device.identity] = disposition
         return disposition
+
+    def medium_is_bound(self) -> bool:
+        """Whether the medium has been seen this session.
+
+        A caller — a trial boot, a status screen — must be able to ask. Without
+        it, "the medium is not available" is indistinguishable from "a host disk
+        was refused", which is what the audit shows either way.
+        """
+
+        return self._dispositions.get(self.boot_medium_identity) is Disposition.BOOT_MEDIUM
 
     def disposition(self, device: Device) -> Disposition | None:
         return self._dispositions.get(device.identity)
@@ -325,7 +363,14 @@ class Quarantine:
                 refused.refusal.value,
             )
             raise
+        superseded = self._approval
         self._approval = approval
+        if superseded is not None:
+            self._record(
+                self._dispositions.get(superseded.target_identity),
+                "export_approval",
+                "superseded",
+            )
         self._record(
             self._dispositions.get(approval.target_identity), "export_approval", "granted"
         )
@@ -334,6 +379,7 @@ class Quarantine:
         """An operator who changes their mind must not have to approve something else."""
 
         if self._approval is None:
+            self._record(None, "export_approval", "nothing_to_withdraw")
             return
         target = self._approval.target_identity
         self._approval = None
@@ -352,17 +398,26 @@ class Quarantine:
     # -- internals ---------------------------------------------------------
 
     def _check_approval(self, approval: ExportApproval) -> None:
+        """Structural faults first, operator-input faults second.
+
+        An approval that is both unconfirmed and names the medium should report
+        the medium: one is a slip at a prompt, the other is a mistake about what
+        is being written to.
+        """
+
         if approval.session_id != self.session_id:
             raise ExportRefused(
                 Refusal.NOT_THIS_SESSION, "an approval does not outlive a session"
             )
-        if not approval.reason.strip():
+        # By identity **and** by disposition. A second review approved an export
+        # to the medium's own identity after a demotion had changed its
+        # disposition, which sent the incident record to the one identity this
+        # module says it cannot adjudicate.
+        if approval.target_identity == self.boot_medium_identity:
             raise ExportRefused(
-                Refusal.NO_REASON_GIVEN, "an export is approved for a stated reason"
-            )
-        if not approval.confirmed:
-            raise ExportRefused(
-                Refusal.NOT_CONFIRMED, "the operator did not confirm this export"
+                Refusal.BOOT_MEDIUM_IS_NOT_AN_EXPORT_TARGET,
+                "that is the medium's identity; the export path exists for host "
+                "storage",
             )
         disposition = self._dispositions.get(approval.target_identity)
         if disposition is None:
@@ -375,6 +430,14 @@ class Quarantine:
                 Refusal.BOOT_MEDIUM_IS_NOT_AN_EXPORT_TARGET,
                 "the export path exists for host storage; the medium is written "
                 "through its own operations",
+            )
+        if not approval.reason.strip():
+            raise ExportRefused(
+                Refusal.NO_REASON_GIVEN, "an export is approved for a stated reason"
+            )
+        if not approval.confirmed:
+            raise ExportRefused(
+                Refusal.NOT_CONFIRMED, "the operator did not confirm this export"
             )
 
     def _withdraw_on_reappearance(self, identity: str, disposition: Disposition) -> None:
