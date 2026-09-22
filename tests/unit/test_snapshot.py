@@ -1241,8 +1241,41 @@ def test_nothing_rendered_carries_the_fingerprint_a_secret_or_an_identity(
     acquisition = Opens()
     candidate = run_to_commit(flow, observations, snapshot=snap, acquisition=acquisition)
 
+    # The **verdict** is on this list because it was not: it holds the
+    # descriptor it judged, its `__repr__` was never called anywhere in the
+    # process, and a repr that rendered `self._snapshot.fingerprint` left the
+    # whole suite green. Every other object here had a redaction test.
+    judged = preflight(
+        a_quarantine(quarantined=False),
+        snapshot=snap,
+        capacity=capacity(),
+        current_schema=1,
+        target_schema=2,
+        binding_holds=True,
+        generation_holds=True,
+        image_digest_holds=True,
+    )
+    refused_verdict = preflight(
+        a_quarantine(fenced=True),
+        snapshot=snap,
+        capacity=capacity(),
+        current_schema=1,
+        target_schema=2,
+        binding_holds=True,
+        generation_holds=True,
+        image_digest_holds=True,
+    )
     rendered = " ".join(
-        [repr(flow), repr(candidate), repr(snap), repr(capacity()), repr(MigrationLedger())]
+        [
+            repr(flow),
+            repr(candidate),
+            repr(snap),
+            repr(capacity()),
+            repr(MigrationLedger()),
+            repr(judged),
+            repr(refused_verdict),
+            repr(flow.audit()),
+        ]
     )
     assert FINGERPRINT not in rendered
     assert acquisition.secret not in rendered
@@ -4868,3 +4901,353 @@ def test_no_rendering_path_hands_back_what_the_repr_redacts(observations) -> Non
     assert "<redacted>" in repr(snap)
     assert entry.fingerprint == canary_fingerprint  # the documented answer
     assert canary_fingerprint not in repr(entry)
+
+
+# --------------------------------------------------------------------------
+# Checks whose refusal enum was asserted and whose *effect* was not
+# --------------------------------------------------------------------------
+
+
+def test_a_fence_alone_ends_a_verdict_even_with_the_volume_healthy() -> None:
+    """R6: the ledger's `or` was only ever driven with both flags on.
+
+    `test_a_verdict_is_not_a_permission_that_outlives_what_it_judged`
+    quarantines the volume first and fences afterwards, so
+    `volume_is_quarantined` answered for the fence every time and deleting the
+    fence half left the suite green. ADR-0010 D9 is specifically about the
+    fence: a version upgrade is not a way round it, and a verdict minted before
+    a removal is a bearer token for a large write after one.
+    """
+
+    medium = a_quarantine(quarantined=False)
+    snapshot = descriptor()
+    verdict = preflight(
+        medium,
+        snapshot=snapshot,
+        capacity=capacity(),
+        current_schema=1,
+        target_schema=2,
+        binding_holds=True,
+        generation_holds=True,
+        image_digest_holds=True,
+    )
+    ledger = MigrationLedger()
+    assert ledger.may_migrate(verdict, quarantine=medium) is True
+
+    medium.fence()
+    assert medium.is_fenced is True
+    assert medium.volume_is_quarantined is False  # the fence alone
+
+    for act in (
+        lambda: ledger.may_migrate(verdict, quarantine=medium),
+        lambda: ledger.note_snapshot_written(verdict, snapshot, quarantine=medium),
+    ):
+        with pytest.raises(RecoveryRefused) as refused:
+            act()
+        assert refused.value.refusal is Refusal.MEDIUM_MOVED_SINCE_THE_PREFLIGHT
+    assert ledger.audit()[-1].check is PreflightCheck.MEDIUM_FENCED
+    assert not [
+        entry for entry in ledger.audit() if entry.event is SnapshotAuditEvent.SNAPSHOT_WRITTEN
+    ]
+
+
+def test_the_ledger_pins_the_quarantine_it_is_handed() -> None:
+    """R6: the only quarantine check on the migration path had no test.
+
+    A two-attribute stand-in (`is_fenced = False`, `volume_is_quarantined =
+    False`) satisfied it while the real medium was fenced and quarantined —
+    round three's stand-in attack, unguarded on the ledger side.
+    """
+
+    class StandIn:
+        is_fenced = False
+        volume_is_quarantined = False
+
+    snapshot = descriptor()
+    verdict = preflight(
+        a_quarantine(quarantined=False),
+        snapshot=snapshot,
+        capacity=capacity(),
+        current_schema=1,
+        target_schema=2,
+        binding_holds=True,
+        generation_holds=True,
+        image_digest_holds=True,
+    )
+    ledger = MigrationLedger()
+    for act in (
+        lambda: ledger.may_migrate(verdict, quarantine=StandIn()),
+        lambda: ledger.note_snapshot_written(verdict, snapshot, quarantine=StandIn()),
+    ):
+        with pytest.raises(TypeError, match="exactly"):
+            act()
+    assert ledger.audit() == ()
+
+
+def test_a_volume_that_stops_being_quarantined_during_the_prompt_refuses(
+    observations,
+) -> None:
+    """R6: the post-prompt re-read had two halves and one of them was dead.
+
+    `test_the_medium_is_read_again_after_the_passphrase_prompt` pulls the
+    *fence* during the prompt and never un-quarantines the volume, so the
+    second half — "there is still something to recover" — was uncovered by the
+    whole suite. Deleting it let a recovery commit over a volume that stopped
+    being quarantined inside `attempt()`: a restore over live data, which is
+    the write D8 refuses to make.
+    """
+
+    quarantine = a_quarantine()
+
+    class HealedDuringThePrompt(Opens):
+        def attempt(self):
+            object.__setattr__(quarantine, "_volume_quarantined", False)
+            return super().attempt()
+
+    flow = workflow(observations, quarantine=quarantine)
+    snap = descriptor()
+    flow.start(
+        snap,
+        observations,
+        media_binding_holds=True,
+        session_id=SESSION,
+        started_by_operator=True,
+    )
+    flow.open_trial(snap, observations, media_binding_holds=True, session_id=SESSION)
+
+    with pytest.raises(RecoveryRefused) as refused:
+        flow.commit(
+            snap,
+            observations,
+            media_binding_holds=True,
+            session_id=SESSION,
+            acquisition=HealedDuringThePrompt(),
+            confirmed=True,
+        )
+    assert refused.value.refusal is Refusal.GATE_REFUSED
+    assert flow.audit()[-1].gate is RecoveryGate.NOTHING_TO_RECOVER
+    assert flow.stage is RecoveryStage.REFUSED
+    assert flow.holds(RecoveryCandidate(1, FINGERPRINT)) is False
+
+
+def test_the_operator_is_prompted_once_and_never_over_a_forbidden_channel(
+    observations,
+) -> None:
+    """R6: the refusal enum was asserted and the *prompt* was not.
+
+    Hoisting `attempt()` above the channel check left the suite green: the
+    module asked a human for a passphrase over a channel ADR-0010 D2 forbids
+    and *then* refused. Calling `attempt()` twice was green too — and in a real
+    acquisition each call spends a retry from D2's budget.
+
+    `test_a_binding_from_another_machine_refuses_before_a_key_is_asked_for`
+    does assert `attempts == 0`, but only for the host-binding gate, which sits
+    above the whole acquisition block.
+    """
+
+    forbidden = Opens(channel=NOT_A_CHANNEL)
+    flow = workflow(observations)
+    snap = descriptor()
+    flow.start(
+        snap,
+        observations,
+        media_binding_holds=True,
+        session_id=SESSION,
+        started_by_operator=True,
+    )
+    flow.open_trial(snap, observations, media_binding_holds=True, session_id=SESSION)
+    with pytest.raises(RecoveryRefused):
+        flow.commit(
+            snap,
+            observations,
+            media_binding_holds=True,
+            session_id=SESSION,
+            acquisition=forbidden,
+            confirmed=True,
+        )
+    assert forbidden.attempts == 0, "a forbidden channel is refused before it is used"
+
+    once = Opens()
+    good = workflow(observations)
+    run_to_commit(good, observations, acquisition=once)
+    assert once.attempts == 1, "the operator types once"
+
+
+def test_a_stage_is_asked_for_before_the_operator_flag_is_read(observations) -> None:
+    """R6: `start`'s guard order had no test, and it crosses two rules.
+
+    Moving the operator check to the top left the suite green, and a foreign
+    caller could then terminate somebody else's live workflow — with
+    `RECOVERY_NOT_STARTED_BY_AN_OPERATOR` as the classification and no
+    `RECOVERY_FOREIGN_SITTING` recorded. `test_every_stage_refuses_a_foreign_
+    sitting[start]` passes `started_by_operator=True`, so the crossing case was
+    never driven.
+    """
+
+    flow = workflow(observations)
+    snap = descriptor()
+    flow.start(
+        snap,
+        observations,
+        media_binding_holds=True,
+        session_id=SESSION,
+        started_by_operator=True,
+    )
+    assert flow.stage is RecoveryStage.PREFLIGHT_PASSED
+
+    with pytest.raises(RecoveryRefused) as refused:
+        flow.start(
+            snap,
+            observations,
+            media_binding_holds=True,
+            session_id="somebody-elses-sitting",
+            started_by_operator=False,
+        )
+    assert refused.value.refusal is Refusal.STAGE_SKIPPED
+    assert flow.stage is RecoveryStage.PREFLIGHT_PASSED
+    assert [entry.event for entry in flow.audit()] == [
+        SnapshotAuditEvent.RECOVERY_STARTED
+    ]
+
+
+@pytest.mark.parametrize(
+    "near_miss", ["SESSION-0001", " session-0001", "session-0001 ", "session-0001\n"]
+)
+def test_a_sitting_that_merely_resembles_this_one_is_not_this_one(
+    near_miss, observations
+) -> None:
+    """R6: every foreign-sitting test used an obviously different string.
+
+    So a comparison that folded case, or stripped whitespace, was green — and
+    accepted a sitting id that is not this workflow's. An identifier is
+    compared, not interpreted.
+    """
+
+    assert near_miss != SESSION
+    flow = workflow(observations)
+    with pytest.raises(RecoveryRefused) as refused:
+        flow.start(
+            descriptor(),
+            observations,
+            media_binding_holds=True,
+            session_id=near_miss,
+            started_by_operator=True,
+        )
+    assert refused.value.refusal is Refusal.NOT_THIS_SITTING
+    assert flow.audit()[-1].event is SnapshotAuditEvent.RECOVERY_FOREIGN_SITTING
+
+
+@pytest.mark.parametrize(
+    ("was", "asked"),
+    [
+        (RecoveryStage.NOT_STARTED, RecoveryStage.COMMITTED),
+        (RecoveryStage.NOT_STARTED, RecoveryStage.TRIAL_OPEN),
+        (RecoveryStage.PREFLIGHT_PASSED, RecoveryStage.COMMITTED),
+        (RecoveryStage.TRIAL_OPEN, RecoveryStage.PREFLIGHT_PASSED),
+        (RecoveryStage.PREFLIGHT_PASSED, RecoveryStage.NOT_STARTED),
+    ],
+)
+def test_every_edge_the_stage_may_not_travel(was, asked, observations) -> None:
+    """R6: one forbidden edge was driven and the graph had four more.
+
+    Adding `not_started -> committed` to `_STAGE_EDGES` left the suite green,
+    and a workflow then reported `COMMITTED` with an **empty audit** — the
+    shape the graph exists to refuse — through a bound method on every
+    instance.
+    """
+
+    flow = workflow(observations)
+    snap = descriptor()
+    if was is not RecoveryStage.NOT_STARTED:
+        flow.start(
+            snap,
+            observations,
+            media_binding_holds=True,
+            session_id=SESSION,
+            started_by_operator=True,
+        )
+    if was is RecoveryStage.TRIAL_OPEN:
+        flow.open_trial(snap, observations, media_binding_holds=True, session_id=SESSION)
+    assert flow.stage is was
+
+    with pytest.raises(AttributeError) as refused:
+        flow._sealed_assign("_stage", asked)
+    assert "graph" in str(refused.value) or "passing the gates" in str(refused.value)
+    assert flow.stage is was
+
+
+def test_every_stage_this_module_reaches_is_recorded(observations) -> None:
+    """R6: three classifications existed in the enum and nothing produced them.
+
+    `test_the_audit_vocabulary_is_exactly_nine_classifications` checks the
+    enum's members; it does not check that anything writes them. Deleting the
+    `RECOVERY_INTERRUPTED` record, writing `RECOVERY_REFUSED` in its place, and
+    deleting the `RECOVERY_TRIAL_OPENED` record all left the suite green.
+    """
+
+    flow = workflow(observations)
+    snap = descriptor()
+    flow.start(
+        snap,
+        observations,
+        media_binding_holds=True,
+        session_id=SESSION,
+        started_by_operator=True,
+    )
+    flow.open_trial(snap, observations, media_binding_holds=True, session_id=SESSION)
+    flow.interrupt(session_id=SESSION)
+    assert [entry.event for entry in flow.audit()] == [
+        SnapshotAuditEvent.RECOVERY_STARTED,
+        SnapshotAuditEvent.RECOVERY_TRIAL_OPENED,
+        SnapshotAuditEvent.RECOVERY_INTERRUPTED,
+    ]
+
+    committed = workflow(observations)
+    run_to_commit(committed, observations)
+    assert [entry.event for entry in committed.audit()] == [
+        SnapshotAuditEvent.RECOVERY_STARTED,
+        SnapshotAuditEvent.RECOVERY_TRIAL_OPENED,
+        SnapshotAuditEvent.RECOVERY_COMPLETED,
+    ]
+
+
+def test_a_refusal_entry_names_the_check_or_the_gate_it_refused_on() -> None:
+    """R6: the redacting repr's two classification fields were unasserted.
+
+    The repr is the operator-facing rendering, and a refusal that does not say
+    *what* refused is an entry with nothing in it. Observability, not a leak —
+    but the absence test renders a committed workflow's audit, which carries no
+    gate and no check, so both lines were uncovered suite-wide.
+    """
+
+    gate_entry = SnapshotAuditEntry(
+        event=SnapshotAuditEvent.RECOVERY_REFUSED, gate=RecoveryGate.MEDIUM_FENCED
+    )
+    check_entry = SnapshotAuditEntry(
+        event=SnapshotAuditEvent.MIGRATION_REFUSED, check=PreflightCheck.REQUIRED_SPACE
+    )
+    assert "gate=medium_fenced" in repr(gate_entry)
+    assert "check=required_space" in repr(check_entry)
+    assert "fingerprint" not in repr(gate_entry)
+
+
+def test_a_medium_with_exactly_enough_room_is_not_refused() -> None:
+    """R6: the boundary `available == required` appeared nowhere.
+
+    So `<` could become `<=` unnoticed. Fail-closed, and still wrong: a
+    migration that fits exactly is a migration that fits.
+    """
+
+    assert CapacityReport(required=100, available=100).has_room_for_the_snapshot()
+    assert not CapacityReport(required=101, available=100).has_room_for_the_snapshot()
+    verdict = preflight(
+        a_quarantine(quarantined=False),
+        snapshot=descriptor(),
+        capacity=capacity(required=100, available=100),
+        current_schema=1,
+        target_schema=2,
+        binding_holds=True,
+        generation_holds=True,
+        image_digest_holds=True,
+    )
+    assert verdict.may_migrate is True
