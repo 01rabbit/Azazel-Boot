@@ -1,13 +1,15 @@
 # ADR-0010: Persistence key handling, dirty-write detection, and migration
 
-Status: **accepted (2026-09-22). D1–D5 implemented in software and
-hardware-unverified; D6–D10 not implemented.** The owner decided D1–D10 below.
+Status: **accepted (2026-09-22). D1–D9 implemented in software and
+hardware-unverified; D10 is a rule the others are held to, not a component.** The owner decided D1–D10 below.
 `azazel_boot.session_mode` implements D1, D2 and D3 — see
-[session mode](../session-mode.md) — and `azazel_boot.dirty_write` with
+[session mode](../session-mode.md); `azazel_boot.dirty_write` with
 `azazel_boot.persistence` implements D4 and D5, see
-[persistence](../persistence.md) §4.1. All of it on no hardware: no passphrase
-has been attempted, no volume opened, and no USB SSD pulled mid-write on any
-device.
+[persistence](../persistence.md) §4.1; and `azazel_boot.snapshot` implements
+D6, D7 and D8, with D9's host-write and fence-bypass refusals asserted across
+all three — see [snapshot and recovery](../snapshot-and-recovery.md). All of it
+on no hardware: no passphrase has been attempted, no volume opened, no USB SSD
+pulled mid-write, no snapshot written and no restore run on any device.
 [#7](https://github.com/01rabbit/Azazel-Boot/issues/7) stays open, and so do
 the three children this record names.
 
@@ -17,6 +19,7 @@ Related: [ADR-0008 D4.1 / D4.1.1](0008-debian-13-live-baseline.md) ·
 [Quarantine policy](../quarantine-policy.md) §4 ·
 [Persistence](../persistence.md) · [Recovery](../recovery.md) ·
 [Session mode](../session-mode.md) — D1–D3 as implemented ·
+[Snapshot and recovery](../snapshot-and-recovery.md) — D6–D8 as implemented ·
 [ADR-0011](0011-unlock-helper-boundary.md) — where the passphrase is typed
 
 ## Context
@@ -252,9 +255,10 @@ these values are not traceability.
 **No volume has been created, opened, sealed, torn, quarantined, snapshotted,
 migrated or restored on any device. No passphrase has been attempted, and no
 medium has been pulled mid-write.** D1–D3 exist as decision logic in
-`azazel_boot.session_mode`, and D4–D5 in `azazel_boot.dirty_write` and
-`azazel_boot.persistence`. Both open nothing and read nothing: they decide what
-an outcome reported by something else means. D6–D10 are decisions with no code
-behind them at all. #7 and its three
+`azazel_boot.session_mode`, D4–D5 in `azazel_boot.dirty_write` and
+`azazel_boot.persistence`, and D6–D8 in `azazel_boot.snapshot`. All three open
+nothing, write nothing and read nothing: they decide what an outcome reported
+by something else means. D9 and D10 are rules those modules are held to by
+test, not components with code of their own. #7 and its three
 children stay open, and every one of them carries `hardware-unverified` until a
 real USB SSD and a real laptop say otherwise.

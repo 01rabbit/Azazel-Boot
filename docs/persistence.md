@@ -12,6 +12,7 @@ quarantined on any hardware.
 Related: [ADR-0008 D4.1](adr/0008-debian-13-live-baseline.md) ·
 [ADR-0010](adr/0010-persistence-key-and-migration.md) ·
 [Session mode](session-mode.md) ·
+[Snapshot and recovery](snapshot-and-recovery.md) ·
 [Threat model](threat-model.md) §4–§5 · [Quarantine policy](quarantine-policy.md) ·
 [Recovery](recovery.md) · [Architecture](architecture.md)
 
