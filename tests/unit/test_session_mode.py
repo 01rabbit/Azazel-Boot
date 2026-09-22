@@ -61,6 +61,9 @@ TWO_NIC_MACS = {"enp3s0": "a0:b1:c2:d3:e4:f5", "enx001122334455": "00:11:22:33:4
 #: from every rendered surface.
 THE_SECRET = "correct-horse-battery-staple-0001"
 
+#: More prompts than any budget-bounded loop could justify. See `Scripted`.
+PROMPT_CEILING = ATTEMPT_BUDGET * 4
+
 
 @pytest.fixture
 def observations(sysfs_two_nics):
@@ -80,6 +83,15 @@ class Scripted:
     It **holds** the secret, the way a real one would, and never gets a chance
     to pass it anywhere: `attempt()` returns an enum. A test reads
     `self.secret` afterwards to assert it never appeared in anything rendered.
+
+    **Its `__repr__` deliberately renders the secret.** That is not an
+    oversight to be tidied up. With the default `object.__repr__` — `<Scripted
+    object at 0x…>` — the traceback assertions below pass no matter what, and
+    the whole "no acquisition in the refusing frame" property is untested: a
+    mutation that put the acquisition in that frame would render an address and
+    leak nothing. A real acquisition written by someone who has not read this
+    file may well have a `__repr__` like this one, so the hostile case is the
+    honest one to test against.
     """
 
     def __init__(self, *outcomes: AttemptOutcome, channel=PassphraseChannel.LOCAL_HIDDEN_PROMPT):
@@ -92,8 +104,21 @@ class Scripted:
     def channel(self) -> PassphraseChannel:
         return self._channel
 
+    def __repr__(self) -> str:
+        return f"Scripted(secret={self.secret!r}, prompts={self.prompts})"
+
     def attempt(self) -> AttemptOutcome:
         self.prompts += 1
+        if self.prompts > PROMPT_CEILING:
+            # The budget is the loop's *only* guarantee of termination. A
+            # mutation that stops the budget being spent made this source feed
+            # rejections forever and hung the run — which is not a caught
+            # mutant, it is a hung CI job that looks like a slow one. Refusing
+            # here turns "does not terminate" into a red test.
+            raise AssertionError(
+                f"commission() asked for attempt {self.prompts}; the budget is "
+                f"{ATTEMPT_BUDGET} and nothing else bounds the loop"
+            )
         return self._outcomes.pop(0) if self._outcomes else AttemptOutcome.REJECTED
 
 
@@ -189,18 +214,39 @@ def test_nothing_rendered_anywhere_carries_the_secret(observations) -> None:
 
     # And in a refusal's captured-locals traceback, which is what
     # `pytest --showlocals` and a crash reporter build.
+    #
+    # Scoped to the frames *inside the module under test*. The calling frame
+    # holds the acquisition because the caller made it, and asserting over the
+    # whole traceback would either fail for that unavoidable reason or — with a
+    # test double whose `repr` hides its fields — pass for no reason at all.
+    # What this module can be held to is its own frames.
     second = a_session(observations)
-    try:
+    with pytest.raises(ModeRefused) as refused:
         second.commission(
             Scripted(AttemptOutcome.OPENED, channel=None),  # type: ignore[arg-type]
             observations,
             session_id=SESSION,
         )
-    except ModeRefused as error:
-        captured = "".join(
-            traceback.TracebackException.from_exception(error, capture_locals=True).format()
-        )
-    assert THE_SECRET not in captured
+    summary = traceback.TracebackException.from_exception(refused.value, capture_locals=True)
+
+    assert THE_SECRET not in str(refused.value)
+
+    module_frames = [frame for frame in summary.stack if frame.filename == str(MODULE)]
+    assert module_frames, "the refusal must be raised inside the module under test"
+
+    raising = module_frames[-1]
+    assert raising.name == "_require_local_hidden_prompt"
+    # One boolean, and nothing else, in the frame that actually raises.
+    assert set(raising.locals or {}) == {"is_local_hidden"}
+
+    # `commission` is still on the stack and still holds the acquisition it was
+    # handed — a frame cannot forget its own parameter. So the secret IS in
+    # this traceback, and the module cannot claim otherwise; what it can do is
+    # not put the acquisition anywhere a *refusal* has to render, and keep its
+    # own refusal frames empty of it.
+    commissioning_frame = next(frame for frame in module_frames if frame.name == "commission")
+    assert "acquisition" in (commissioning_frame.locals or {})
+    assert THE_SECRET in (commissioning_frame.locals or {})["acquisition"]
 
 
 def test_the_module_reads_no_environment_no_argv_and_no_file() -> None:
@@ -705,3 +751,153 @@ def test_every_refusal_is_one_this_module_actually_raises() -> None:
         "INPUT_INTERRUPTED",
         "CHANNEL_NOT_A_LOCAL_HIDDEN_PROMPT",
     }
+
+
+def test_no_rendering_carries_the_boot_id_or_how_many_attempts_were_made(observations) -> None:
+    """Two mutation survivors, turned into the test that would have caught them.
+
+    Printing `_boot_id` from `CommissionedMode.__repr__`, and printing `_spent`
+    from `BootSession.__repr__`, both left the whole suite green. The module's
+    docstrings claimed neither appears; nothing checked it.
+
+    ADR-0010 D2 says the attempt count reaches no journal, no audit and no
+    screen. A count in a `repr` is a count in every traceback, every debugger
+    frame and every exception a caller logs — which is all three at once. The
+    boot id names the sitting and belongs in no rendered line either.
+
+    **A count is digits**, so the claim is asserted as the absence of any digit
+    rather than as the absence of one particular number: `assert "3" not in
+    rendered` passes the moment the count is four.
+    """
+
+    acquisition = Scripted(
+        AttemptOutcome.REJECTED, AttemptOutcome.REJECTED, AttemptOutcome.OPENED
+    )
+    session = a_session(observations)
+    decided = session.commission(acquisition, observations, session_id=SESSION)
+    assert acquisition.prompts == 3
+
+    surfaces = (
+        repr(session),
+        repr(decided),
+        repr(session.decided),
+        repr(session.audit()),
+        str(session.audit()),
+    )
+    for rendered in surfaces:
+        assert BOOT not in rendered, rendered
+        assert not any(character.isdigit() for character in rendered), rendered
+
+    # And the same after the budget is spent, where the count is at its largest
+    # and an "attempts remaining" line is most tempting.
+    spent = a_session(observations)
+    spent.commission(Scripted(), observations, session_id=SESSION)
+    for rendered in (repr(spent), repr(spent.decided), repr(spent.audit())):
+        assert BOOT not in rendered, rendered
+        assert not any(character.isdigit() for character in rendered), rendered
+
+
+def test_a_commissioned_mode_has_no_equality_of_its_own(observations) -> None:
+    """Why `is` and `==` are the same test today, and why that is not a property.
+
+    Mutating `BootSession.holds` from `self._mode is mode` to `== mode`
+    survived the whole suite. It is an equivalent mutant — `CommissionedMode`
+    inherits object's identity equality, so the two expressions agree — but
+    that agreement is a coincidence of what the class does *not* define.
+
+    An `__eq__` added later, for a log line or a test convenience, would
+    silently turn every identity check in this module into a value check, and a
+    `CommissionedMode` built by hand with the right two fields would then be
+    accepted as the one this boot minted. So the absence is pinned: adding an
+    `__eq__` is a red test, not a quiet change of meaning.
+    """
+
+    assert CommissionedMode.__eq__ is object.__eq__
+    assert CommissionedMode.__hash__ is object.__hash__
+
+    session = a_session(observations)
+    decided = session.commission(Scripted(AttemptOutcome.OPENED), observations, session_id=SESSION)
+
+    forged = CommissionedMode(decided.mode, BOOT)
+    assert forged.mode is decided.mode
+    assert forged != decided
+    assert not session.holds(forged)
+    assert not mode_applies_to(session, forged)
+
+
+def test_no_refusal_message_carries_a_host_a_session_or_a_device(observations, elsewhere) -> None:
+    """Every refusal path, checked against every identity in play.
+
+    A mutation that rebuilt `NOT_THIS_HOST_OR_SESSION` as
+    `f"another machine: {self._binding!r}"` survived the whole suite.
+    `SessionBinding` is a plain dataclass with no redacting `__repr__`, so that
+    message renders the host fingerprint in full — and a `ModeRefused` message
+    reaches a terminal, a journal, a crash report and a test failure line.
+
+    ADR-0010 D10 is that these values appear in none of those. The refusal
+    names the **rule**, and the rule is the whole of what it may say.
+    """
+
+    binding = bind_session(observations, session_id=SESSION)
+    fingerprint = host_fingerprint(observations)
+
+    refusals: list[ModeRefused] = []
+
+    def collect(session, acquisition, inventory, *, session_id=SESSION):
+        with pytest.raises(ModeRefused) as refused:
+            session.commission(acquisition, inventory, session_id=session_id)
+        refusals.append(refused.value)
+
+    # not this host
+    collect(a_session(observations, binding=binding), Scripted(AttemptOutcome.OPENED), elsewhere)
+    # not this sitting
+    collect(
+        a_session(observations, binding=binding),
+        Scripted(AttemptOutcome.OPENED),
+        observations,
+        session_id="another-sitting",
+    )
+    # a fenced medium
+    collect(
+        a_session(observations, quarantine=a_quarantine(fenced=True), binding=binding),
+        Scripted(AttemptOutcome.OPENED),
+        observations,
+    )
+    # a channel that is not a hidden local prompt
+    collect(
+        a_session(observations, binding=binding),
+        Scripted(AttemptOutcome.OPENED, channel=None),  # type: ignore[arg-type]
+        observations,
+    )
+    # the prompt was stopped
+    collect(
+        a_session(observations, binding=binding),
+        Scripted(AttemptOutcome.INTERRUPTED),
+        observations,
+    )
+    # the mode is already decided
+    fixed = a_session(observations, binding=binding)
+    fixed.commission(Scripted(AttemptOutcome.OPENED), observations, session_id=SESSION)
+    collect(fixed, Scripted(AttemptOutcome.OPENED), observations)
+
+    assert {refusal.refusal for refusal in refusals} == set(Refusal), (
+        "every refusal path must be exercised, or this test guards only some of them"
+    )
+
+    never = (
+        fingerprint,
+        binding.host_fingerprint,
+        SESSION,
+        "another-sitting",
+        BOOT,
+        MEDIUM_ID,
+        HOST_DISK.identity,
+        THE_SECRET,
+        *TWO_NIC_MACS.values(),
+        *TWO_NIC_MACS.keys(),
+    )
+    for refusal in refusals:
+        for rendered in (str(refusal), refusal.detail, repr(refusal.refusal)):
+            for value in never:
+                assert value not in rendered, f"{refusal.refusal.name} rendered {value!r}"
+            assert not any(character.isdigit() for character in rendered), rendered

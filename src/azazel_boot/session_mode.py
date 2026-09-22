@@ -12,6 +12,14 @@ the next weakness was the container. A module that never receives the secret has
 no container to weaken, and `tests/unit/test_session_mode.py` asserts that the
 only thing crossing the boundary is a member of :class:`AttemptOutcome`.
 
+**The limit of that, stated rather than discovered:** `commission` is handed an
+acquisition object and its frame holds it for the duration of the call, so a
+captured-locals traceback renders whatever that object's `__repr__` renders.
+Nothing here can prevent it. What this module guarantees is narrower and real:
+it never asks for the secret, never stores it, never puts it in an audit, an
+exception message or a `repr` of its own, and raises its refusals from frames
+that hold one boolean.
+
 **The mode is decided once and cannot move.** A :class:`CommissionedMode` is
 minted by one :class:`BootSession` at commissioning and is checked by identity.
 There is no promotion, no demotion and no re-binding: a session that starts
@@ -440,8 +448,16 @@ class BootSession:
 def _require_local_hidden_prompt(*, is_local_hidden: bool) -> None:
     """Raise from a frame holding one boolean and nothing else.
 
-    The acquisition is not in scope here, so a captured-locals traceback of this
-    refusal cannot render whatever it is holding.
+    **What this does and does not buy.** The raising frame has no acquisition
+    in it, so the innermost frame a crash reporter prints renders one boolean.
+    It does **not** keep the acquisition out of the traceback: `commission` is
+    still on the stack and still holds the parameter it was handed, and a
+    frame cannot forget its own argument. If an acquisition's `__repr__`
+    renders what it is holding, a captured-locals traceback shows it from
+    *that* frame — which is the acquisition's choice, not this module's.
+    `tests/unit/test_session_mode.py` asserts both halves, using a double
+    whose `__repr__` deliberately leaks, because a double with the default
+    `__repr__` makes the assertion pass no matter what.
     """
 
     if not is_local_hidden:
@@ -456,9 +472,12 @@ def _require_local_hidden_prompt(*, is_local_hidden: bool) -> None:
 def _refuse_foreign_record(*, applies: bool) -> None:
     """Raise from a frame holding one boolean, for the reason above.
 
-    The inventory and the binding are not locals here, so the host's identities
-    are not in this refusal's traceback — the mistake made once in
-    `azazel_boot.persistence` and fixed there.
+    The inventory and the binding are not locals here, with the same limit:
+    `commission` above still holds the observations. What keeps the host's
+    identities out of a rendered traceback is
+    `azazel_boot.inventory.InterfaceObservation.__repr__`, which redacts them —
+    the mistake made once in `azazel_boot.persistence` and fixed there. This
+    frame is the second line of that defence, not the first.
     """
 
     if not applies:

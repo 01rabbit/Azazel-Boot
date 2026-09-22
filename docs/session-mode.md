@@ -33,8 +33,9 @@ A module that never receives the secret has no container to weaken.
 What that buys and what it does not: the secret still exists in the process that
 performs the prompt. This does not make the passphrase unreachable to code
 running in the same interpreter — nothing in Python does. It removes this
-module, its reprs, its audit, its exceptions and its tracebacks from the set of
-places the secret can be found.
+module's own vocabulary, reprs, audit entries and exception messages from the
+set of places the secret can be found. It does **not** remove the acquisition
+object from `commission`'s stack frame; see the note on tracebacks below.
 
 ## D1 — No key, no persistence
 
@@ -125,8 +126,18 @@ constructor arguments — the tautology fixed in
 [`azazel_boot.persistence`](persistence.md) and not reintroduced here.
 
 The two refusals that could otherwise render something are raised from helper
-functions whose frames hold **one boolean each**, so a captured-locals traceback
-has no acquisition and no inventory in it to print.
+functions whose frames hold **one boolean each**.
+
+**That is narrower than it first looks, and the first draft of this page
+overstated it.** It said a captured-locals traceback "has no acquisition and no
+inventory in it to print". It does: `commission` is still on the stack and
+still holds the parameter it was handed, and a frame cannot forget its own
+argument. If an acquisition's `__repr__` renders what it is holding, a crash
+reporter shows it from that frame. The test that was supposed to catch this
+passed because the test double used the default `object.__repr__`, which
+renders an address — it would have passed against any implementation at all.
+The double now leaks deliberately, and the assertion is scoped to this module's
+own frames, which is the only thing this module can be held to.
 
 ## What the audit may hold
 
