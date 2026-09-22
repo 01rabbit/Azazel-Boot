@@ -336,6 +336,18 @@ class Quarantine:
     already running in the process, and
     `azazel_boot.persistence.PersistenceSession` states the same limit in the
     same words for the same reason.
+
+    **A fourth limit is the ordinary one, and it is named because the other
+    three are not what a routine caller would reach for.** `__setattr__` stops
+    an attribute being *rebound*; it does not stop the object it points at
+    being *mutated*, and the authority lives in those objects.
+    ``q._dispositions[identity] = Disposition.BOOT_MEDIUM`` promotes a host
+    disk, and ``q._audit.clear()`` erases the record — an attribute read and a
+    container write, no hook involved. That is more ordinary than the
+    ``vars(q)`` route `__slots__` closes, and this repository's own test suite
+    uses it to simulate a demotion, which is why it is documented as a limit
+    rather than removed. `audit()` returns a copy and `disposition()` returns a
+    value, so nothing reaches these containers through the public API.
     """
 
     __slots__ = (
@@ -395,7 +407,9 @@ class Quarantine:
             raise AttributeError(
                 "a Quarantine is sealed after construction; the fence is "
                 "one-way and the session, the medium's identity, the "
-                "dispositions and the audit cannot be replaced"
+                "dispositions and the audit cannot be rebound — which is not "
+                "the same as their contents being protected; see the class "
+                "docstring"
             )
         object.__setattr__(self, name, value)
 
@@ -534,6 +548,19 @@ class Quarantine:
             "medium_fenced",
             "already_fenced" if already else "fenced",
         )
+        # A standing approval is withdrawn by the fence, and the withdrawal is
+        # audited. Refusing to *grant* one after a removal while letting one
+        # granted a second earlier stand was the same asymmetry from the other
+        # side: "an authority the session can no longer exercise" describes
+        # both. The record would otherwise keep asserting a live grant, and
+        # `withdraw_export` would report `withdrawn` rather than
+        # `nothing_to_withdraw`, which is how a review found it.
+        if self._approval is not None:
+            target = self._approval.target_identity
+            self._approval = None
+            self._record(
+                self._dispositions.get(target), "export_approval", "withdrawn_on_fence"
+            )
 
     @property
     def is_fenced(self) -> bool:
@@ -596,6 +623,18 @@ class Quarantine:
         An approval that is both unconfirmed and names the medium should report
         the medium: one is a slip at a prompt, the other is a mistake about what
         is being written to.
+
+        **The fence pre-empts all of them, deliberately, and that costs a
+        signal this docstring otherwise values.** After a removal every
+        approval refuses as `session_fenced`, so an operator who aimed at the
+        medium's own identity is audited as fenced rather than as having aimed
+        at the medium. The trade is taken this way because the fence is the
+        dominant fact and the finer refusals invite a retry that cannot
+        succeed: an operator told `not_confirmed` would confirm and try again.
+        A review raised the alternative — ordering the fence below the target
+        and session checks to keep the audit's distinctions — and it is a real
+        alternative; this records why it was not taken rather than leaving the
+        ordering to look accidental.
         """
 
         if self._fenced:

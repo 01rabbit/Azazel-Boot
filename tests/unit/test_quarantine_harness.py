@@ -718,3 +718,67 @@ def test_a_quarantine_refuses_to_be_serialised_or_copied() -> None:
 
     assert MEDIUM_ID not in repr(quarantine)
     assert HOST_NVME.identity not in repr(quarantine)
+
+
+def test_the_fence_withdraws_a_standing_export_approval() -> None:
+    """Refusing a new grant while letting an old one stand was half a rule.
+
+    The refusal added for a fenced quarantine says the session cannot grant an
+    authority it can no longer exercise. A grant made a second before the fence
+    is exactly that, and it stood: `withdraw_export` afterwards reported
+    `withdrawn` rather than `nothing_to_withdraw`, so the record still asserted
+    a live approval naming a target.
+    """
+
+    quarantine = a_quarantine()
+    quarantine.observe(BOOT_MEDIUM)
+    quarantine.observe(HOST_NVME)
+    quarantine.approve_export(
+        ExportApproval(
+            session_id="s1",
+            target_identity=HOST_NVME.identity,
+            reason="incident record",
+            confirmed=True,
+        )
+    )
+    assert quarantine.evaluate(HOST_NVME, Action.EXPORT_WRITE) is Verdict.ALLOWED
+
+    quarantine.fence()
+
+    assert quarantine.evaluate(HOST_NVME, Action.EXPORT_WRITE) is Verdict.BLOCKED
+    approvals = [e for e in quarantine.audit() if e.action == "export_approval"]
+    assert approvals[-1].verdict == "withdrawn_on_fence"
+
+    quarantine.withdraw_export()
+    assert quarantine.audit()[-1].verdict == "nothing_to_withdraw"
+
+
+def test_container_mutation_is_named_as_a_limit_rather_than_implied_to_be_closed() -> None:
+    """The one routine route the seal does not cover, recorded as such.
+
+    `__setattr__` stops an attribute being rebound, not the object it points at
+    being mutated, and the authority lives in those objects: a dict write to
+    `_dispositions` promotes a host disk and `_audit.clear()` erases the record.
+    That is more ordinary than the `vars()` route `__slots__` closes — this
+    suite uses it itself to simulate a demotion — so the limit is documented
+    rather than removed, and the assertion here is what keeps the paragraph
+    from quietly disappearing.
+
+    What the test *does* check is that nothing reaches those containers through
+    the public API.
+    """
+
+    from pathlib import Path
+
+    from azazel_boot import quarantine as module
+
+    source = " ".join(Path(module.__file__).read_text(encoding="utf-8").split())
+    assert "does not stop the object it points at being *mutated*" in source
+
+    live = a_quarantine()
+    live.observe(BOOT_MEDIUM)
+    live.fence()
+    handed_out = live.audit()
+    assert isinstance(handed_out, tuple)
+    assert handed_out is not live.audit()
+    assert live.audit(), "the record survives whatever a caller does with a copy"

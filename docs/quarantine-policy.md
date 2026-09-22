@@ -92,6 +92,17 @@ review used its absence:
   `deepcopy` taken before a fence was an unfenced quarantine that still allowed
   a writable mount on the removed medium.
 
+A fourth limit is the **ordinary** one, and it is listed because the other
+three are not what routine code would reach for: `__setattr__` stops an
+attribute being *rebound*, not the object it points at being *mutated*, and the
+authority lives in those objects. `q._dispositions[identity] =
+Disposition.BOOT_MEDIUM` promotes a host disk and `q._audit.clear()` erases the
+record — an attribute read and a container write, no hook involved. That is
+more ordinary than the `vars(q)` route `__slots__` closes, and this
+repository's own tests use it to simulate a demotion, so it is named as a limit
+rather than removed. Nothing reaches those containers through the public API:
+`audit()` hands out a copy and `disposition()` returns a value.
+
 **None of that is a seal, and Python has no way to make one.**
 `object.__setattr__` writes the attribute regardless, an instance built with
 `__new__` never ran `__init__`, and a subclass can override the hook. This is
@@ -217,8 +228,10 @@ this policy says it cannot tell apart: it was classified as the medium and
 allowed to be mounted writable. `medium_is_bound()` also answers False after a
 fence, because the question a caller asks through it is availability.
 
-**An export cannot be approved after a fence**, and that is a decision with a
-cost rather than a free safety win. Before, the approval succeeded and was
+**An export cannot be approved after a fence, and a standing approval is
+withdrawn by it** — audited as `withdrawn_on_fence`. Refusing a new grant while
+letting one made a second earlier stand was the same asymmetry from the other
+side. This is a decision with a cost rather than a free safety win. Before, the approval succeeded and was
 audited as `granted` while `evaluate` blocked the write unconditionally — an
 audit asserting that an operator granted an authority nobody could exercise,
 which is worse than either coherent answer. The refusal now agrees with the
@@ -231,6 +244,23 @@ host-disk exports from the fence is the other coherent answer — the removal
 happened to the medium, not to the disk being written — and it is a product
 decision that has not been taken. Until it is, the conservative direction holds
 because it is the one that adds no capability after a removal.
+
+The cost is smaller than it first reads, and the reason belongs here rather
+than in an argument nobody wrote down: **the material an export would carry is
+itself on the removed medium.** The evidence, the audit checkpoints and the
+session state live in encrypted persistence, and Boot runs from that medium, so
+an export path surviving the removal would in the common case have nothing left
+to read. What does survive is RAM-resident — [the threat model](threat-model.md)
+§4 requires the release supervisor to be — so a future design that wants an
+in-memory audit tail written off the machine after a removal will need a path
+that is not `approve_export`. §4's answer today is to reboot.
+
+The fence also **pre-empts the finer approval refusals**: after a removal every
+approval refuses as `session_fenced`, so an operator who aimed at the medium's
+own identity is audited as fenced rather than as having aimed at the medium.
+That trades away a distinction `_check_approval` otherwise values, and it is
+taken deliberately — the fence is the dominant fact, and `not_confirmed` would
+invite a retry that cannot succeed.
 
 It does **not** change `disposition()`, which answers "what is this device" — a
 question whose answer did not change when the medium was pulled. So the fence
