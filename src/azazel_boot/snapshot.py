@@ -114,9 +114,13 @@ class SnapshotDescriptor:
             ("container_version", self.container_version),
             ("schema_version", self.schema_version),
         ):
-            if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            # `type(...) is int`, not `isinstance`: a round-four review built
+            # this object through this constructor with `int` subclasses that
+            # answered `7` and compared as anything, and the field-by-field
+            # substitution check compared the subclass's answers.
+            if type(value) is not int or value < 1:
                 raise TypeError(f"{name} must be a positive integer version")
-        if not isinstance(self.fingerprint, str) or not self.fingerprint.strip():
+        if type(self.fingerprint) is not str or not self.fingerprint.strip():
             raise TypeError("fingerprint must be a non-empty opaque string")
 
     def __repr__(self) -> str:
@@ -144,7 +148,7 @@ class CapacityReport:
 
     def __post_init__(self) -> None:
         for name, value in (("required", self.required), ("available", self.available)):
-            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            if type(value) is not int or value < 0:
                 raise TypeError(f"{name} must be a non-negative integer")
 
     def __repr__(self) -> str:
@@ -252,6 +256,11 @@ class PreflightVerdict:
 #: sentence is that one.
 _MINTED_HERE = object()
 
+#: The only four fields a recovery moves. `_sealed_assign` writes these and
+#: nothing else — not the quarantine, not the binding, not the sitting, and
+#: not once the stage is terminal.
+_MOVES_DURING_A_RECOVERY = frozenset({"_stage", "_snapshot", "_pinned", "_candidate"})
+
 
 def _require_a_real_quarantine(quarantine: object) -> None:
     """`type(...) is`, not `isinstance`.
@@ -292,6 +301,87 @@ def _require_a_real_snapshot(snapshot: object) -> None:
         )
 
 
+def _require_an_exact_int(name: str, value: object) -> None:
+    """`type(...) is int`, because an `int` subclass answers for itself.
+
+    A round-four review built a genuine `SnapshotDescriptor` — public
+    constructor, no `object.__setattr__` — whose `container_version` was an
+    `int` subclass answering `7`, and whose `__eq__` said whatever it liked.
+    It passed the substitution check and the container-version half of the
+    integrity gate, and committed on an unknown container format. `isinstance`
+    admits the subclass; the check the field comparison rests on has to not.
+    """
+
+    if type(value) is not int:
+        raise TypeError(f"{name} must be an int exactly; a subclass may answer for itself")
+
+
+def _require_an_exact_str(name: str, value: object) -> None:
+    """`type(...) is str`, for the same reason and a sharper case.
+
+    A `str` subclass whose `__ne__` answers `False` decided
+    `_require_this_sitting` for the caller — the caller's own operand is on
+    the left of the `!=` — and Python's reflected-priority rule handed it
+    `binding_applies`'s session half as well. Four lines, any sitting.
+    """
+
+    if type(value) is not str:
+        raise TypeError(f"{name} must be a str exactly; a subclass may answer for itself")
+
+
+def _require_real_observations(observations: object) -> None:
+    """The one input to the gates that nothing pinned.
+
+    `binding_applies` re-derives the host fingerprint from these rather than
+    re-comparing a field it was handed, so a stand-in does not forge a host —
+    but it does decide what this module believes it was handed, and every
+    other input to the gates is pinned. This is not a secret-bearing check; it
+    is the missing member of a set.
+    """
+
+    if type(observations) is not tuple:
+        raise TypeError("observations must be a tuple exactly")
+    for observation in observations:
+        if type(observation) is not InterfaceObservation:
+            raise TypeError("each observation must be an InterfaceObservation exactly")
+
+
+def _fields_of(snapshot: SnapshotDescriptor) -> tuple[object, ...]:
+    """The four values a substitution check has to compare against.
+
+    Named rather than spelled inline so that the comparison and the pin cannot
+    drift apart; `tests/unit/test_snapshot.py` derives the field names from
+    this function's source and asserts they are the dataclass's own, so a
+    fifth field cannot be added and silently left uncompared.
+    """
+
+    return (
+        snapshot.container_version,
+        snapshot.schema_version,
+        snapshot.integrity,
+        snapshot.fingerprint,
+    )
+
+
+def _require_an_acquisition(acquisition: object) -> None:
+    """`None` skipped D8's second gate entirely, and left no trace.
+
+    `_require_the_gates` takes an optional acquisition because `start` and
+    `open_trial` legitimately have none, and `commit` forwarded whatever it was
+    handed into an `if acquisition is not None:`. A commit with
+    `acquisition=None` produced an audit **byte-identical** to a legitimate
+    one, so nothing downstream could tell a recovery that unlocked the volume
+    from one where nobody was ever prompted. A caller reaches that by mistake,
+    not by malice, which is what makes it the worst of the four.
+    """
+
+    if acquisition is None:
+        raise TypeError(
+            "commit requires a key acquisition; there is no recovery without "
+            "one, and no value that means 'skip the gate'"
+        )
+
+
 def _require_an_actual_bool(name: str, value: object) -> None:
     """D8's two operator gates took any truthy object.
 
@@ -301,7 +391,7 @@ def _require_an_actual_bool(name: str, value: object) -> None:
     candidate with `started_by_operator="no"` and `confirmed="declined"`.
     """
 
-    if not isinstance(value, bool):
+    if type(value) is not bool:
         raise TypeError(f"{name} must be a bool; a truthy object is not a check")
 
 
@@ -391,8 +481,7 @@ def preflight(
         ("generation_holds", generation_holds),
         ("image_digest_holds", image_digest_holds),
     ):
-        if not isinstance(value, bool):
-            raise TypeError(f"{name} must be a bool; a truthy object is not a check")
+        _require_an_actual_bool(name, value)
     # The two schema versions were annotated and unchecked, so an object whose
     # `__eq__`/`__gt__` always answer True produced a **legitimately minted**
     # passing verdict for a step that is in no supported set — and `True`
@@ -402,8 +491,7 @@ def preflight(
         ("current_schema", current_schema),
         ("target_schema", target_schema),
     ):
-        if not isinstance(value, int) or isinstance(value, bool):
-            raise TypeError(f"{name} must be an int that is not a bool")
+        _require_an_exact_int(name, value)
     if type(capacity) is not CapacityReport:
         raise TypeError("capacity must be a CapacityReport exactly")
     if snapshot is not None:
@@ -532,6 +620,11 @@ class SnapshotAuditEvent(Enum):
     #: leave no trace, so the workflow could simply be retried with the
     #: original snapshot and nothing recorded that a swap had been attempted.
     RECOVERY_SNAPSHOT_SUBSTITUTED = "recovery_snapshot_substituted"
+    #: A stage asked for a sitting this workflow does not belong to. Recorded
+    #: and terminal for the same reason as the two above: the module treats a
+    #: swap as an event rather than a typo, and an unbounded, unrecorded probe
+    #: against a live `TRIAL_OPEN` workflow was the one swap it did not.
+    RECOVERY_FOREIGN_SITTING = "recovery_foreign_sitting"
 
 
 @dataclass(frozen=True)
@@ -569,12 +662,15 @@ class SnapshotAuditEntry:
             raise TypeError("check must be a PreflightCheck or None")
         if self.gate is not None and not isinstance(self.gate, RecoveryGate):
             raise TypeError("gate must be a RecoveryGate or None")
-        if self.schema_version is not None and (
-            not isinstance(self.schema_version, int) or isinstance(self.schema_version, bool)
-        ):
-            raise TypeError("schema_version must be an int that is not a bool, or None")
-        if self.fingerprint is not None and not isinstance(self.fingerprint, str):
-            raise TypeError("fingerprint must be a str or None")
+        # Exactly `int` and exactly `str`. `isinstance` admitted an `int`
+        # subclass whose `__format__` rendered
+        # `"capacity_available=… medium=usb-SN-…"` through the f-string below
+        # — a capacity figure and a medium identity, which is the leak this
+        # method was written to remove, arriving through the check itself.
+        if self.schema_version is not None:
+            _require_an_exact_int("schema_version", self.schema_version)
+        if self.fingerprint is not None:
+            _require_an_exact_str("fingerprint", self.fingerprint)
 
     def __repr__(self) -> str:
         """Redacting, because **this** is the object destined for a log.
@@ -692,6 +788,7 @@ class RecoveryWorkflow:
         "_stage",
         "_audit",
         "_snapshot",
+        "_pinned",
         "_candidate",
         "_sealed",
     )
@@ -702,7 +799,8 @@ class RecoveryWorkflow:
         _require_a_real_quarantine(quarantine)
         if type(binding) is not SessionBinding:
             raise TypeError("binding must be a SessionBinding")
-        if not isinstance(session_id, str) or not session_id.strip():
+        _require_an_exact_str("session_id", session_id)
+        if not session_id.strip():
             raise TypeError("session_id must be a non-empty string")
 
         object.__setattr__(self, "_sealed", False)
@@ -711,6 +809,7 @@ class RecoveryWorkflow:
         self._session_id = session_id
         self._stage = RecoveryStage.NOT_STARTED
         self._snapshot: SnapshotDescriptor | None = None
+        self._pinned: tuple[object, ...] | None = None
         self._candidate: RecoveryCandidate | None = None
         self._audit: list[SnapshotAuditEntry] = []
         object.__setattr__(self, "_sealed", True)
@@ -760,6 +859,7 @@ class RecoveryWorkflow:
         """
 
         _require_a_real_snapshot(snapshot)
+        _require_real_observations(observations)
         _require_an_actual_bool("started_by_operator", started_by_operator)
         self._require_stage(RecoveryStage.NOT_STARTED)
         self._require_this_sitting(session_id)
@@ -781,6 +881,13 @@ class RecoveryWorkflow:
         self._require_the_gates(snapshot, observations, session_id=session_id)
 
         self._sealed_assign("_snapshot", snapshot)
+        # The **values**, not the object. `held = self._snapshot` was the same
+        # object the caller passed in and passed again, so the four field
+        # comparisons compared an object with itself: a review mutated the
+        # frozen descriptor in place between the stages, committed on a
+        # different schema version and fingerprint, and the audit recorded two
+        # fingerprints across one workflow with no substitution between them.
+        self._sealed_assign("_pinned", _fields_of(snapshot))
         self._sealed_assign("_stage", RecoveryStage.PREFLIGHT_PASSED)
         self._record(
             SnapshotAuditEvent.RECOVERY_STARTED,
@@ -804,6 +911,7 @@ class RecoveryWorkflow:
         """
 
         _require_a_real_snapshot(snapshot)
+        _require_real_observations(observations)
         self._require_stage(RecoveryStage.PREFLIGHT_PASSED)
         self._require_this_sitting(session_id)
         self._require_the_same_snapshot(snapshot)
@@ -834,6 +942,8 @@ class RecoveryWorkflow:
         """
 
         _require_a_real_snapshot(snapshot)
+        _require_real_observations(observations)
+        _require_an_acquisition(acquisition)
         _require_an_actual_bool("confirmed", confirmed)
         self._require_stage(RecoveryStage.TRIAL_OPEN)
         self._require_this_sitting(session_id)
@@ -844,14 +954,18 @@ class RecoveryWorkflow:
         if not confirmed:
             self._refuse_gate(RecoveryGate.OPERATOR_CONFIRMATION)
 
+        # The candidate is minted and held **before** the stage becomes
+        # terminal, because `_sealed_assign` refuses to move anything once it
+        # is. The order is the rule's, not a preference: a terminal workflow
+        # moves nothing, including the field that would record its own answer.
+        minted = RecoveryCandidate(snapshot.schema_version, snapshot.fingerprint)
+        self._sealed_assign("_candidate", minted)
         self._sealed_assign("_stage", RecoveryStage.COMMITTED)
         self._record(
             SnapshotAuditEvent.RECOVERY_COMPLETED,
             schema_version=snapshot.schema_version,
             fingerprint=snapshot.fingerprint,
         )
-        minted = RecoveryCandidate(snapshot.schema_version, snapshot.fingerprint)
-        self._sealed_assign("_candidate", minted)
         return minted
 
     def holds(self, candidate: RecoveryCandidate) -> bool:
@@ -865,19 +979,27 @@ class RecoveryWorkflow:
 
         return self._candidate is not None and self._candidate is candidate
 
-    def interrupt(self) -> None:
+    def interrupt(self, *, session_id: str) -> None:
         """The operator stopped, or the machine did. Terminal, and fail-closed.
 
         Nothing is partially restored and nothing is retried. The volume stays
         quarantined, which it was before this workflow and is after it.
+
+        `session_id` is required here as it is everywhere else. This was the
+        one stage method exempt from it, so any holder of the object, from any
+        sitting, could end the workflow. Fail-closed, so the exemption only
+        ever bought a denial — and a denial is still an outcome somebody else
+        chose.
         """
 
+        _require_an_exact_str("session_id", session_id)
         if self._stage in TERMINAL_STAGES:
             self._refuse(
                 Refusal.WORKFLOW_ALREADY_FINISHED,
                 "this workflow has ended; a further attempt is a new workflow "
                 "that runs every gate again",
             )
+        self._require_this_sitting(session_id)
         self._sealed_assign("_stage", RecoveryStage.INTERRUPTED)
         self._record(SnapshotAuditEvent.RECOVERY_INTERRUPTED)
 
@@ -893,7 +1015,16 @@ class RecoveryWorkflow:
         for one sitting by passing another one's id to every stage.
         """
 
+        # The caller's operand was on the left of a `!=`, so a `str` subclass
+        # whose `__ne__` answered `False` decided this check for the caller —
+        # and Python's reflected-priority rule handed it `binding_applies`'s
+        # session half as well, from the same four lines. Pinning the type
+        # first is what makes the comparison below a comparison.
+        _require_an_exact_str("session_id", session_id)
         if session_id != self._session_id:
+            if self._stage not in TERMINAL_STAGES:
+                self._sealed_assign("_stage", RecoveryStage.REFUSED)
+                self._record(SnapshotAuditEvent.RECOVERY_FOREIGN_SITTING)
             self._refuse(
                 Refusal.NOT_THIS_SITTING,
                 "this workflow belongs to one sitting; a stage asked for "
@@ -924,16 +1055,14 @@ class RecoveryWorkflow:
         exists to notice", and nothing was left that had noticed it.
         """
 
-        # Field by field, so a hostile `__ne__` cannot answer for it. The
-        # type is already pinned by `_require_a_real_snapshot`; this is the
-        # second line, because the comparison is the whole of the check.
-        held = self._snapshot
-        same = held is not None and (
-            snapshot.container_version == held.container_version
-            and snapshot.schema_version == held.schema_version
-            and snapshot.integrity is held.integrity
-            and snapshot.fingerprint == held.fingerprint
-        )
+        # Against the **values** taken at `start`, not against the object
+        # still held: `held = self._snapshot` was the object the caller
+        # presented, so the comparison compared it with itself and an in-place
+        # mutation of the frozen descriptor passed unnoticed. The field types
+        # are pinned to exactly `int` and exactly `str` in `__post_init__`, so
+        # neither operand can answer for the comparison either.
+        pinned = self._pinned
+        same = pinned is not None and _fields_of(snapshot) == pinned
         if not same:
             self._sealed_assign("_stage", RecoveryStage.REFUSED)
             self._record(SnapshotAuditEvent.RECOVERY_SNAPSHOT_SUBSTITUTED)
@@ -979,6 +1108,18 @@ class RecoveryWorkflow:
                 # `session_mode` defines, and what crosses back is the same
                 # single enum value. This module never sees a passphrase.
                 self._refuse_gate(RecoveryGate.KEY_ACQUISITION)
+            # **Again, after the prompt.** `attempt()` is the operator typing a
+            # passphrase — the one step in this workflow that blocks on a
+            # human — and the fence is raised by device monitoring when the
+            # medium is pulled. Reading the flags only above put the last read
+            # on the wrong side of the only wait, and a review pulled the
+            # medium during the prompt and committed over a fenced one. The
+            # class docstring already said a gate checked once is a gate
+            # checked at a moment that has passed; this is that moment.
+            if self._quarantine.is_fenced:
+                self._refuse_gate(RecoveryGate.MEDIUM_FENCED)
+            if not self._quarantine.volume_is_quarantined:
+                self._refuse_gate(RecoveryGate.NOTHING_TO_RECOVER)
 
         if snapshot.integrity is not SnapshotIntegrity.VERIFIED:
             self._refuse_gate(RecoveryGate.INTEGRITY_VERIFICATION)
@@ -1013,6 +1154,34 @@ class RecoveryWorkflow:
         )
 
     def _sealed_assign(self, name: str, value: object) -> None:
+        """The seal's one writer, and it is not a general one.
+
+        `__setattr__` refuses ordinary assignment with the words "the
+        quarantine, the binding and the sitting cannot be replaced", and this
+        method — a bound method on every instance — replaced any of them, at
+        the same reach as a typo in a `self._…` line. A review used it to
+        resume after `interrupt`, to swap the quarantine for an unfenced one,
+        and to jump from `NOT_STARTED` to `TRIAL_OPEN` and mint a candidate
+        whose whole audit was `['recovery_completed']`.
+
+        This does not claim to be a capability boundary: `object.__setattr__`
+        is not defensible in Python and this module says so about the
+        quarantine. What it removes is the accidental reach — the four fields
+        that legitimately move are named, and a terminal workflow moves none
+        of them.
+        """
+
+        if name not in _MOVES_DURING_A_RECOVERY:
+            raise AttributeError(
+                "only the stage, the snapshot, its pinned fields and the "
+                "candidate move; the quarantine, the binding and the sitting "
+                "cannot be replaced"
+            )
+        if self._stage in TERMINAL_STAGES:
+            raise AttributeError(
+                "this workflow has ended; a terminal stage is terminal, and a "
+                "further attempt is a new workflow that runs every gate again"
+            )
         object.__setattr__(self, name, value)
 
 

@@ -707,7 +707,7 @@ def test_an_interruption_is_terminal_and_restores_nothing(observations) -> None:
     flow.start(snap, observations, session_id=SESSION, started_by_operator=True)
     flow.open_trial(snap, observations, session_id=SESSION)
 
-    flow.interrupt()
+    flow.interrupt(session_id=SESSION)
     assert flow.stage is RecoveryStage.INTERRUPTED
 
     for attempt in (
@@ -715,7 +715,7 @@ def test_an_interruption_is_terminal_and_restores_nothing(observations) -> None:
         lambda: flow.commit(
             snap, observations, session_id=SESSION, acquisition=Opens(), confirmed=True
         ),
-        flow.interrupt,
+        lambda: flow.interrupt(session_id=SESSION),
     ):
         with pytest.raises(RecoveryRefused) as refused:
             attempt()
@@ -936,7 +936,7 @@ def test_no_audit_entry_can_carry_contents_a_figure_or_an_identity() -> None:
         assert not any(bad in name for name in names), bad
 
 
-def test_the_audit_vocabulary_is_exactly_eight_classifications() -> None:
+def test_the_audit_vocabulary_is_exactly_nine_classifications() -> None:
     assert {event.value for event in SnapshotAuditEvent} == {
         "migration_refused",
         "snapshot_written",
@@ -946,6 +946,7 @@ def test_the_audit_vocabulary_is_exactly_eight_classifications() -> None:
         "recovery_refused",
         "recovery_interrupted",
         "recovery_snapshot_substituted",
+        "recovery_foreign_sitting",
     }
 
 
@@ -1068,7 +1069,73 @@ def test_this_module_cannot_reach_a_host_a_network_a_vm_or_a_second_partition() 
     A denylist of module names is one `__import__` wide — a review proved that
     against two of this repository's guards by assembling module names from
     fragments and reading `__builtins__` with no import statement at all.
+
+    **And a denylist of *names* is one name wide.** Round four proved that too:
+    `locals` was not on the list below, at module level `locals()` *is* the
+    module dict, CPython puts `__builtins__` in it, and `.get("op" + "en")`
+    reaches it with no import, no subscript, no `getattr` and no `except`. The
+    string constants were never examined, so the spelling could be assembled.
+    `preflight` wrote to the disk and ran a subprocess with the suite green.
+
+    So the first rule below is not a denylist. Every free name — every name
+    this module reads without binding it — is listed, and the assertion is
+    **equality**. A builtin that is not one of these fourteen is not reachable
+    by any spelling, because reaching it needs a name, and the name is absent.
+    `locals`, `breakpoint`, `globals`, `vars`, `open`, `__import__`, `eval` and
+    whatever the next round finds are all refused by the same line, which is
+    the difference between a list of what is forbidden and a list of what is
+    permitted. Everything after it is a second line, kept because it is cheap.
+
+    What this still does **not** establish is that the module performs no I/O:
+    a static scan refuses the shapes it knows. `test_the_workflow_performs_no_
+    io_when_it_actually_runs` is the capability check, and it is the one that
+    covers what this module *calls*.
     """
+
+    bound: set[str] = set()
+    for node in ast.walk(TREE):
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            bound.add(node.name)
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            spec = node.args
+            for argument in (
+                *spec.posonlyargs,
+                *spec.args,
+                *spec.kwonlyargs,
+                spec.vararg,
+                spec.kwarg,
+            ):
+                if argument is not None:
+                    bound.add(argument.arg)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store | ast.Del):
+            bound.add(node.id)
+        if isinstance(node, ast.alias):
+            bound.add((node.asname or node.name).split(".")[0])
+        if isinstance(node, ast.ExceptHandler) and node.name:
+            bound.add(node.name)
+
+    free = {
+        node.id
+        for node in ast.walk(TREE)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+    } - bound
+    assert free == {
+        "AttributeError",
+        "Exception",
+        "TypeError",
+        "bool",
+        "frozenset",
+        "getattr",  # and only in the seal's one shape, pinned below
+        "int",
+        "isinstance",
+        "list",
+        "object",
+        "property",
+        "str",
+        "super",
+        "tuple",
+        "type",
+    }, f"unexpected free names: {sorted(free)}"
 
     reachable: set[str] = set()
     for node in ast.walk(TREE):
@@ -1079,7 +1146,10 @@ def test_this_module_cannot_reach_a_host_a_network_a_vm_or_a_second_partition() 
     assert not reachable & {
         "__builtins__",
         "globals",
+        "locals",
         "vars",
+        "breakpoint",
+        "mro",
         "eval",
         "exec",
         "compile",
@@ -1352,7 +1422,7 @@ def test_no_public_method_ever_turns_either_flag_off(observations, elsewhere) ->
         lambda flow, q: flow.commit(
             snap, observations, session_id=SESSION, acquisition=Opens(), confirmed=True
         ),
-        lambda flow, q: flow.interrupt(),
+        lambda flow, q: flow.interrupt(session_id=SESSION),
         lambda flow, q: flow.audit(),
         lambda flow, q: flow.stage,
         lambda flow, q: flow.holds(RecoveryCandidate(1, FINGERPRINT)),
@@ -1791,7 +1861,14 @@ def test_a_workflow_refuses_a_stage_asked_for_another_sitting(observations) -> N
             descriptor(), observations, session_id="another-sitting", started_by_operator=True
         )
     assert refused.value.refusal is Refusal.NOT_THIS_SITTING
-    assert flow.stage is RecoveryStage.NOT_STARTED
+    # Terminal and audited, on the module's own principle that a swap is an
+    # event rather than a typo. It used to raise and leave `NOT_STARTED` with
+    # an empty audit, so a foreign sitting could probe a live workflow as often
+    # as it liked and nothing recorded that it had.
+    assert flow.stage is RecoveryStage.REFUSED
+    assert [entry.event for entry in flow.audit()] == [
+        SnapshotAuditEvent.RECOVERY_FOREIGN_SITTING
+    ]
 
 
 def test_the_audit_repr_does_not_render_the_fingerprint(observations) -> None:
@@ -2305,14 +2382,14 @@ def test_the_snapshot_pin_compares_every_field_the_descriptor_has() -> None:
 
     from azazel_boot import snapshot as module
 
-    source = inspect.getsource(module.RecoveryWorkflow._require_the_same_snapshot)
+    source = inspect.getsource(module._fields_of)
     tree = ast.parse(textwrap.dedent(source))
     compared = {
         node.attr
         for node in ast.walk(tree)
         if isinstance(node, ast.Attribute)
         and isinstance(node.value, ast.Name)
-        and node.value.id in {"snapshot", "held"}
+        and node.value.id == "snapshot"
     }
     declared = {field.name for field in dataclasses.fields(SnapshotDescriptor)}
     assert compared == declared, (
@@ -2333,3 +2410,332 @@ def test_the_snapshot_pin_compares_every_field_the_descriptor_has() -> None:
                 getattr(left, name) == getattr(right, name) for name in sorted(declared)
             )
             assert (left == right) is field_by_field
+
+
+# --------------------------------------------------------------------------
+# The fourth review's findings on the commit gates, each as its reproduction
+# --------------------------------------------------------------------------
+
+
+def test_a_commit_without_a_key_acquisition_is_refused(observations) -> None:
+    """R4-1: `acquisition=None` skipped D8's second gate and left no trace.
+
+    `_require_the_gates` takes an optional acquisition because `start` and
+    `open_trial` have none, and `commit` forwarded whatever it was handed into
+    an `if acquisition is not None:`. A commit with `None` produced an audit
+    **byte-identical** to a legitimate one, so nothing downstream could tell a
+    recovery that unlocked the volume from one where nobody was ever prompted.
+
+    Worse than the hostile cases around it: a caller reaches this by writing
+    `acquisition=maybe_an_acquisition`, not by trying.
+    """
+
+    flow = workflow(observations)
+    snap = descriptor()
+    flow.start(snap, observations, session_id=SESSION, started_by_operator=True)
+    flow.open_trial(snap, observations, session_id=SESSION)
+
+    with pytest.raises(TypeError, match="requires a key acquisition"):
+        flow.commit(snap, observations, session_id=SESSION, acquisition=None, confirmed=True)
+    assert flow.stage is RecoveryStage.TRIAL_OPEN
+    assert flow.holds(RecoveryCandidate(1, FINGERPRINT)) is False
+
+    # And the honest failing acquisition, for the contrast the finding rests on.
+    refused_flow = workflow(observations)
+    refused_flow.start(snap, observations, session_id=SESSION, started_by_operator=True)
+    refused_flow.open_trial(snap, observations, session_id=SESSION)
+    with pytest.raises(RecoveryRefused) as refused:
+        refused_flow.commit(
+            snap,
+            observations,
+            session_id=SESSION,
+            acquisition=Opens(AttemptOutcome.REJECTED),
+            confirmed=True,
+        )
+    assert refused.value.refusal is Refusal.GATE_REFUSED
+    assert refused_flow.stage is RecoveryStage.REFUSED
+
+
+def test_a_sitting_id_cannot_answer_its_own_check(observations) -> None:
+    """R4-2: round three's fix compared values the caller supplied.
+
+    `_require_this_sitting` had the caller's operand on the **left** of a
+    `!=`, so a `str` subclass whose `__ne__` answers `False` decided it. The
+    binding's session half fell to the same object: there the caller's value is
+    on the right, and Python gives a subclass reflected priority.
+
+    So the type is pinned before the comparison, which is what makes the
+    comparison a comparison.
+    """
+
+    class AnySitting(str):
+        def __eq__(self, other) -> bool:
+            return True
+
+        def __ne__(self, other) -> bool:
+            return False
+
+        def __hash__(self) -> int:
+            return 0
+
+    lying = AnySitting("some-other-sitting-entirely")
+    assert (lying != SESSION) is False  # it really does lie
+
+    flow = workflow(observations)
+    with pytest.raises(TypeError, match="session_id must be a str exactly"):
+        flow.start(descriptor(), observations, session_id=lying, started_by_operator=True)
+    assert flow.stage is RecoveryStage.NOT_STARTED
+
+    with pytest.raises(TypeError, match="session_id must be a str exactly"):
+        RecoveryWorkflow(
+            a_quarantine(),
+            SessionBinding(
+                host_fingerprint=host_fingerprint(observations), session_id=SESSION
+            ),
+            session_id=lying,
+        )
+
+
+@pytest.mark.parametrize("field_name", ["container_version", "schema_version"])
+def test_a_descriptor_built_from_a_lying_int_is_refused(field_name) -> None:
+    """R4-3: the substitution check compared fields that answered for it.
+
+    `__post_init__` took `isinstance(..., int)`, so a review built a **genuine**
+    `SnapshotDescriptor` through the public constructor — no
+    `object.__setattr__` — whose `container_version` really was 7 and whose
+    comparisons said whatever it liked. It passed the substitution check and
+    the container-version half of the integrity gate, and committed on a
+    container format in no known set.
+    """
+
+    class Answers(int):
+        def __eq__(self, other) -> bool:
+            return True
+
+        def __ne__(self, other) -> bool:
+            return False
+
+        def __hash__(self) -> int:
+            return 0
+
+    arguments = {
+        "container_version": 1,
+        "schema_version": 1,
+        "integrity": SnapshotIntegrity.VERIFIED,
+        "fingerprint": FINGERPRINT,
+    }
+    arguments[field_name] = Answers(7)
+    with pytest.raises(TypeError, match=field_name):
+        SnapshotDescriptor(**arguments)
+
+    with pytest.raises(TypeError, match="fingerprint"):
+        SnapshotDescriptor(1, 1, SnapshotIntegrity.VERIFIED, type("S", (str,), {})("x"))
+
+
+def test_the_medium_is_read_again_after_the_passphrase_prompt(observations) -> None:
+    """R4-4: the last fence read was on the wrong side of the only wait.
+
+    `attempt()` is the operator typing a passphrase — the one step in this
+    workflow that blocks on a human — and the fence is raised by device
+    monitoring when the medium is pulled. The gates read the flags above it and
+    never again, so a medium pulled *during the prompt* committed.
+
+    The class docstring already said a gate checked once is a gate checked at a
+    moment that has passed. This is that moment, driven: the acquisition itself
+    pulls the medium, which is what a pull during a prompt looks like from
+    inside the function.
+    """
+
+    quarantine = a_quarantine()
+
+    class PulledDuringThePrompt(Opens):
+        def attempt(self):
+            quarantine.fence()
+            return super().attempt()
+
+    flow = workflow(observations, quarantine=quarantine)
+    snap = descriptor()
+    flow.start(snap, observations, session_id=SESSION, started_by_operator=True)
+    flow.open_trial(snap, observations, session_id=SESSION)
+    assert quarantine.is_fenced is False
+
+    with pytest.raises(RecoveryRefused) as refused:
+        flow.commit(
+            snap,
+            observations,
+            session_id=SESSION,
+            acquisition=PulledDuringThePrompt(),
+            confirmed=True,
+        )
+    assert refused.value.refusal is Refusal.GATE_REFUSED
+    assert quarantine.is_fenced is True
+    assert flow.stage is RecoveryStage.REFUSED
+    assert flow.holds(RecoveryCandidate(1, FINGERPRINT)) is False
+    assert [entry.gate for entry in flow.audit() if entry.gate is not None] == [
+        RecoveryGate.MEDIUM_FENCED
+    ]
+
+
+def test_mutating_the_held_descriptor_between_the_stages_is_a_substitution(
+    observations,
+) -> None:
+    """R4-5: `held = self._snapshot` compared the object with itself.
+
+    The workflow held the very object the caller passed to `start` and passed
+    again to `commit`, so the four field comparisons were an aliasing
+    tautology. A review mutated the frozen descriptor in place between the
+    stages and committed on a different schema version and fingerprint — and
+    the audit recorded two different fingerprints across one workflow with no
+    `RECOVERY_SNAPSHOT_SUBSTITUTED` between them, because the check could not
+    fire against a value it had never stored.
+    """
+
+    flow = workflow(observations)
+    snap = descriptor()
+    flow.start(snap, observations, session_id=SESSION, started_by_operator=True)
+
+    object.__setattr__(snap, "schema_version", 2)
+    object.__setattr__(snap, "fingerprint", "snapshot-fingerprint-0000")
+
+    with pytest.raises(RecoveryRefused) as refused:
+        flow.open_trial(snap, observations, session_id=SESSION)
+    assert refused.value.refusal is Refusal.SNAPSHOT_CHANGED_UNDER_THE_WORKFLOW
+    assert flow.stage is RecoveryStage.REFUSED
+    assert SnapshotAuditEvent.RECOVERY_SNAPSHOT_SUBSTITUTED in [
+        entry.event for entry in flow.audit()
+    ]
+
+
+def test_the_seal_writes_only_the_four_fields_a_recovery_moves(observations) -> None:
+    """R4-6: `_sealed_assign` was a general unsealing method on every instance.
+
+    `__setattr__` refuses ordinary assignment with the words "the quarantine,
+    the binding and the sitting cannot be replaced", and the class handed out a
+    bound method that replaced any of them. A review used it to resume after
+    `interrupt`, to swap the quarantine for an unfenced one, and to jump from
+    `NOT_STARTED` straight to `TRIAL_OPEN` and mint a candidate whose entire
+    audit was `['recovery_completed']`.
+
+    This is **not** claimed as a capability boundary — `object.__setattr__` is
+    not defensible in Python and this module says so about the quarantine. What
+    it removes is the accidental reach: the four fields that legitimately move
+    are named, and a terminal workflow moves none of them.
+    """
+
+    flow = workflow(observations)
+    for name, value in (
+        ("_quarantine", a_quarantine(quarantined=False)),
+        ("_binding", None),
+        ("_session_id", "another-sitting"),
+        ("_sealed", False),
+        ("_audit", []),
+    ):
+        with pytest.raises(AttributeError, match="cannot be replaced"):
+            flow._sealed_assign(name, value)
+
+    snap = descriptor()
+    flow.start(snap, observations, session_id=SESSION, started_by_operator=True)
+    flow.interrupt(session_id=SESSION)
+    assert flow.stage is RecoveryStage.INTERRUPTED
+    for name, value in (
+        ("_stage", RecoveryStage.TRIAL_OPEN),
+        ("_snapshot", descriptor(schema_version=2)),
+        ("_candidate", RecoveryCandidate(2, FINGERPRINT)),
+    ):
+        with pytest.raises(AttributeError, match="has ended"):
+            flow._sealed_assign(name, value)
+    assert flow.stage is RecoveryStage.INTERRUPTED
+    assert flow.holds(RecoveryCandidate(2, FINGERPRINT)) is False
+
+
+def test_an_audit_entry_refuses_an_int_that_renders_as_a_capacity() -> None:
+    """R4-7: `isinstance` admitted an `int` subclass, and the repr formats it.
+
+    The entry's own `__post_init__` exists to stop a `schema_version` carrying
+    `"capacity_available=… medium=usb-SN-…"` into the object this module calls
+    "destined for a log" — ADR-0010 D10 names those two payloads specifically.
+    An `int` subclass whose `__format__` renders that string went through the
+    check written to refuse it, on an otherwise entirely legitimate commit.
+    """
+
+    class Renders(int):
+        def __str__(self) -> str:
+            return "capacity_available=17402 medium=usb-SN-BOOT-0001"
+
+        def __format__(self, spec) -> str:
+            return self.__str__()
+
+    with pytest.raises(TypeError, match="schema_version must be an int exactly"):
+        SnapshotAuditEntry(
+            event=SnapshotAuditEvent.RECOVERY_STARTED, schema_version=Renders(1)
+        )
+    with pytest.raises(TypeError, match="fingerprint must be a str exactly"):
+        SnapshotAuditEntry(
+            event=SnapshotAuditEvent.RECOVERY_STARTED,
+            fingerprint=type("F", (str,), {})("x"),
+        )
+
+
+def test_an_interruption_belongs_to_its_sitting_like_every_other_stage(
+    observations,
+) -> None:
+    """R4, low: `interrupt` was the one stage method exempt from the sitting.
+
+    Any holder of the object, from any sitting, could end the workflow. It
+    fails closed, so the exemption only ever bought a denial — and a denial is
+    still an outcome somebody else chose, on a workflow that was mid-flight.
+    """
+
+    flow = workflow(observations)
+    snap = descriptor()
+    flow.start(snap, observations, session_id=SESSION, started_by_operator=True)
+
+    with pytest.raises(RecoveryRefused) as refused:
+        flow.interrupt(session_id="another-sitting")
+    assert refused.value.refusal is Refusal.NOT_THIS_SITTING
+
+    with pytest.raises(TypeError, match="session_id must be a str exactly"):
+        flow.interrupt(session_id=type("S", (str,), {})(SESSION))
+
+
+@pytest.mark.parametrize(
+    "stage", ["start", "open_trial", "commit"]
+)
+def test_every_stage_refuses_observations_that_are_not_observations(
+    stage, observations
+) -> None:
+    """R4, low: the one input to the gates that nothing pinned.
+
+    `binding_applies` re-derives the host fingerprint from these rather than
+    re-comparing a field it was handed, so a stand-in does not forge a host.
+    But every other input to the gates is pinned, and this was the missing
+    member of the set: a commit ran on a tuple of two-attribute stand-ins with
+    no `InterfaceObservation` involved anywhere.
+    """
+
+    class NotAnObservation:
+        interface_key = "en-0001"
+        is_commissionable = True
+
+    stand_ins = (NotAnObservation(), NotAnObservation())
+    flow = workflow(observations)
+    snap = descriptor()
+    if stage != "start":
+        flow.start(snap, observations, session_id=SESSION, started_by_operator=True)
+    if stage == "commit":
+        flow.open_trial(snap, observations, session_id=SESSION)
+
+    call = {
+        "start": lambda items: flow.start(
+            snap, items, session_id=SESSION, started_by_operator=True
+        ),
+        "open_trial": lambda items: flow.open_trial(snap, items, session_id=SESSION),
+        "commit": lambda items: flow.commit(
+            snap, items, session_id=SESSION, acquisition=Opens(), confirmed=True
+        ),
+    }[stage]
+
+    with pytest.raises(TypeError, match="InterfaceObservation"):
+        call(stand_ins)
+    with pytest.raises(TypeError, match="tuple"):
+        call(list(observations))
