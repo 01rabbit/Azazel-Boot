@@ -54,7 +54,7 @@ quarantined, and no write has been prevented on any machine.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 
 #: The version an artifact record carries as `quarantine_policy_version`.
@@ -140,9 +140,13 @@ class DeviceClass(Enum):
 
     It is an input an impostor sets freely, so it decides no outcome: the
     quarantine classifies by identity alone, and `Disposition` is its own
-    conclusion. The field is kept because a caller may want to record what a
-    device claimed; `tests/unit/test_quarantine_harness.py` asserts that
-    changing it changes nothing.
+    conclusion. `tests/unit/test_quarantine_harness.py` asserts that changing it
+    changes nothing.
+
+    It is not entirely ignored. When a device carrying the medium's identity
+    says it is *not* the medium, the disagreement is written to the audit as
+    `identity_claim_mismatch` — the classification is unaffected, and a
+    collision that nobody notices is worse than one that is merely allowed.
 
     `HOST_STORAGE` rather than "internal": `internal` is a retired role word in
     this package (`tests/unit/test_commissioning.py`), it answered a different
@@ -294,23 +298,35 @@ class AuditEntry:
     verdict: str
 
 
-@dataclass
 class Quarantine:
     """The running rule. Devices are observed as they arrive, never enumerated.
 
-    The three pieces of state are `init=False`: an adversarial review built a
-    `Quarantine` with a ready-made approval through the generated constructor
-    and bypassed every check in `approve_export` at once. That closes the
-    constructor and **not** attribute assignment — Python has no way to close
-    the latter, so this is defence against a careless caller, not against code
-    already running in the process.
+    The constructor takes the session and the medium's identity and nothing
+    else. It was a dataclass once, and an adversarial review built one with a
+    ready-made approval through the generated `__init__`, bypassing every check
+    in `approve_export` at a stroke. A second review pointed out that
+    identity-only classification makes `boot_medium_identity` the whole of this
+    module's authority — assigning to it promotes any device — so it is read
+    through a property now.
+
+    Neither closes attribute assignment; Python has no way to. This is defence
+    against a careless caller, not against code already running in the process.
     """
 
-    session_id: str
-    boot_medium_identity: str
-    _dispositions: dict[str, Disposition] = field(default_factory=dict, init=False)
-    _approval: ExportApproval | None = field(default=None, init=False)
-    _audit: list[AuditEntry] = field(default_factory=list, init=False)
+    def __init__(self, session_id: str, boot_medium_identity: str) -> None:
+        self._session_id = session_id
+        self._boot_medium_identity = boot_medium_identity
+        self._dispositions: dict[str, Disposition] = {}
+        self._approval: ExportApproval | None = None
+        self._audit: list[AuditEntry] = []
+
+    @property
+    def session_id(self) -> str:
+        return self._session_id
+
+    @property
+    def boot_medium_identity(self) -> str:
+        return self._boot_medium_identity
 
     def observe(self, device: Device) -> Disposition:
         """Classify a device on appearance, by identity and nothing else.
@@ -323,11 +339,17 @@ class Quarantine:
         """
 
         previous = self._dispositions.get(device.identity)
-        disposition = (
-            Disposition.BOOT_MEDIUM
-            if device.identity == self.boot_medium_identity
-            else Disposition.QUARANTINED
-        )
+        is_medium = device.identity == self._boot_medium_identity
+        disposition = Disposition.BOOT_MEDIUM if is_medium else Disposition.QUARANTINED
+
+        if is_medium and device.device_class is not DeviceClass.BOOT_MEDIUM:
+            # The identity says medium and the device says otherwise. Identity
+            # decides — the class is untrusted — but the disagreement is
+            # information, and an unrecorded collision is an invisible one.
+            # Duplicate or blank serials on USB and NVMe bridges are a known
+            # class of hardware, and nothing in this repository yet constrains
+            # how an identity is constructed.
+            self._record(disposition, "identity_claim_mismatch", "recorded")
 
         if previous is not None:
             self._withdraw_on_reappearance(device.identity, disposition)
@@ -343,7 +365,7 @@ class Quarantine:
         was refused", which is what the audit shows either way.
         """
 
-        return self._dispositions.get(self.boot_medium_identity) is Disposition.BOOT_MEDIUM
+        return self._dispositions.get(self._boot_medium_identity) is Disposition.BOOT_MEDIUM
 
     def disposition(self, device: Device) -> Disposition | None:
         return self._dispositions.get(device.identity)
@@ -405,7 +427,7 @@ class Quarantine:
         is being written to.
         """
 
-        if approval.session_id != self.session_id:
+        if approval.session_id != self._session_id:
             raise ExportRefused(
                 Refusal.NOT_THIS_SESSION, "an approval does not outlive a session"
             )
@@ -413,7 +435,7 @@ class Quarantine:
         # to the medium's own identity after a demotion had changed its
         # disposition, which sent the incident record to the one identity this
         # module says it cannot adjudicate.
-        if approval.target_identity == self.boot_medium_identity:
+        if approval.target_identity == self._boot_medium_identity:
             raise ExportRefused(
                 Refusal.BOOT_MEDIUM_IS_NOT_AN_EXPORT_TARGET,
                 "that is the medium's identity; the export path exists for host "
@@ -426,6 +448,10 @@ class Quarantine:
                 "the target has not appeared; an approval is not armed in advance",
             )
         if disposition is Disposition.BOOT_MEDIUM:
+            # Unreachable while classification is identity-only: the check above
+            # has already refused every identity that can hold this disposition.
+            # Kept as defence in depth against a future change to `observe`, and
+            # labelled so it is not mistaken for a second independent check.
             raise ExportRefused(
                 Refusal.BOOT_MEDIUM_IS_NOT_AN_EXPORT_TARGET,
                 "the export path exists for host storage; the medium is written "

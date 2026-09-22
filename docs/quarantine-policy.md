@@ -71,7 +71,12 @@ identity is not the booted medium's is quarantined.
 device with no rule.
 
 **What a device says about itself decides nothing.** Classification is identity
-against identity. An earlier version consulted the class a device asserts, and a
+against identity. When a device carrying the medium's identity says it is *not*
+the medium, the classification is unaffected and the disagreement is written to
+the audit as `identity_claim_mismatch`: duplicate or blank serials on USB and
+NVMe bridges are a known class of hardware, nothing in this repository yet
+constrains how an identity is constructed, and a collision nobody notices is
+worse than one that is merely allowed. An earlier version consulted the class a device asserts, and a
 second review showed the consequence: one hostile or garbled observation could
 demote the medium for the rest of the session — an untrusted input could not
 promote anything, but it could destroy the session's only writable volume, and
@@ -126,20 +131,40 @@ a persisted preference".
 replaced by another disk reporting the same identity is not the device that was
 approved, so any re-observation withdraws the approval naming it. An approval
 also cannot be armed in advance for a device that has never appeared, and the
-medium's identity is never an approvable target — checked by identity as well as
-by disposition, because a review reached it through the disposition alone.
+medium's identity is never an approvable target — checked **by identity**, which
+is the live check. The disposition check behind it is unreachable while
+classification is identity-only and is kept, labelled, as defence in depth
+against a future change to `observe`; a review found the two presented as
+independent when they were two spellings of one.
 
 **An approval covers its target for the rest of the session, not one write.** It
 is not consumed by an export; an operator who wants it to end calls
-`withdraw_export()`, and a re-appearance ends it automatically. The audit records
-the grant, any supersession, the withdrawal, and a withdrawal that had nothing
-to withdraw.
+`withdraw_export()`, and a re-appearance ends it automatically. A second
+*accepted* approval replaces the first — **a refused one replaces nothing**, so
+after a refusal the previous approval is still live even though the audit's last
+approval entry reads as a refusal. The audit records the grant, any
+supersession, the withdrawal, and a withdrawal that had nothing to withdraw.
 
 The audit keeps the **quarantine's own conclusion** — not the class the device
 claimed, which an impostor sets freely — with the action and the verdict, and it
 records approvals, their refusals and their withdrawals. It does not keep a
 device identity, and neither does any refusal message: those strings reach a
 console and a log on media that travels through uncontrolled hands.
+
+### What refusing assembly everywhere costs
+
+`lvm_assembly`, `md_assembly` and `zfs_import` are refused before disposition is
+consulted, and no approval unblocks them. Nothing in Azazel-Boot conflicts with
+that today: [ADR-0008](adr/0008-debian-13-live-baseline.md) D4 specifies
+persistence as USB-side with optional LUKS2, and no document mentions a volume
+manager. But LVM-on-LUKS is a common Debian layout, and this decision means the
+**medium** may never use one either.
+
+That consequence belongs in ADR-0008 D4 rather than only in a decision module,
+and this document does not put it there: amending an accepted ADR is its own
+change. It is recorded here so a future persistence design meets it as a stated
+constraint rather than as an unappealable refusal from a file nobody thought to
+consult.
 
 ## 5. What is excluded from the zero-write claim
 

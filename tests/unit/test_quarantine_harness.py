@@ -19,7 +19,7 @@ updater; and every check could be skipped through the generated constructor.
 
 from __future__ import annotations
 
-import dataclasses
+import inspect
 
 import pytest
 
@@ -335,14 +335,52 @@ def test_a_replacement_approval_does_not_accumulate() -> None:
 def test_the_running_state_is_not_a_constructor_argument() -> None:
     """A ready-made approval through the generated `__init__` skipped every check."""
 
-    names = {f.name for f in dataclasses.fields(Quarantine) if f.init}
-    assert names == {"session_id", "boot_medium_identity"}
+    parameters = set(inspect.signature(Quarantine).parameters)
+    assert parameters == {"session_id", "boot_medium_identity"}
     with pytest.raises(TypeError):
         Quarantine(  # type: ignore[call-arg]
             session_id="s1",
             boot_medium_identity=MEDIUM_ID,
             _approval=approval(HOST_NVME.identity),
         )
+
+
+def test_the_medium_identity_is_read_only() -> None:
+    """Identity-only classification makes this field the whole of the authority."""
+
+    quarantine = a_quarantine()
+    with pytest.raises(AttributeError):
+        quarantine.boot_medium_identity = HOST_NVME.identity  # type: ignore[misc]
+
+
+def test_an_approval_for_the_medium_is_refused_before_it_has_ever_been_observed() -> None:
+    """The identity check is the live one; the disposition check cannot see this.
+
+    A review showed the two checks had become two spellings of one, and that
+    deleting either left the suite green. This is the state that separates them.
+    """
+
+    quarantine = Quarantine(session_id="s1", boot_medium_identity=MEDIUM_ID)
+    with pytest.raises(ExportRefused) as refused:
+        quarantine.approve_export(approval(MEDIUM_ID))
+    assert refused.value.refusal is Refusal.BOOT_MEDIUM_IS_NOT_AN_EXPORT_TARGET
+
+
+def test_a_device_disagreeing_with_the_medium_identity_is_recorded() -> None:
+    """Identity decides; the disagreement is still information.
+
+    Duplicate or blank serials on USB and NVMe bridges are a known class of
+    hardware, and nothing here yet constrains how an identity is constructed. A
+    collision nobody notices is worse than one that is merely allowed.
+    """
+
+    quarantine = Quarantine(session_id="s1", boot_medium_identity=MEDIUM_ID)
+    quarantine.observe(Device(MEDIUM_ID, DeviceClass.HOST_STORAGE))
+    assert [
+        entry.action for entry in quarantine.audit()
+    ] == ["identity_claim_mismatch"]
+    quarantine.observe(BOOT_MEDIUM)
+    assert [entry.action for entry in quarantine.audit()] == ["identity_claim_mismatch"]
 
 
 # --- the audit -------------------------------------------------------------

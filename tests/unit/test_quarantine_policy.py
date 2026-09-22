@@ -108,24 +108,38 @@ def test_assembly_is_refused_everywhere_because_it_is_not_per_device() -> None:
 
 
 def test_the_severity_order_covers_every_refusal_an_image_check_can_raise() -> None:
-    """A refusal missing from the order used to crash the gate instead of refusing."""
+    """Derived from the function, not restated from the constant.
 
-    raised = {
-        Refusal.RESUME_ENABLED,
-        Refusal.AUTOMOUNT_RULE_PRESENT,
-        Refusal.QUARANTINE_NOT_PERSISTENT,
-        Refusal.HOOK_MISSING,
-        Refusal.UNPINNED_HOOK,
-        Refusal.QUARANTINE_NOT_FIRST,
-        Refusal.HOOK_ORDER_CHANGED,
-        Refusal.WRONG_POLICY_VERSION,
-    }
-    assert set(IMAGE_REFUSAL_SEVERITY) == raised
+    A second copy of the constant would pass while the defect it is named for —
+    someone adds a fault to `verify_initramfs` and forgets the order, and the
+    build gate crashes past every `except` — went straight through. Two
+    manifests raise every fault the function can raise between them.
+    """
+
+    everything_wrong = manifest(
+        policy_version="typo",
+        hooks=("vendor-hook", *EARLY_HOOKS[1:]),
+        resume_enabled=True,
+        automount_rules=("99-helpful.rules",),
+        quarantine_persists_into_userspace=False,
+    )
+    merely_reordered = manifest(
+        hooks=(EARLY_HOOKS[0], EARLY_HOOKS[2], EARLY_HOOKS[1], *EARLY_HOOKS[3:])
+    )
+
+    raised: set[Refusal] = set()
+    for candidate in (everything_wrong, merely_reordered):
+        with pytest.raises(ImageRefused) as refused:
+            verify_initramfs(candidate)
+        raised |= {fault[0] for fault in refused.value.faults}
+
+    assert raised == set(IMAGE_REFUSAL_SEVERITY), (
+        "a fault `verify_initramfs` can raise is missing from the severity "
+        "order, or the order names one it cannot"
+    )
 
 
 def test_a_refusal_outside_the_severity_order_does_not_crash_the_gate() -> None:
-    from azazel_boot.quarantine import ImageRefused
-
     refused = ImageRefused(((Refusal.NOT_CONFIRMED, "not an image fault"),))
     assert refused.refusal is Refusal.NOT_CONFIRMED
     with pytest.raises(ValueError):
