@@ -309,6 +309,21 @@ not here, and a test drives it on a quarantined volume rather than asserting
 that it is a different path — "it is a different path" being the kind of claim
 that stops being true quietly.
 
+### The screen says the rule, the audit says which condition
+
+`PersistenceStatus.reasons` carries **one sentence, the same one for every
+detection**: an interrupted write is suspected, Boot will not use this volume
+in ordinary operation, and does not repair it. The word naming *which*
+condition was observed lives in the audit, where D4 puts it.
+
+This was found undecided rather than designed: a mutation that interpolated the
+signal into the operator-facing reason survived the whole suite, because the
+refusal message was pinned and this surface was not. It is not a
+confidentiality break — D4 records the classification deliberately, so it is
+not a secret. It is a second place the same fact would live, with nothing
+keeping the two in agreement and no decision about which one an operator reads.
+It is now decided, and pinned, the same way the refusal is.
+
 ### What the audit may hold
 
 Three classifications: the detection, the transition into quarantine, and the

@@ -577,3 +577,46 @@ def test_this_module_cannot_reach_a_disk_a_device_a_network_or_a_host() -> None:
     code = " ".join(used)
     for never in ("/dev", "host", "snapshot", "recovery", "export_write", "mount", "repair"):
         assert never not in code, f"dirty_write names {never!r} in code"
+
+
+def test_the_status_reason_names_the_rule_and_not_the_classification(observations) -> None:
+    """The surface a mutation found undecided, decided here.
+
+    `PersistenceStatus.reasons` is operator-facing text: it reaches a screen and
+    whatever renders one. A mutation that interpolated the signal into it —
+    `f"an interrupted write is suspected ({signal.value}); …"` — survived the
+    whole suite, because the refusal was pinned and this was not.
+
+    It is not a confidentiality break: ADR-0010 D4 puts the classification in
+    the audit deliberately, so the signal is not a secret. What it is, is a
+    second place the same fact would live, with nothing keeping the two in
+    agreement and no decision recorded about which one an operator reads.
+
+    So it is decided the same way the refusal is: **the reason names the rule,
+    the audit names the classification.** One sentence on the screen for every
+    detection, and the word that says which condition it was lives where D4
+    put it.
+    """
+
+    for item in (
+        torn(),
+        observation(continuity=MediumContinuity.REMOVED_DURING_WRITE),
+        observation(verification=Verification.INDETERMINATE),
+        observation(receipt=ReceiptState.UNREADABLE),
+    ):
+        live = session(observations)
+        status = live.report_write(item, observations)
+        joined = " ".join(status.reasons)
+
+        signal = classify(item)
+        assert signal is not None
+        assert signal.value not in joined, joined
+        assert not any(member.value in joined for member in DirtySignal)
+
+        # The same sentence every time, whichever condition was observed.
+        assert joined == (
+            "an interrupted write is suspected; Boot will not use this volume "
+            "in ordinary operation, and does not repair it"
+        )
+        # And the classification is still recorded, where D4 puts it.
+        assert live.audit()[0].signal is signal
