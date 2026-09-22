@@ -16,6 +16,22 @@ Related: [Compatibility](compatibility.md) · [Release policy](release-policy.md
 [Program plan](https://github.com/01rabbit/Azazel/blob/main/docs/roadmaps/nexus-boot-program-plan.md)
 §5 R7, §6.7
 
+## 0. The platform baseline
+
+**Debian 13 Live / amd64**, with `main` plus `non-free-firmware`, built
+reproducibly onto a removable USB SSD; UEFI with Secure Boot enabled is
+required; persistence, if any, is USB-side and its LUKS2 is optional; an
+update is a media rewrite or a new signed medium, never a change to a host.
+
+Fixed at program level as [§15 finding OF-07](https://github.com/01rabbit/Azazel/blob/main/docs/roadmaps/nexus-boot-program-plan.md) and adopted for Boot in
+[ADR-0008](adr/0008-debian-13-live-baseline.md). **Cited, not restated**: the
+frame is stated once, above this repository.
+
+**Nothing has been built from it.** No image exists, no medium has been
+written, and no machine has booted one. The builder is still unselected —
+`live-build` is the builder the baseline is written against, and
+[ADR-0002](adr/0002-image-builder.md)'s selection conditions are untouched.
+
 ## 1. What "supported" would mean, and why nothing is
 
 The series

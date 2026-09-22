@@ -58,8 +58,9 @@ it is measured into a qualified entry under §3.3, not declared here.
 | Boundary | Value | Source |
 | --- | --- | --- |
 | Architecture | x86_64 | R0 baseline product definition |
-| Firmware | **UEFI is the assumed boot path**, and booting with **Secure Boot enabled** through a signed shim chain is the target. Disabling Secure Boot is a fallback, never the default; no key is enrolled into a host's firmware. The state on any given machine is **measured** (§3.3), never declared | program plan §15 OF-03, restated in §5 R2; adopted for Boot in [ADR-0005](adr/0005-uefi-secure-boot-posture.md) |
-| Media | removable USB SSD | product definition |
+| Firmware | **UEFI is the boot path**, and booting with **Secure Boot enabled** through a signed shim chain is **required for Boot** (OF-07 item 4; it was the target under OF-03). Disabling Secure Boot is a fallback, never the default; no key is enrolled into a host's firmware. The state on any given machine is **measured** (§3.3), never declared | program plan §15 OF-03 and OF-07; adopted for Boot in [ADR-0005](adr/0005-uefi-secure-boot-posture.md) and [ADR-0008](adr/0008-debian-13-live-baseline.md) |
+| OS baseline | **Debian 13 Live / amd64**, with `main` plus `non-free-firmware`; firmware added beyond that is recorded in the release manifest and the SBOM. No other distribution is a co-equal v1 target | program plan §15 OF-07; adopted for Boot in [ADR-0008](adr/0008-debian-13-live-baseline.md) |
+| Media | removable USB SSD, carrying a reproducible Debian 13 Live image. **No builder is selected** — `live-build` is the builder the baseline is written against, and [ADR-0002](adr/0002-image-builder.md)'s selection conditions are untouched | product definition; program plan §15 OF-07; [ADR-0008](adr/0008-debian-13-live-baseline.md) |
 | Host storage | untouched by default; internal block devices quarantined from initramfs entry | R7 Boot deliverables |
 | Internal behavior | zero content writes to internal block devices until an operator approves an export target; unavoidable firmware NVRAM change reported separately | program plan §5 R7 exit gate, §8 |
 | Resource classes measured | 8, 16, 32, 64 GB | program plan §8 |
