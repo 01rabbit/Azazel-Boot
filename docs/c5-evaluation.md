@@ -16,7 +16,13 @@ performed**; the three that create a host, download externally, or escalate
 privilege are named individually there, which is what `doctor` shows before any
 of them runs.
 
-Related: [P2 host bootstrap plan](p2-host-bootstrap-plan.md) · [ADR-0002](adr/0002-image-builder.md) C5 and D4 ·
+`azazel-boot-builder doctor` has since been run on this session's own machine
+and answers **`host_backend_unavailable`** and `insufficient_free_space`: no
+virtualisation backend is installed here, so no evaluation VM can be created
+from this session and C5 stays where it is. See [the CLI page](p2-builder-cli.md).
+
+Related: [Builder CLI](p2-builder-cli.md) ·
+[P2 host bootstrap plan](p2-host-bootstrap-plan.md) · [ADR-0002](adr/0002-image-builder.md) C5 and D4 ·
 [ADR-0008](adr/0008-debian-13-live-baseline.md) D2 ·
 [ADR-0009](adr/0009-builder-and-writer-contract.md) D8 P2 ·
 [Build environment](build-environment.md) · [Quarantine policy](quarantine-policy.md)

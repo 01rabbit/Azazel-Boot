@@ -34,6 +34,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 
+from .hostports import Backend, DigestCheck, Execution, SignatureCheck
+
 #: Stamped into anything this plan would produce, for the reason
 #: `evaluation.STAMP` exists: a record that cannot carry a release claim cannot
 #: be read as making one.
@@ -118,11 +120,14 @@ class BootstrapRefused(Exception):
 REQUIRED_VM_EVIDENCE_FIELDS = (
     "image_source",
     "image_digest",
-    "image_signature_verified",
+    "signature_verification",
+    "digest_verification",
     "created_at",
     "cpu_architecture",
     "debian_version_id",
     "builder_tool_version",
+    "backend",
+    "execution",
 )
 
 #: Field names this evidence must never grow, for `evaluation.py`'s reason: a
@@ -142,21 +147,34 @@ FORBIDDEN_EVIDENCE_FIELDS = (
 class VmEvidence:
     """What must be recorded about the machine a measurement ran on.
 
-    `image_signature_verified` is separate from `image_digest` on purpose. A
-    digest says two files are the same file; a verified signature says Debian
+    `signature_verification` is separate from `digest_verification` on purpose.
+    A digest says two files are the same file; a verified signature says Debian
     published it. An evaluation built from an image whose signature nobody
     checked is evidence about a download, and the owner's constraint is that
-    only signed Debian inputs are used.
+    only signed Debian inputs are used. Both are enums rather than booleans
+    because `NOT_ATTEMPTED` is a real answer that a boolean would round to
+    `False` and lose the distinction from a check that ran and failed.
     """
 
     image_source: str
     image_digest: str
-    image_signature_verified: bool
+    #: Two checks, two fields, read independently. Replaced a single boolean
+    #: after the CLI work made the distinction operational: `NOT_ATTEMPTED` is
+    #: a real answer and it is not a pass.
+    signature_verification: SignatureCheck
+    digest_verification: DigestCheck
     created_at: str
     cpu_architecture: str
     debian_version_id: str
     builder_tool_version: str
     host_kind: HostKind
+    #: Which backend produced the VM, measured on the host rather than assumed
+    #: from the platform.
+    backend: Backend
+    #: Native or emulated. An amd64 guest on an arm64 Mac is emulation, and a
+    #: record that could not say so would let a timing or reproducibility
+    #: reading be taken from a run that cannot support one.
+    execution: Execution
     stamp: str = STAMP
 
     def __repr__(self) -> str:
@@ -169,12 +187,18 @@ class VmEvidence:
 
         return (
             f"VmEvidence(host_kind={self.host_kind.value}, "
+            f"backend={self.backend.value}, execution={self.execution.value}, "
             f"debian_version_id={self.debian_version_id!r}, "
             f"cpu_architecture={self.cpu_architecture!r}, "
-            f"image_signature_verified={self.image_signature_verified!r}, "
+            f"signature_verification={self.signature_verification.value}, "
+            f"digest_verification={self.digest_verification.value}, "
             "image_source=<redacted>, image_digest=<redacted>, "
             "created_at=<redacted>)"
         )
+
+    @property
+    def is_emulated(self) -> bool:
+        return self.execution is Execution.EMULATED_AMD64_ON_ARM64
 
 
 @dataclass(frozen=True)
@@ -261,13 +285,19 @@ def require_vm_evidence(evidence: VmEvidence) -> None:
                 "a record that cannot say which machine a measurement ran on "
                 "reads as any machine; the field name is in the model, not here",
             )
+    if evidence.digest_verification is not DigestCheck.MATCHED:
+        raise BootstrapRefused(
+            Refusal.UNSIGNED_IMAGE_SOURCE,
+            "the bytes the measurement ran on are not the bytes the signed "
+            "checksum names",
+        )
     if evidence.stamp != STAMP:
         raise BootstrapRefused(
             Refusal.STAMP_MISSING,
             "anything this plan produces is evaluation-only and says so in its "
             "own record",
         )
-    if not evidence.image_signature_verified:
+    if evidence.signature_verification is not SignatureCheck.VERIFIED:
         raise BootstrapRefused(
             Refusal.UNSIGNED_IMAGE_SOURCE,
             "only signed Debian inputs are used; a digest says two files match, "

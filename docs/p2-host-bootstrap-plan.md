@@ -5,7 +5,15 @@ downloaded, no package installed, no build run, and no C5 measurement taken.
 This page and `tools/builder/host_bootstrap.py` are what `doctor` shows; they
 perform nothing, and the module imports no means of performing anything.
 
-Related: [C5 evaluation](c5-evaluation.md) ·
+**Superseded in part by the CLI.** These steps are now what
+[`azazel-boot-builder`](p2-builder-cli.md) checks and asks about rather than a
+runbook an operator follows by hand: `doctor` answers whether the host can
+drive them, and `prepare-host` shows them and confirms each of the three risky
+ones separately. This page stays as the statement of *what* the steps are and
+why each is constrained; the CLI page is the statement of *how* the tool
+refuses.
+
+Related: [Builder CLI](p2-builder-cli.md) · [C5 evaluation](c5-evaluation.md) ·
 [ADR-0002](adr/0002-image-builder.md) · [ADR-0009](adr/0009-builder-and-writer-contract.md) D3 ·
 [Builder and writer contract](builder-writer-contract.md) §2
 
@@ -96,11 +104,14 @@ a blank reads as "any machine" three months later.
 | --- | --- |
 | `image_source` | which image, and from where |
 | `image_digest` | that this is that image |
-| `image_signature_verified` | that **Debian published it** — separate from the digest, because a digest only says two files match |
+| `signature_verification` | that **Debian published it** — separate from the digest, because a digest only says two files match. An enum, not a boolean: `not_attempted` is a real answer and a boolean would round it to the same value as a check that ran and failed |
+| `digest_verification` | that the bytes are the bytes the signed checksum names |
 | `created_at` | when the machine came into existence |
 | `cpu_architecture` | `x86_64`, and recorded rather than assumed |
 | `debian_version_id` | `13`, and recorded rather than assumed |
 | `builder_tool_version` | which `live-build` produced the initramfs |
+| `backend` | which hypervisor made the VM, measured on the host rather than assumed from the platform |
+| `execution` | native, or amd64 emulated on arm64. Decided by the session from the measured architecture, never passed in — a record that took it as an argument would let an emulated run be written up as a native build |
 
 It carries the stamp `NON-RELEASABLE / EVALUATION ONLY`, and it has no
 `compatibility_claim`, `signature`, `signed_artifact_digest`, `release_channel`,
