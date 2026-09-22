@@ -39,7 +39,7 @@ from azazel_boot.dirty_write import (
     Verification,
     WriteObservation,
 )
-from azazel_boot.inventory import collect_interfaces
+from azazel_boot.inventory import InterfaceObservation, collect_interfaces
 from azazel_boot.persistence import OrdinaryAct, PersistenceRefused, PersistenceState
 from azazel_boot.quarantine import Device, DeviceClass, Quarantine
 from azazel_boot.session_mode import AttemptOutcome, PassphraseChannel
@@ -2516,7 +2516,11 @@ def test_the_workflow_and_the_ledger_are_sealed(observations) -> None:
     ):
         with pytest.raises(AttributeError, match="pinned when it starts"):
             flow._sealed_assign(name, value)
-    with pytest.raises(AttributeError, match="minted by a commit"):
+    # The **full** message. "minted by a commit" is a prefix of two different
+    # rules — the clearance one and the stage one — so the short `match=` was
+    # satisfied by whichever fired first, which is this repository's own
+    # incidental-refusal antipattern in the assertion written to close it.
+    with pytest.raises(AttributeError, match="minted by a commit whose gates passed"):
         flow._sealed_assign("_candidate", RecoveryCandidate(2, FINGERPRINT))
     assert flow.stage is RecoveryStage.PREFLIGHT_PASSED
     assert flow.holds(RecoveryCandidate(2, FINGERPRINT)) is False
@@ -3783,6 +3787,8 @@ def test_this_module_performs_no_io_when_it_actually_runs() -> None:
         from azazel_boot.snapshot import (
             CapacityReport,
             MigrationLedger,
+            PreflightVerdict,
+            RecoveryRefused,
             RecoveryWorkflow,
             SnapshotDescriptor,
             SnapshotIntegrity,
@@ -3968,7 +3974,11 @@ def test_this_module_performs_no_io_when_it_actually_runs() -> None:
             ):
                 try:
                     act()
-                except Exception:
+                except (RecoveryRefused, AttributeError, TypeError):
+                    # A refusal is the point. **`NameError` is not caught**: two
+                    # probes here named `PreflightVerdict`, which the script did
+                    # not import, and `except Exception` swallowed both — so
+                    # they never ran and nothing said so.
                     pass
 
         print(repr([sorted(set(seen)), [event for event, _ in forbidden_at_import]]))
@@ -5692,3 +5702,252 @@ def test_a_workflow_stand_in_does_not_make_a_candidate_apply(observations) -> No
     real = workflow(observations)
     candidate = run_to_commit(real, observations)
     assert candidate_applies_to(real, candidate) is True
+
+
+# --------------------------------------------------------------------------
+# The seventh review's mutation pass: checks whose own layer nothing drove
+# --------------------------------------------------------------------------
+
+
+def test_a_rebound_order_does_not_make_a_short_verdict_complete(observations) -> None:
+    """R7: the attack the completeness rule names was never driven.
+
+    Its comment says it compares against `PreflightCheck` "not against
+    `PREFLIGHT_ORDER`… comparing with the same global is tautologically true
+    while the rebind is live" — and the test written for it set `_evaluated`
+    directly instead of rebinding the global, so the tautological version
+    survived. This drives the rebind.
+    """
+
+    from azazel_boot import snapshot as module
+
+    # A **healthy** medium, so the ledger's own re-read passes and the only
+    # rule left to answer is the completeness one. Driving this on a fenced
+    # medium would be the incidental-refusal antipattern: the medium check
+    # answers first and the assertion learns nothing.
+    healthy = a_quarantine(quarantined=False)
+    original = module.PREFLIGHT_ORDER
+    try:
+        object.__setattr__(module, "PREFLIGHT_ORDER", (PreflightCheck.IMAGE_DIGEST,))
+        verdict = preflight(
+            healthy,
+            snapshot=descriptor(integrity=SnapshotIntegrity.FAILED),
+            capacity=capacity(required=1000, available=1),
+            current_schema=1,
+            target_schema=99,
+            binding_holds=False,
+            generation_holds=False,
+            image_digest_holds=True,
+        )
+        assert verdict.may_migrate is True  # it really was minted, and it really passes
+        assert len(verdict.evaluated) == 1
+        with pytest.raises(RecoveryRefused) as refused:
+            MigrationLedger().may_migrate(verdict, quarantine=healthy)
+        assert refused.value.refusal is Refusal.VERDICT_DID_NOT_ASK_EVERY_CHECK
+    finally:
+        object.__setattr__(module, "PREFLIGHT_ORDER", original)
+
+
+def test_the_clearance_is_issued_by_the_gates_and_by_nothing_shorter(
+    observations,
+) -> None:
+    """R7: the interlock has five moving parts and two were pinned.
+
+    A review added `PREFLIGHT_PASSED` to the stages that need no clearance and
+    reached `TRIAL_OPEN` over a **fenced** medium with no gate asked; forged a
+    clearance from the string `"gates_just_passed"` once the sentinel was a
+    nameable value; and combined those with the candidate's stage rule to reach
+    `COMMITTED` with no trial, no acquisition and no operator, schema 99,
+    `candidate_applies_to` answering True.
+    """
+
+    from azazel_boot import snapshot as module
+
+    # Nothing a caller can spell. The sentinel is a bare object, and the field
+    # that holds it is not one a recovery moves.
+    assert type(module._GATES_JUST_PASSED) is object
+    assert type(module._PRE_TRIAL_GATES_PASSED) is object
+    assert "_cleared" not in module._MOVES_DURING_A_RECOVERY
+    assert set(module._REACHED_WITHOUT_GATES) == {
+        RecoveryStage.REFUSED,
+        RecoveryStage.INTERRUPTED,
+    }
+
+    # A fenced medium reaches no stage the gates lead to, at any stage.
+    fenced = a_quarantine(fenced=True)
+    flow = workflow(observations, quarantine=fenced)
+    with pytest.raises(RecoveryRefused):
+        flow.start(
+            descriptor(),
+            observations,
+            media_binding_holds=True,
+            session_id=SESSION,
+            started_by_operator=True,
+        )
+    assert flow.stage is RecoveryStage.REFUSED
+    assert flow._cleared is None
+
+    # And the clearance is spent, not kept, so a second stage needs its own.
+    clean = workflow(observations)
+    snap = descriptor()
+    clean.start(
+        snap,
+        observations,
+        media_binding_holds=True,
+        session_id=SESSION,
+        started_by_operator=True,
+    )
+    assert clean._cleared is None
+    with pytest.raises(AttributeError, match="reached by passing the gates"):
+        clean._sealed_assign("_stage", RecoveryStage.TRIAL_OPEN)
+    with pytest.raises(AttributeError, match="minted by a commit whose gates passed"):
+        clean._sealed_assign("_candidate", RecoveryCandidate(99, FINGERPRINT))
+    assert clean.stage is RecoveryStage.PREFLIGHT_PASSED
+
+    # And with a clearance in hand but the wrong stage, the **stage** rule is
+    # what refuses — the third leg of the triple, and the only line in the
+    # module the whole suite did not execute.
+    clean._require_the_gates(
+        snap,
+        observations,
+        session_id=SESSION,
+        media_binding_holds=True,
+        acquisition=Opens(),
+        confirmed=True,
+    )
+    assert clean._cleared is not None
+    with pytest.raises(AttributeError, match="minted by a commit and by nothing else"):
+        clean._sealed_assign("_candidate", RecoveryCandidate(99, FINGERPRINT))
+    assert clean.holds(RecoveryCandidate(99, FINGERPRINT)) is False
+
+
+def test_a_capacity_subclass_does_not_answer_for_the_space_gate() -> None:
+    """R7: the capacity pin was driven with a plain object, never a subclass.
+
+    A `CapacityReport` subclass overriding `has_room_for_the_snapshot` produced
+    a **passing** verdict with nothing free and an exabyte required — the space
+    gate answered by the caller's own method.
+    """
+
+    class AlwaysRoom(CapacityReport):
+        def has_room_for_the_snapshot(self) -> bool:
+            return True
+
+    lying = AlwaysRoom(required=10**18, available=0)
+    assert lying.has_room_for_the_snapshot() is True
+    with pytest.raises(TypeError, match="exactly"):
+        preflight(
+            a_quarantine(quarantined=False),
+            snapshot=descriptor(),
+            capacity=lying,
+            current_schema=1,
+            target_schema=2,
+            binding_holds=True,
+            generation_holds=True,
+            image_digest_holds=True,
+        )
+
+
+def test_a_hand_built_verdict_has_asked_nothing() -> None:
+    """R7: `_evaluated` starts empty, and that is load-bearing.
+
+    The module concedes that `_MINTED_HERE.add(PreflightVerdict(None))`
+    produces a verdict `verdict_was_minted_here` accepts — careless-caller
+    defence, not a capability boundary. What stops that verdict authorising a
+    migration is the completeness rule, and seeding `_evaluated` with every
+    check in `__init__` defeated it with the whole suite green.
+    """
+
+    from azazel_boot import snapshot as module
+
+    hand_built = PreflightVerdict(None)
+    assert hand_built.evaluated == ()
+    assert hand_built.may_migrate is True
+
+    module._MINTED_HERE.add(hand_built)
+    assert verdict_was_minted_here(hand_built) is True
+    with pytest.raises(RecoveryRefused) as refused:
+        MigrationLedger().may_migrate(
+            hand_built, quarantine=a_quarantine(quarantined=False)
+        )
+    assert refused.value.refusal is Refusal.VERDICT_DID_NOT_ASK_EVERY_CHECK
+
+
+def test_a_candidate_that_merely_compares_equal_is_not_this_ones(observations) -> None:
+    """R7: `holds` is public, and `==` could not be told from `is`.
+
+    The existing test forges a candidate with identical field values, and
+    `RecoveryCandidate` defines no `__eq__` — so `==` was already identity and
+    the assertion could not distinguish the two. A stand-in whose `__eq__`
+    answers `True` is what tells them apart.
+    """
+
+    flow = workflow(observations)
+    candidate = run_to_commit(flow, observations)
+
+    class SaysYes(RecoveryCandidate):
+        def __eq__(self, other) -> bool:
+            return True
+
+        def __hash__(self) -> int:
+            return 0
+
+    agreeable = SaysYes(candidate.schema_version, FINGERPRINT)
+    assert (agreeable == candidate) is True
+    assert flow.holds(agreeable) is False
+    assert candidate_applies_to(flow, agreeable) is False
+    assert flow.holds(candidate) is True
+
+
+def test_an_observation_subclass_is_not_an_observation(observations) -> None:
+    """R7: the one `_require_*` helper whose exactness had no test.
+
+    A `tuple` subclass of `InterfaceObservation` subclasses was accepted into
+    `start` — every other helper's `type(...) is` had a driven subclass.
+    """
+
+    class Subclassed(InterfaceObservation):
+        pass
+
+    class ATuple(tuple):
+        pass
+
+    honest = observations[0]
+    stand_in = Subclassed(
+        interface_key=honest.interface_key, permanent_mac=honest.permanent_mac
+    )
+    flow = workflow(observations)
+    for items in (
+        ATuple(observations),
+        (stand_in,) + tuple(observations[1:]),
+    ):
+        with pytest.raises(TypeError, match="exactly"):
+            flow.start(
+                descriptor(),
+                items,
+                media_binding_holds=True,
+                session_id=SESSION,
+                started_by_operator=True,
+            )
+    assert flow.stage is RecoveryStage.NOT_STARTED
+
+
+def test_the_write_record_names_which_snapshot_was_written() -> None:
+    """R7: the audit's only positive classification stopped saying which.
+
+    Dropping `fingerprint=` from the `SNAPSHOT_WRITTEN` entry left the suite
+    green, and "which snapshot was written" became unanswerable from the
+    record — which is the one question the opaque fingerprint exists for.
+    """
+
+    judged_medium, snapshot, verdict = a_migration(
+        snapshot=descriptor(fingerprint="snapshot-fingerprint-which-one")
+    )
+    ledger = MigrationLedger()
+    ledger.note_snapshot_written(verdict, snapshot, quarantine=judged_medium)
+
+    entry = ledger.audit()[-1]
+    assert entry.event is SnapshotAuditEvent.SNAPSHOT_WRITTEN
+    assert entry.fingerprint == "snapshot-fingerprint-which-one"
+    assert entry.schema_version == snapshot.schema_version
+    assert "snapshot-fingerprint-which-one" not in repr(entry)
