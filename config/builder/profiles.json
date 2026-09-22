@@ -1,0 +1,16 @@
+{
+  "schema": "azazel-boot/build-profiles@1",
+  "comment": "Symbolic build profiles. A profile names its inputs; it never carries a URL, a mirror, an apt line, a package name or a path. See docs/builder-writer-contract.md section 5.",
+  "profiles": {
+    "responder-eval": {
+      "description": "The Debian 13 Live payload, built for evaluation only.",
+      "quarantine_policy_ref": null,
+      "inputs": [
+        "debian-snapshot",
+        "live-image-config",
+        "firmware-set",
+        "builder-toolchain"
+      ]
+    }
+  }
+}
