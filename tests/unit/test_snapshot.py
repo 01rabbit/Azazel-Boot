@@ -1924,3 +1924,69 @@ def test_the_key_acquisition_refusal_traceback_holds_what_it_was_handed(
     # The message carries neither.
     assert acquisition.secret not in str(refused.value)
     assert SESSION not in str(refused.value)
+
+
+def test_a_stand_in_for_the_quarantine_is_refused(observations) -> None:
+    """F-9: the load-bearing input was the one input nothing checked.
+
+    A re-review passed an object with two class attributes — `is_fenced =
+    False`, `volume_is_quarantined = True` — and both gates that precede D8's
+    four were satisfied by them. `RecoveryWorkflow.__init__` checked nothing at
+    all, so a `session_id` of `1234` and a binding of `"not a SessionBinding"`
+    were equally accepted.
+    """
+
+    class NotAQuarantine:
+        is_fenced = False
+        volume_is_quarantined = True
+
+    with pytest.raises(TypeError, match="must be a Quarantine"):
+        preflight(
+            NotAQuarantine(),
+            snapshot=descriptor(),
+            capacity=capacity(),
+            current_schema=1,
+            target_schema=2,
+            binding_holds=True,
+            generation_holds=True,
+            image_digest_holds=True,
+        )
+
+    binding = SessionBinding(
+        host_fingerprint=host_fingerprint(observations), session_id=SESSION
+    )
+    with pytest.raises(TypeError, match="must be a Quarantine"):
+        RecoveryWorkflow(NotAQuarantine(), binding, session_id=SESSION)
+    with pytest.raises(TypeError, match="must be a SessionBinding"):
+        RecoveryWorkflow(a_quarantine(), "not a SessionBinding", session_id=SESSION)
+    for bad_sitting in (1234, "", "   ", None):
+        with pytest.raises(TypeError, match="session_id"):
+            RecoveryWorkflow(a_quarantine(), binding, session_id=bad_sitting)
+
+
+def test_an_attempted_automatic_start_is_terminal_and_audited(observations) -> None:
+    """F-12: it used to take the silent refusal and leave no trace.
+
+    Three refused automatic starts left `stage=NOT_STARTED, audit=()`, and a
+    real start then succeeded — nothing recording that D8's central
+    prohibition had been exercised. That is the same reasoning which made a
+    snapshot substitution terminal and audited: a start nothing started is an
+    event, not a typo.
+    """
+
+    flow = workflow(observations)
+    with pytest.raises(RecoveryRefused) as refused:
+        flow.start(
+            descriptor(), observations, session_id=SESSION, started_by_operator=False
+        )
+    assert refused.value.refusal is Refusal.RECOVERY_NOT_STARTED_BY_AN_OPERATOR
+    assert flow.stage is RecoveryStage.REFUSED
+    assert flow.audit() == (
+        SnapshotAuditEntry(event=SnapshotAuditEvent.RECOVERY_REFUSED),
+    )
+
+    # And terminal: a real start afterwards is refused, so the attempt cannot
+    # be washed away by simply trying again properly.
+    with pytest.raises(RecoveryRefused) as again:
+        flow.start(descriptor(), observations, session_id=SESSION, started_by_operator=True)
+    assert again.value.refusal is Refusal.WORKFLOW_ALREADY_FINISHED
