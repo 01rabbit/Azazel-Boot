@@ -1498,7 +1498,24 @@ def test_a_candidate_from_elsewhere_is_not_this_workflows_answer(observations) -
             return ("everything",)
 
     assert Subclassed(1, FINGERPRINT).authority == ("everything",)
-    assert not candidate_applies_to(flow, Subclassed(1, FINGERPRINT))
+
+    # **The subclass is forced into the workflow's own slot**, past the seal,
+    # so that `holds()` answers True by identity and the type check is the only
+    # thing left refusing. Asserting it on a *separately constructed* subclass
+    # proved nothing: that object is not the one the workflow minted, so
+    # `holds()` excluded it and `type(...) is` never decided anything —
+    # mutating it to `isinstance` survived the whole suite.
+    #
+    # Reaching past the seal is exactly what `azazel_boot.quarantine` says
+    # cannot be prevented in Python. The point here is that the *second* line
+    # of defence holds when the first is walked round.
+    hostile = Subclassed(1, FINGERPRINT)
+    planted = workflow(observations)
+    object.__setattr__(planted, "_candidate", hostile)
+
+    assert planted.holds(hostile)  # identity says yes
+    assert not candidate_applies_to(planted, hostile)  # the type says no
+    assert hostile.authority == ("everything",)
 
     # An uncommitted workflow holds nothing — including `None`, which is what
     # it holds. `PersistenceSession.holds` was found in exactly this trap.

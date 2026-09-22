@@ -1,23 +1,26 @@
 # ADR-0010: Persistence key handling, dirty-write detection, and migration
 
 Status: **accepted (2026-09-22). D1–D8 implemented in software and
-hardware-unverified; D9 and D10 asserted by static scan, which is not a proof
-of absence; nothing implemented on hardware.** The owner decided D1–D10 below.
+hardware-unverified; D9 and D10 unchanged.** The owner decided D1–D10 below.
 `azazel_boot.session_mode` implements D1, D2 and D3 — see
 [session mode](../session-mode.md); `azazel_boot.dirty_write` with
 `azazel_boot.persistence` implements D4 and D5, see
 [persistence](../persistence.md) §4.1; and `azazel_boot.snapshot` implements
 D6, D7 and D8 — see [snapshot and recovery](../snapshot-and-recovery.md).
 
-**D9 and D10 are held by static scan, and a static scan is not a proof of
-absence.** An adversarial review defeated this repository's reachability
-guards twice: once by assembling module names from fragments for `__import__`,
-and once by walking `().__class__.__base__.__subclasses__()` to `open` with no
-import statement at all, writing to the host disk with the whole suite green.
-Both holes are closed and both are now named in the guards; the honest reading
-of that history is that the next one is closed when it is found, not that none
-remains. All of it on no hardware: no passphrase has been attempted, no volume opened, no USB SSD
-pulled mid-write, no snapshot written and no restore run on any device.
+All of it on no hardware: no passphrase has been attempted, no volume opened,
+no USB SSD pulled mid-write, no snapshot written and no restore run on any
+device.
+
+**A note on how D9 and D10 are checked, which changes neither.** The
+repository holds them with static scans over the modules above. *A static scan
+is not a proof of absence; it is a check that refuses the paths found so far.*
+Two of this repository's reachability guards have been defeated by adversarial
+review — once by assembling module names from fragments for `__import__`, and
+once by walking `().__class__.__base__.__subclasses__()` to `open` with no
+import statement at all. Both are closed and both are now named in the guards.
+This is a statement of fact about the checks, not a revision of what D9 and D10
+decide.
 [#7](https://github.com/01rabbit/Azazel-Boot/issues/7) stays open, and so do
 the three children this record names.
 
