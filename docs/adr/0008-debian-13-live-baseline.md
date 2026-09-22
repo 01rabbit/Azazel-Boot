@@ -1,7 +1,10 @@
 # ADR-0008: Boot adopts the Debian 13 Live / amd64 platform baseline
 
-Status: **accepted (2026-09-22)**. Records a program-level decision; decides
-nothing Boot was free to decide. **No builder is selected** — [ADR-0002](0002-image-builder.md)'s
+Status: **accepted (2026-09-22)**, **revised (2026-09-22)** — D4 gained the
+block-layer consequence recorded below, at the owner's decision, after an
+adversarial review of the quarantine established that volume assembly cannot be
+adjudicated per device. Records a program-level decision; decides nothing Boot
+was free to decide. **No builder is selected** — [ADR-0002](0002-image-builder.md)'s
 selection conditions are untouched.
 
 Related: [ADR-0002](0002-image-builder.md) · [ADR-0005](0005-uefi-secure-boot-posture.md) ·
@@ -93,6 +96,37 @@ exists at all, is on the USB medium and its LUKS2 is optional.
 the default — nothing is written — and does not withdraw the path by which an
 operator explicitly selects and approves a destination. Withdrawing it would
 change the product's defining property and would need its own ADR.
+
+#### D4.1 — The medium's block layout is the simple one, and no volume manager runs
+
+Recorded 2026-09-22 as a consequence of D4 rather than as a new decision. The
+removable medium carries exactly this, and nothing else:
+
+```
+GPT
+├─ UEFI System Partition
+├─ signed read-only Boot root
+└─ optional LUKS2 persistence partition
+   └─ a filesystem formatted directly on it
+```
+
+**LVM, mdraid and ZFS are not assembled, imported or auto-activated — on
+internal host storage or on the Boot medium.** The one mapping permitted is
+LUKS2's `dm-crypt`, to open persistence.
+
+This is a v1 constraint, not a gap. Every additional block layer is another
+thing that assembles something, at a moment Boot did not choose, on a machine
+that belongs to someone else — and the quarantine's promise is auditable only
+while the set of things that can assemble is small enough to enumerate.
+Assembly is also the one operation in [the threat model](../threat-model.md) §3's
+list that is **not per-device**: a volume group scanned from the medium can pull
+in physical volumes living on host disks, which is precisely the mechanism §3.2
+row 3 names, and a per-device rule cannot express it. So the medium is held to
+the same refusal as the host.
+
+The cost is stated rather than discovered: LVM-on-LUKS is a common Debian
+layout, and under this constraint Boot's own persistence may not use one.
+Relaxing it needs hardware-in-the-loop evidence and its own ADR.
 
 ### D5 — Nothing here is built, and nothing here is measured
 

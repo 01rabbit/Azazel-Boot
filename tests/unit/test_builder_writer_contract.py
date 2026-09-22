@@ -28,15 +28,21 @@ ADR = DOCS / "adr" / "0009-builder-and-writer-contract.md"
 #: `write` appear once each and never together; see `test_no_verb_both_builds_and_writes`.
 VERBS = ("doctor", "build", "verify", "list-media", "write", "inspect")
 
-#: One field per fact that is gone if the build does not record it.
+#: One field per fact that is gone if the build does not record it. Revised with
+#: ADR-0009 D2: the manifests and the SBOM are sidecars inside the artifact, so
+#: the record carries a reference and a digest for each rather than the
+#: documents themselves.
 ARTIFACT_FIELDS = {
     "image_version",
     "git_revision",
     "builder_version",
     "debian_snapshot",
-    "package_manifest",
-    "firmware_manifest",
-    "sbom",
+    "package_manifest_ref",
+    "package_manifest_digest",
+    "firmware_manifest_ref",
+    "firmware_manifest_digest",
+    "sbom_ref",
+    "sbom_digest",
     "source_date_epoch",
     "build_input_digest",
     "partition_layout_digest",
@@ -172,6 +178,17 @@ def test_the_artifact_record_carries_exactly_the_agreed_fields(contract: str) ->
         f"missing: {sorted(ARTIFACT_FIELDS - fields)}; "
         f"unexpected: {sorted(fields - ARTIFACT_FIELDS)}"
     )
+
+
+def test_the_record_references_its_manifests_rather_than_embedding_them() -> None:
+    """ADR-0009 D2, revised: a record of scalars, and sidecars bound by digest."""
+
+    for name in ("package_manifest", "firmware_manifest", "sbom"):
+        assert name not in ARTIFACT_FIELDS, (
+            f"{name!r} is back in the record; a fingerprint over a record "
+            "containing a structured document cannot be computed identically twice"
+        )
+        assert {f"{name}_ref", f"{name}_digest"} <= ARTIFACT_FIELDS
 
 
 def test_the_reproduced_subject_and_the_signed_artifact_are_separate_fields() -> None:

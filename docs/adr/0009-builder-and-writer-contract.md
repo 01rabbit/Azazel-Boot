@@ -1,6 +1,9 @@
 # ADR-0009: The builder and writer contract, and how the builder selection gets settled
 
-Status: **accepted (2026-09-22)**. Fixes the operator surface, the artifact
+Status: **accepted (2026-09-22)**, **revised (2026-09-22)** — D2 now separates
+the artifact record from the manifests it references, at the owner's decision,
+after an adversarial review showed that a record carrying structured documents
+cannot be fingerprinted safely. Fixes the operator surface, the artifact
 record, the build-host profile, the privilege boundary and the writer safety
 model for a builder that does not exist. **No build tool is selected** —
 [ADR-0002](0002-image-builder.md) D2, D3 and D4 stand unchanged. Nothing is
@@ -48,19 +51,56 @@ artifact before writing it is the only path rather than the diligent one.
 
 Details in [the contract](../builder-writer-contract.md) §2.
 
-### D2 — The artifact record is fixed, and "image digest" is two fields
+### D2 — The record holds scalars; the manifests are referenced sidecars
 
-The eighteen fields in [the contract](../builder-writer-contract.md) §3 are what
-a build must record. One deviation from the owner's list is deliberate and is
-called out here rather than absorbed silently: *image digest* is carried as
+*Revised 2026-09-22. The first version of this section listed eighteen fields,
+three of which — `package_manifest`, `firmware_manifest`, `sbom` — were described
+in words that read like collections ("every package…", "every firmware blob…").
+An adversarial review of the verification path showed what that costs: a
+fingerprint over a record containing arbitrary nested documents is a
+canonicalisation hazard, and a binding that cannot be computed identically twice
+is not a binding. The owner decided the separation below rather than let the
+record's shape be settled by an implementation's type constraint.*
+
+**The artifact record contains JSON scalars only** — a string, an integer, or
+absent. The structured package manifest, firmware manifest and SBOM are **not
+embedded in it**. They are separate files inside the signed artifact, and the
+record carries, for each:
+
+| Field | What it holds |
+| --- | --- |
+| `package_manifest_ref` / `package_manifest_digest` | where the manifest is, and a digest binding its contents |
+| `firmware_manifest_ref` / `firmware_manifest_digest` | the same, for firmware |
+| `sbom_ref` / `sbom_digest` | the same, for the SBOM |
+
+A `*_ref` is a **normalised relative reference inside the artifact**. An
+arbitrary URL, an absolute path and a parent traversal are refused: a reference
+that can leave the artifact turns a record into an instruction to fetch
+something, which is the opposite of what a record is for.
+
+The binding is two-layer and each layer does one job. A `*_digest` binds the
+contents of its sidecar, so a manifest that changed is detectable against the
+record. The signed artifact digest binds the record **and** the set of
+sidecars, so a sidecar that was added, removed or swapped is detectable against
+the signature.
+
+This changes the wording of the claim these fields make. It was "every package,
+every firmware blob and the SBOM are in the record". It is now:
+
+> **every included item is represented by a verified, referenced manifest or
+> SBOM.**
+
+That is a weaker statement about the record and the same statement about the
+artifact, which is the honest pair.
+
+Unchanged from the original D2: *image digest* is carried as
 `unsigned_payload_digest` and `signed_artifact_digest`, because
 [ADR-0002](0002-image-builder.md) D1.1 makes the reproduced subject the unsigned
-payload and signing a separate act over it. A single field would be ambiguous
+payload and signing a separate act over it; a single field would be ambiguous
 precisely where the distinction matters, and
 [`docs/compatibility.md`](../compatibility.md) §3.3 already requires both.
-
-`compatibility_claim` takes `candidate` or `hardware_verified` and nothing else.
-A successful build never moves it.
+`compatibility_claim` takes `candidate` or `hardware_verified` and nothing else,
+and a successful build never moves it.
 
 ### D3 — The build host is Debian 13 / amd64, and the build is isolated
 
