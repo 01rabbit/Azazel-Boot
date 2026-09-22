@@ -1337,6 +1337,7 @@ class RecoveryWorkflow:
         # what the commit mints comes from an object the caller never had a
         # reference to.
         self._sealed_assign("_pinned", SnapshotDescriptor(*_fields_of(snapshot)))
+        self._require_an_unfenced_medium()
         self._sealed_assign("_stage", RecoveryStage.PREFLIGHT_PASSED)
         self._record(
             SnapshotAuditEvent.RECOVERY_STARTED,
@@ -1374,6 +1375,7 @@ class RecoveryWorkflow:
             confirmed=None,
         )
 
+        self._require_an_unfenced_medium()
         self._sealed_assign("_stage", RecoveryStage.TRIAL_OPEN)
         self._record(SnapshotAuditEvent.RECOVERY_TRIAL_OPENED)
 
@@ -1439,6 +1441,11 @@ class RecoveryWorkflow:
         # start, held in an object the caller never had. Re-reading the
         # argument here is what let a mutation during the prompt into both the
         # candidate and the audit.
+        # **Before the candidate is minted**, not between the two writes. A
+        # refusal after the candidate is held would leave a workflow that is
+        # not `COMMITTED` holding one, which is why `holds` asks the stage as
+        # well as the object.
+        self._require_an_unfenced_medium()
         judged = self._pinned
         minted = RecoveryCandidate(judged.schema_version, judged.fingerprint)
         self._sealed_assign("_candidate", minted)
@@ -1457,9 +1464,20 @@ class RecoveryWorkflow:
         answers `True` for `None`, and `None` is what `_candidate` is until a
         commit — the trap `azazel_boot.persistence.PersistenceSession.holds`
         was found in.
+
+        **And the stage, not only the object.** `commit` writes the candidate
+        and then moves the stage, and anything raising between those two
+        writes — the fence going up is the one that can — left a workflow
+        stuck at `TRIAL_OPEN` answering `True` for a candidate no commit
+        finished. A candidate is what a *completed* recovery produced, so that
+        is what is asked.
         """
 
-        return self._candidate is not None and self._candidate is candidate
+        return (
+            self._stage is RecoveryStage.COMMITTED
+            and self._candidate is not None
+            and self._candidate is candidate
+        )
 
     def interrupt(self, *, session_id: str) -> None:
         """The operator stopped, or the machine did. Terminal, and fail-closed.
@@ -1689,6 +1707,27 @@ class RecoveryWorkflow:
             "_cleared",
             _GATES_JUST_PASSED if asked_all_of_d8 else _PRE_TRIAL_GATES_PASSED,
         )
+
+    def _require_an_unfenced_medium(self) -> None:
+        """The last read before a stage moves, as a **refusal**.
+
+        `_sealed_assign` refuses to spend a clearance over a medium fenced
+        since the gates read it, and it refuses with an `AttributeError` — a
+        seal's answer, outside the `RecoveryRefused` vocabulary a caller
+        writes `except` for. The fence is raised by device monitoring rather
+        than by this module, so a legitimate stage move can meet it: the
+        window is small and it is not empty, and a caller meeting it would
+        have crashed instead of being refused.
+
+        The same shape as the `_require_stage` re-check before the commit's
+        stage move, added when an interruption from inside `attempt()` raised
+        the seal's `AttributeError` at a caller writing `except
+        RecoveryRefused`. What escapes this module is a refusal; the seal's
+        rule stays as the structural backstop for a direct `_sealed_assign`.
+        """
+
+        if self._quarantine.is_fenced:
+            self._refuse_gate(RecoveryGate.MEDIUM_FENCED)
 
     def _refuse_gate(self, gate: RecoveryGate) -> None:
         self._sealed_assign("_stage", RecoveryStage.REFUSED)

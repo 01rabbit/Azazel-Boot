@@ -360,6 +360,21 @@ down: `quarantine_volume()` is one-way, the gates refuse unless it is already
 on, and the quarantine itself cannot be swapped — so that branch is one nothing
 could drive, and a branch nothing can drive is not a check.
 
+That read happens **twice, in two vocabularies**. Each stage method asks it as
+a gate, so what a caller meets is `GATE_REFUSED` with `medium_fenced` in the
+audit; the seal keeps its own rule as the structural backstop for a direct
+`_sealed_assign`. The seal alone would have answered an `AttributeError` — a
+seal's answer, outside the `RecoveryRefused` vocabulary a caller writes
+`except` for — and the fence is raised by device monitoring rather than by any
+call here, so a legitimate stage move can meet it. The same shape was fixed
+once already, for an interruption raised from inside `attempt()`.
+
+**A candidate is held by a workflow that committed**, asked by stage as well as
+by identity. `commit` writes the candidate and then moves the stage, and
+anything raising between those two writes left a workflow stuck at `TRIAL_OPEN`
+answering `True` for a candidate no commit finished. The fence check sits
+before the mint for the same reason.
+
 **One pair cannot be contested, and saying so is better than a test that looks
 like it proves it.** D8 orders key acquisition before integrity, but at the
 commit the snapshot is pinned to the one the workflow started on — so a

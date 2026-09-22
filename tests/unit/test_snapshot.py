@@ -2430,8 +2430,15 @@ def test_a_candidate_from_elsewhere_is_not_this_workflows_answer(observations) -
     # Reaching past the seal is exactly what `azazel_boot.quarantine` says
     # cannot be prevented in Python. The point here is that the *second* line
     # of defence holds when the first is walked round.
+    #
+    # **On a workflow that committed**, because `holds` asks the stage too: a
+    # hostile candidate planted on a fresh workflow is refused for being on a
+    # workflow that never committed, and the type check — the thing this half
+    # of the test exists for — would never decide anything. That is this
+    # file's own recurring antipattern, in a `holds` rather than a `match=`.
     hostile = Subclassed(1, FINGERPRINT)
     planted = workflow(observations)
+    run_to_commit(planted, observations, snapshot=descriptor(fingerprint="snapshot-planted"))
     object.__setattr__(planted, "_candidate", hostile)
 
     assert planted.holds(hostile)  # identity says yes
@@ -2443,6 +2450,16 @@ def test_a_candidate_from_elsewhere_is_not_this_workflows_answer(observations) -
     fresh = workflow(observations)
     assert not fresh.holds(None)
     assert not candidate_applies_to(fresh, None)
+
+    # And nothing else either, however it got there. `commit` writes the
+    # candidate and then moves the stage, and the fence going up between those
+    # two writes left a workflow at `TRIAL_OPEN` answering `True` for a
+    # candidate no commit finished.
+    uncommitted = workflow(observations)
+    object.__setattr__(uncommitted, "_candidate", RecoveryCandidate(1, FINGERPRINT))
+    assert uncommitted._candidate is not None
+    assert not uncommitted.holds(uncommitted._candidate)
+    assert not candidate_applies_to(uncommitted, uncommitted._candidate)
     assert not fresh.holds(candidate)
 
     # Another workflow's candidate is not this one's.
@@ -6907,3 +6924,101 @@ def test_the_audit_entry_renders_the_payload_it_is_allowed_to_carry() -> None:
     assert "schema_version=2" in rendered
     assert "fingerprint=<redacted>" in rendered
     assert "snapshot-fingerprint-rendered" not in rendered
+
+
+def test_a_fence_raised_between_the_gates_and_the_stage_is_a_refusal(observations) -> None:
+    """The seal's rule is a backstop, not the answer a caller gets.
+
+    `_sealed_assign` refuses to spend a clearance over a medium fenced since
+    the gates read it, and it refuses with an `AttributeError`. The fence is
+    raised by device monitoring rather than by any call in this module, so a
+    legitimate stage move can meet that rule — and a caller writing `except
+    RecoveryRefused`, which is the whole of this module's vocabulary, would
+    have crashed instead of being refused. Round seven fixed the identical
+    shape for an interruption from inside `attempt()`.
+
+    **The window holds no caller code**, which is why the fence is raised here
+    directly rather than from inside an acquisition: `attempt()` runs inside
+    the gates, and the gates already re-read the fence after it. What is left
+    is the interval between the gates returning and the stage moving, which
+    only something outside this process can act in. So this drives the check
+    the stage methods make, in the state that interval can be in.
+    """
+
+    rule = a_quarantine()
+    flow = workflow(observations, quarantine=rule)
+    snap = descriptor(fingerprint="snapshot-fingerprint-fenced-late")
+    flow.start(
+        snap, observations, media_binding_holds=True, session_id=SESSION, started_by_operator=True
+    )
+    flow.open_trial(snap, observations, media_binding_holds=True, session_id=SESSION)
+
+    acquisition = Opens()
+    flow._require_the_gates(
+        snap,
+        observations,
+        session_id=SESSION,
+        media_binding_holds=True,
+        acquisition=acquisition,
+        confirmed=True,
+    )
+    assert acquisition.attempts == 1
+    rule.fence()
+
+    with pytest.raises(RecoveryRefused) as refused:
+        flow._require_an_unfenced_medium()
+    assert refused.value.refusal is Refusal.GATE_REFUSED
+    assert flow.audit()[-1].gate is RecoveryGate.MEDIUM_FENCED
+    assert flow.stage is RecoveryStage.REFUSED
+    assert flow._candidate is None
+
+    # And the volume is exactly as quarantined as it was.
+    assert rule.volume_is_quarantined is True
+    assert rule.is_fenced is True
+
+    # Every stage method asks it, so none of them can move a stage over a
+    # medium fenced since its gates read it. Derived from the source, because
+    # a hand-written list of three goes stale on the day there is a fourth.
+    for stage_method in ("start", "open_trial", "commit"):
+        body = ast.unparse(
+            [
+                node
+                for node in ast.walk(TREE)
+                if isinstance(node, ast.FunctionDef) and node.name == stage_method
+            ][0]
+        )
+        assert "_require_an_unfenced_medium()" in body, stage_method
+
+
+def test_a_candidate_is_held_only_by_a_workflow_that_committed(observations) -> None:
+    """R8 (self-review): `commit` writes the candidate, then moves the stage.
+
+    Anything raising between those two writes — the fence going up is the one
+    that can — left a workflow at `TRIAL_OPEN` holding a candidate that
+    `holds` and `candidate_applies_to` both accepted, for a commit that never
+    finished. A candidate is what a *completed* recovery produced.
+    """
+
+    flow = workflow(observations)
+    snap = descriptor(fingerprint="snapshot-fingerprint-uncommitted")
+    flow.start(
+        snap, observations, media_binding_holds=True, session_id=SESSION, started_by_operator=True
+    )
+    flow.open_trial(snap, observations, media_binding_holds=True, session_id=SESSION)
+    # The clearance a full D8 run issues, so the candidate is legitimately
+    # assignable — and the stage has not moved.
+    flow._require_the_gates(
+        snap,
+        observations,
+        session_id=SESSION,
+        media_binding_holds=True,
+        acquisition=Opens(),
+        confirmed=True,
+    )
+    minted = RecoveryCandidate(snap.schema_version, snap.fingerprint)
+    flow._sealed_assign("_candidate", minted)
+
+    assert flow._candidate is minted
+    assert flow.stage is RecoveryStage.TRIAL_OPEN
+    assert flow.holds(minted) is False
+    assert candidate_applies_to(flow, minted) is False
