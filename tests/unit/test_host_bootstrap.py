@@ -42,6 +42,7 @@ from tools.builder.host_bootstrap import (
     require_isolated_host,
     require_vm_evidence,
 )
+from tools.builder.hostports import Backend, DigestCheck, Execution, SignatureCheck
 
 MODULE = Path(__file__).resolve().parents[2] / "tools" / "builder" / "host_bootstrap.py"
 
@@ -50,12 +51,15 @@ def evidence(**overrides) -> VmEvidence:
     fields = {
         "image_source": "https://cdimage.debian.org/.../debian-13-amd64-netinst.iso",
         "image_digest": "sha512:" + "a" * 128,
-        "image_signature_verified": True,
+        "signature_verification": SignatureCheck.VERIFIED,
+        "digest_verification": DigestCheck.MATCHED,
         "created_at": "2026-09-22T00:00:00Z",
         "cpu_architecture": "x86_64",
         "debian_version_id": "13",
         "builder_tool_version": "live-build 1:2025.1",
         "host_kind": HostKind.DISPOSABLE_VM_ON_LINUX,
+        "backend": Backend.QEMU_SYSTEM_X86_64,
+        "execution": Execution.NATIVE_AMD64,
     }
     fields.update(overrides)
     return VmEvidence(**fields)
@@ -216,7 +220,12 @@ def test_every_required_evidence_field_exists_on_the_model() -> None:
 def test_a_missing_evidence_field_is_refused_rather_than_defaulted(missing) -> None:
     """A blank there reads as "any machine" three months later."""
 
-    blank = "" if missing != "image_signature_verified" else False
+    blank = {
+        "signature_verification": SignatureCheck.NOT_ATTEMPTED,
+        "digest_verification": DigestCheck.NOT_ATTEMPTED,
+        "backend": None,
+        "execution": None,
+    }.get(missing, "")
     with pytest.raises(BootstrapRefused) as refused:
         require_vm_evidence(evidence(**{missing: blank}))
     assert refused.value.refusal in {
@@ -228,9 +237,23 @@ def test_a_missing_evidence_field_is_refused_rather_than_defaulted(missing) -> N
 def test_an_image_nobody_verified_the_signature_of_is_refused() -> None:
     """A digest says two files match; a signature says Debian published it."""
 
-    with pytest.raises(BootstrapRefused) as refused:
-        require_vm_evidence(evidence(image_signature_verified=False))
-    assert refused.value.refusal is Refusal.UNSIGNED_IMAGE_SOURCE
+    for failing in (SignatureCheck.FAILED, SignatureCheck.NOT_ATTEMPTED):
+        with pytest.raises(BootstrapRefused) as refused:
+            require_vm_evidence(evidence(signature_verification=failing))
+        assert refused.value.refusal is Refusal.UNSIGNED_IMAGE_SOURCE
+
+
+def test_a_digest_that_did_not_match_is_refused_independently() -> None:
+    """Checking one and reporting the other satisfied is the whole failure.
+
+    A single boolean could not tell "not attempted" from "attempted and
+    failed", and could not say which of the two checks had passed.
+    """
+
+    for failing in (DigestCheck.MISMATCHED, DigestCheck.NOT_ATTEMPTED):
+        with pytest.raises(BootstrapRefused) as refused:
+            require_vm_evidence(evidence(digest_verification=failing))
+        assert refused.value.refusal is Refusal.UNSIGNED_IMAGE_SOURCE
 
 
 def test_evidence_without_the_evaluation_stamp_is_refused() -> None:
