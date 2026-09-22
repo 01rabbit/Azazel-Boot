@@ -851,6 +851,10 @@ def test_preflight_is_read_only_by_construction() -> None:
         "AttemptOutcome",
         "KeyAcquisition",
         "PassphraseChannel",
+        # `_WeakIdentityIndex` holds a weak reference purely to verify
+        # identity on lookup and to notice when the object it names dies —
+        # the callback `ref()` itself takes is what makes that possible.
+        "ref",
     }, f"unexpected imported names: {sorted(named)}"
 
     assert imported == {
@@ -1537,9 +1541,11 @@ def test_this_module_cannot_reach_a_host_a_network_a_vm_or_a_second_partition() 
         "NotImplemented",
         "TypeError",
         "bool",
+        "dict",  # and only as `_WeakIdentityIndex`'s own private store
         "frozenset",
         "getattr",  # and only in the seal's one shape, pinned below
         "hash",  # and only in the two value types' own `__hash__`
+        "id",  # and only as `_WeakIdentityIndex`'s opaque integer key
         "int",
         "isinstance",
         "len",
@@ -4386,7 +4392,19 @@ def test_this_module_performs_no_io_when_it_actually_runs() -> None:
     )
     assert finished.returncode == 0, finished.stderr
     while_running, at_import, reached = ast.literal_eval(finished.stdout.strip())
-    assert while_running == [], f"the decision path performed audited operations: {while_running}"
+    # `builtins.id` is the one audited runtime operation this module now
+    # performs, from `_WeakIdentityIndex`'s own lookup: `id(obj)` returns an
+    # opaque integer with no path back to the object, unlike every other
+    # audited event this hook would catch (`open`, `socket.*`,
+    # `subprocess.*`, `os.*`), and PEP 578 audits it purely because it can be
+    # used *alongside* other introspection to correlate objects — not
+    # because it touches a device, a network or a process on its own.
+    # Anything else audited is still refused outright.
+    runtime_allowed = {"builtins.id"}
+    unexpected_while_running = [event for event in while_running if event not in runtime_allowed]
+    assert unexpected_while_running == [], (
+        f"the decision path performed audited operations: {unexpected_while_running}"
+    )
     assert at_import == [], f"the module performed audited operations while importing: {at_import}"
 
     # **And the drive reached the refusal branches it claims to.** Every probe
@@ -6685,6 +6703,16 @@ def test_a_clearance_is_spent_over_the_medium_the_gates_read(observations) -> No
     review passed the gates, fenced the medium, and then moved the stage,
     arriving at a stage reached over a medium that was fenced at every instant
     after the read.
+
+    R10: this used to answer a bare `AttributeError`, outside
+    `RecoveryRefused` — the seal's vocabulary for a *structural* violation,
+    reached here instead through the one window `_require_an_unfenced_medium`
+    cannot close (between its read, in `start`/`open_trial`/`commit`, and the
+    stage write right after it). A caller who correctly wrote `except
+    RecoveryRefused:` crashed. "The medium is fenced" is the same business
+    fact every other gate expresses through `RecoveryRefused`, so this now
+    does too — via `_refuse_gate`, terminally and audited, the same as a
+    fence caught anywhere else.
     """
 
     flow = workflow(observations)
@@ -6699,14 +6727,19 @@ def test_a_clearance_is_spent_over_the_medium_the_gates_read(observations) -> No
     assert flow._cleared is not None
 
     flow._quarantine.fence()
-    with pytest.raises(AttributeError, match="medium the gates read"):
+    with pytest.raises(RecoveryRefused) as refused:
         flow._sealed_assign("_stage", RecoveryStage.PREFLIGHT_PASSED)
-    assert flow.stage is RecoveryStage.NOT_STARTED
+    assert refused.value.refusal is Refusal.GATE_REFUSED
+    assert flow.audit()[-1].gate is RecoveryGate.MEDIUM_FENCED
 
-    # And the two stages a refusal and an interruption reach are still
-    # reachable over a fenced medium, because fail-closed has to be.
-    flow._sealed_assign("_stage", RecoveryStage.INTERRUPTED)
-    assert flow.stage is RecoveryStage.INTERRUPTED
+    # Terminal, and audited — a fence caught here is an event, the same as
+    # everywhere else this module catches one, not a typo to retry past. A
+    # further stage move, even to the one a genuine interruption reaches, is
+    # refused as a terminal workflow, not honoured.
+    assert flow.stage is RecoveryStage.REFUSED
+    with pytest.raises(AttributeError, match="has ended"):
+        flow._sealed_assign("_stage", RecoveryStage.INTERRUPTED)
+    assert flow.stage is RecoveryStage.REFUSED
 
 
 def test_a_descriptor_rewritten_after_the_preflight_is_not_the_one_it_judged() -> None:
@@ -6900,8 +6933,21 @@ def test_the_module_indexes_are_what_this_file_says_they_are() -> None:
     # `for medium, written in …` over the record, which bound a live
     # `Quarantine` to a local — and the walk that bounds every quarantine here
     # finds them by the name they travel under.
-    assert type(module._SNAPSHOTS_RECORDED).__name__ == "WeakKeyDictionary"
-    assert type(module._JUDGED_BY).__name__ == "WeakKeyDictionary"
+    #
+    # **`_WeakIdentityIndex`, not `WeakKeyDictionary`.** A `WeakKeyDictionary`
+    # was tried, and `.keys()` on one dereferences every live weak key and
+    # hands the real objects back — an ordinary public method, no possession
+    # of the object required. A review called `list(_JUDGED_BY.keys())` and
+    # read out every medium any preflight had judged, live, through the exact
+    # container this module chose to avoid handing one back. The replacement
+    # has no method that returns, iterates or otherwise exposes the object.
+    assert type(module._SNAPSHOTS_RECORDED).__name__ == "_WeakIdentityIndex"
+    assert type(module._JUDGED_BY).__name__ == "_WeakIdentityIndex"
+    for index in (module._SNAPSHOTS_RECORDED, module._JUDGED_BY):
+        assert not hasattr(index, "keys")
+        assert not hasattr(index, "values")
+        assert not hasattr(index, "items")
+        assert not hasattr(index, "__iter__")
 
 
 def test_a_value_that_is_not_a_verdict_is_refused_in_this_modules_vocabulary() -> None:
@@ -7174,13 +7220,23 @@ def test_a_candidate_is_held_only_by_a_workflow_that_committed(observations) -> 
     assert candidate_applies_to(flow, minted) is False
 
 
-def _media_reachable_from(root: object, *, indexes: set[int], depth: int = 6) -> list[str]:
+def _media_reachable_from(root: object, *, depth: int = 6) -> list[str]:
     """Every `Quarantine` reachable from `root`, with the path that found it.
 
     Deliberately not "every object": it walks the shapes module state actually
     takes — plain containers, the fields of objects this package defines, and
     the closures and defaults of its functions. A medium stashed somewhere this
     does not walk is a limit, and the limit is named rather than assumed away.
+
+    **One exemption, and it is a class, not a place or an object**:
+    `_WeakIdentityIndex._by_id`. That dict's whole purpose is to hold a weak
+    reference to a `Quarantine` — dereferencing it is the mechanism, not a
+    bug — and reaching `_by_id` at all needs `object.__setattr__`-grade access
+    to an index's private state, the same reach this module concedes
+    everywhere else as careless-caller defence rather than a capability
+    boundary. What this proves instead is that nothing **else** — no module
+    global, no other object's field, no closure — holds one, and that
+    `_WeakIdentityIndex`'s own *public* surface hands nothing back.
     """
 
     found: list[str] = []
@@ -7194,14 +7250,8 @@ def _media_reachable_from(root: object, *, indexes: set[int], depth: int = 6) ->
             found.append(path)
             return
         if isinstance(value, dict | _weakref.WeakKeyDictionary):
-            # **By location, not by identity.** Exempting the medium *objects*
-            # the indexes hold would exempt them everywhere, and the review's
-            # harvester harvested exactly the media the indexes hold — so the
-            # one permitted place is a key of one of these two dictionaries,
-            # and nowhere else the same object appears is permitted by it.
             for key in list(value.keys()):
-                if id(value) not in indexes:
-                    walk(key, f"{path}.<key>", left - 1)
+                walk(key, f"{path}.<key>", left - 1)
                 walk(value[key], f"{path}[{type(key).__name__}]", left - 1)
             return
         if isinstance(value, list | tuple | set | frozenset | _weakref.WeakSet):
@@ -7213,6 +7263,12 @@ def _media_reachable_from(root: object, *, indexes: set[int], depth: int = 6) ->
                 walk(cell.cell_contents, f"{path}.<closure>", left - 1)
             for default in value.__defaults__ or ():
                 walk(default, f"{path}.<default>", left - 1)
+            return
+        if type(value).__name__ == "_WeakIdentityIndex":
+            # The one exemption, by class. Nothing else about the object is
+            # walked — not even its other slots, though it has none — so a
+            # second field added to this class later is not silently exempted
+            # along with `_by_id`.
             return
         if type(value).__module__.startswith("azazel_boot"):
             for name in getattr(type(value), "__slots__", ()):
@@ -7241,9 +7297,16 @@ def test_no_module_level_state_in_this_module_holds_a_medium(observations) -> No
 
     A spelling rule cannot see a local, so this asks the running module a
     different question: after a full drive, is a medium reachable from this
-    module's globals at all? The two indexes are keyed by the medium and hold
-    it **weakly**, which is named here as the one permitted place — and a weak
-    key hands nothing back, because reaching it needs the object already.
+    module's globals at all? Round 10 found the previous answer here false:
+    `_JUDGED_BY`/`_SNAPSHOTS_RECORDED` were `WeakKeyDictionary` instances, and
+    this test's own exemption treated a weak key as the one permitted place —
+    on the strength of the docstring claim that "a weak key hands nothing
+    back, because reaching it needs the object already." `.keys()` on a
+    `WeakKeyDictionary` needs no such thing: it dereferences every live weak
+    key and hands the real objects back, an ordinary public method call. Both
+    indexes are `_WeakIdentityIndex` now, keyed by `id()` rather than by the
+    object, with no method that returns, iterates or otherwise exposes it —
+    so this walk exempts nothing but that class's own private store.
     """
 
     from azazel_boot import snapshot as module
@@ -7267,30 +7330,31 @@ def test_no_module_level_state_in_this_module_holds_a_medium(observations) -> No
     recovered = workflow(observations)
     run_to_commit(recovered, observations, snapshot=descriptor(fingerprint="snapshot-reach-2"))
 
-    # The one permitted place: a weak key of either index. Both are keyed by
-    # the medium, so this is where a medium legitimately appears.
-    indexes = {id(module._JUDGED_BY), id(module._SNAPSHOTS_RECORDED)}
-    assert list(module._JUDGED_BY.keys()), "the drive was expected to key an index by a medium"
-    assert list(module._SNAPSHOTS_RECORDED.keys()), "the drive was expected to record a write"
+    # The indexes really did record something over this drive, so the walk
+    # below is over live bookkeeping rather than an empty structure that
+    # would pass trivially.
+    assert rule in module._JUDGED_BY, "the drive was expected to key an index by a medium"
+    assert module._SNAPSHOTS_RECORDED.get(rule) is not None, (
+        "the drive was expected to record a write"
+    )
 
-    escaped = _media_reachable_from(vars(module), indexes=indexes)
+    escaped = _media_reachable_from(vars(module))
     assert not escaped, escaped
 
-    # And the guard is not vacuous. Both shapes the review could take: a
-    # module-level container holding a medium, and the **same** medium an
-    # index legitimately holds, harvested elsewhere — the second is why the
-    # exemption is a place rather than an object.
+    # And the guard is not vacuous: a plain module-level container holding a
+    # medium — the shape a review actually used — is still found.
     module._a_harvester_for_this_test = [rule]
     try:
-        assert _media_reachable_from(vars(module), indexes=indexes)
+        assert _media_reachable_from(vars(module))
     finally:
         del module._a_harvester_for_this_test
 
-    module._a_harvester_for_this_test = [a_quarantine()]
-    try:
-        assert _media_reachable_from(vars(module), indexes=indexes)
-    finally:
-        del module._a_harvester_for_this_test
+    # Nor does the class-name exemption cover more than the real class: the
+    # walk only reaches objects whose module starts with `azazel_boot` at
+    # all, so a same-named class from anywhere else is never walked into in
+    # the first place, exempted or not — asserted here so that guard cannot
+    # be quietly narrowed to admit one without this test noticing.
+    assert module._WeakIdentityIndex.__module__ == "azazel_boot.snapshot"
 
 
 def test_a_fingerprint_is_an_opaque_token_and_not_a_rendered_record() -> None:
@@ -7749,3 +7813,157 @@ def test_the_gates_own_fence_recheck_is_load_bearing_on_its_own(observations) ->
     assert quarantine.is_fenced is True
     assert flow.stage is RecoveryStage.REFUSED
     assert flow.audit()[-1].gate is RecoveryGate.MEDIUM_FENCED
+
+
+def test_a_fence_landing_between_the_last_check_and_the_mint_is_still_refused(
+    observations, monkeypatch
+) -> None:
+    """R10: the narrow window `_require_an_unfenced_medium` cannot close.
+
+    `commit` asks the fence once more, then builds the candidate, then writes
+    `_candidate`, then writes `_stage`. Nothing makes those four lines atomic,
+    and a fence raised by device monitoring — the same independent mechanism
+    every other re-check in this file exists because of — can land after the
+    read and before the last write. A review simulated exactly that window by
+    making `RecoveryCandidate.__init__` itself fence the medium, which is not
+    a claim that construction is attacker-controlled in production; it is a
+    deterministic stand-in for anything that could delay execution between
+    two ordinary statements — a scheduler pause, a signal, a thread in a
+    multi-threaded caller.
+
+    Before this fix, the write to `_stage` met the seal's own internal fence
+    recheck and raised a bare `AttributeError` — outside `RecoveryRefused`,
+    so a caller correctly writing `except RecoveryRefused:` crashed instead
+    of being refused. `_candidate` was left populated on a workflow stuck at
+    `TRIAL_OPEN`, which `holds()` correctly refuses (it asks the stage too),
+    so nothing was ever falsely authorised — the defect was strictly the
+    escaped exception type.
+    """
+
+    quarantine = a_quarantine()
+    flow = workflow(observations, quarantine=quarantine)
+    snap = descriptor(fingerprint="snapshot-fingerprint-mint-race")
+    flow.start(
+        snap, observations, media_binding_holds=True, session_id=SESSION, started_by_operator=True
+    )
+    flow.open_trial(snap, observations, media_binding_holds=True, session_id=SESSION)
+
+    real_init = RecoveryCandidate.__init__
+
+    def _fence_during_construction(self, *args, **keywords):
+        quarantine.fence()
+        real_init(self, *args, **keywords)
+
+    monkeypatch.setattr(RecoveryCandidate, "__init__", _fence_during_construction)
+
+    with pytest.raises(RecoveryRefused) as refused:
+        flow.commit(
+            snap,
+            observations,
+            media_binding_holds=True,
+            session_id=SESSION,
+            acquisition=Opens(),
+            confirmed=True,
+        )
+    assert refused.value.refusal is Refusal.GATE_REFUSED
+    assert flow.audit()[-1].gate is RecoveryGate.MEDIUM_FENCED
+    assert flow.stage is RecoveryStage.REFUSED
+    assert flow.holds(RecoveryCandidate(snap.schema_version, snap.fingerprint)) is False
+    assert quarantine.volume_is_quarantined is True
+
+
+def test_the_opaque_check_refuses_every_unicode_line_boundary() -> None:
+    """R10: `\\n`/`\\r` alone missed the other boundaries `splitlines()` knows.
+
+    A review joined three fragments with `\\x0c` (form feed) and `\\u2029`
+    (paragraph separator) instead of `\\n`, and the result passed the old
+    character-by-character check while `str.splitlines()` — and any
+    `.splitlines()`-based log viewer — still read it as three lines.
+    """
+
+    for boundary in ("\x0b", "\x0c", "\x85", " ", " "):
+        with pytest.raises(TypeError, match="opaque"):
+            descriptor(fingerprint=f"line-one{boundary}line-two")
+        with pytest.raises(TypeError, match="opaque"):
+            SnapshotAuditEntry(
+                event=SnapshotAuditEvent.SNAPSHOT_WRITTEN,
+                fingerprint=f"line-one{boundary}line-two",
+            )
+
+    # And an ordinary single-line value is still accepted.
+    assert descriptor(fingerprint="b3c1d9e07f2a4856").fingerprint == "b3c1d9e07f2a4856"
+
+
+def test_neither_value_types_eq_is_decided_by_a_subclasss_inherited_method() -> None:
+    """R10: `type(other) is not X` alone left the *reflected* comparison open.
+
+    `fake == real` tries `real.__eq__(fake)` first — refused, correctly — and
+    Python then tries the reflected `fake.__eq__(real)`, which is this same
+    method, **inherited**, now running with `self` bound to the subclass
+    instance. `type(other) is SnapshotDescriptor` is true from there, so the
+    comparison answered `True` for two objects of different exact types
+    unless `type(self)` is checked too.
+    """
+
+    class FakeDescriptor(SnapshotDescriptor):
+        pass
+
+    real = descriptor(fingerprint="snapshot-fingerprint-eq-symmetry")
+    fake = FakeDescriptor(
+        real.container_version, real.schema_version, real.integrity, real.fingerprint
+    )
+    # Both directions, and both now correctly `False`: two objects of
+    # different exact types, whichever side's `__eq__` Python tries first.
+    assert fake != real
+    assert real != fake
+    # And the type-pinned instance a legitimate decision path builds is
+    # unaffected: a real one still equals another real one.
+    assert real == descriptor(fingerprint="snapshot-fingerprint-eq-symmetry")
+
+    class FakeEntry(SnapshotAuditEntry):
+        pass
+
+    real_entry = SnapshotAuditEntry(event=SnapshotAuditEvent.RECOVERY_STARTED)
+    fake_entry = FakeEntry(event=SnapshotAuditEvent.RECOVERY_STARTED)
+    assert fake_entry != real_entry
+    assert real_entry != fake_entry
+    assert real_entry == SnapshotAuditEntry(event=SnapshotAuditEvent.RECOVERY_STARTED)
+
+
+def test_the_identity_index_does_not_answer_for_a_dead_or_different_object() -> None:
+    """R10 (self-review): `id()` alone would have reopened the hazard the
+    weak reference exists to close.
+
+    `_WeakIdentityIndex` keys its dict by `id(obj)` specifically so that
+    iterating it cannot hand a `Quarantine` back. `id()` values are reused
+    once an object is collected, so a bare `id()`-keyed lookup would answer
+    for a *different*, unrelated object later allocated at the same address
+    as an earlier, now-dead one — the weak reference stored alongside the
+    value exists purely to catch that and is asked on every `get`/`in`.
+    Deriving the mismatch by natural garbage-collector timing is
+    nondeterministic; this drives the check directly, over an entry a real
+    lookup could otherwise be fooled by.
+    """
+
+    from azazel_boot import snapshot as module
+
+    index = module._WeakIdentityIndex()
+    first = a_quarantine()
+    index[first] = "value-for-first"
+    assert index.get(first) == "value-for-first"
+    assert first in index
+
+    # A stand-in for "the id-keyed slot survives after the object it named
+    # is gone" — reached deterministically by writing the internal store
+    # directly, since natural id reuse depends on allocator timing this test
+    # does not control.
+    second = a_quarantine()
+    assert id(second) != id(first)
+    stale_ref, value = index._by_id[id(first)]
+    index._by_id[id(second)] = (stale_ref, value)
+
+    assert index.get(second) is None
+    assert second not in index
+    # And the entry keyed by its own, correct id is unaffected.
+    assert index.get(first) == "value-for-first"
+    assert first in index

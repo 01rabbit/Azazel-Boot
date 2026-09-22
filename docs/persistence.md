@@ -411,7 +411,7 @@ medium was pulled, and "may this happen now" did.
 
 Every option offered from every state acts on the medium or on the session:
 continue at `CORE`, examine a medium nothing has looked at, attempt an unlock
-with the documented portable passphrase or recovery path, export a quarantined
+with an operator-carried passphrase or recovery procedure, where the site has established one, export a quarantined
 volume **unmodified** for offline examination, rewrite the medium from a
 verified image on another machine, or reboot.
 

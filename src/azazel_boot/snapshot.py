@@ -58,6 +58,7 @@ from __future__ import annotations
 from enum import Enum
 from weakref import WeakKeyDictionary as _WeakKeyDictionary
 from weakref import WeakSet as _WeakSet
+from weakref import ref as _weakref
 
 from .commissioning import SessionBinding, binding_applies
 from .inventory import InterfaceObservation
@@ -201,9 +202,20 @@ class SnapshotDescriptor:
         `_require_the_same_snapshot` compares `_fields_of()` tuples on
         purpose, so a hostile `__eq__` cannot decide a substitution — this
         exists for the ordinary convenience a value type is expected to have.
+
+        **Both operands, not only the right one.** `type(other) is not
+        SnapshotDescriptor` checking only the argument left the reflected
+        case open: `Fake(SnapshotDescriptor): pass` has no `__eq__` of its
+        own, so `fake == descriptor` first tries `descriptor.__eq__(fake)` —
+        refused, correctly — and Python then tries the reflected
+        `fake.__eq__(descriptor)`, which is this *same* method, inherited,
+        now running with `self` bound to the `Fake` instance. From there
+        `type(other) is SnapshotDescriptor` is true, and the comparison
+        answered `True` for two objects of different exact types. Checking
+        `type(self)` as well closes the reflected case the same way.
         """
 
-        if type(other) is not SnapshotDescriptor:
+        if type(self) is not SnapshotDescriptor or type(other) is not SnapshotDescriptor:
             return NotImplemented
         return _fields_of(self) == _fields_of(other)
 
@@ -467,6 +479,68 @@ class PreflightVerdict:
         return self._evaluated
 
 
+class _WeakIdentityIndex:
+    """Maps an object, by identity, to a value — with no way to enumerate
+    the objects back out.
+
+    `_JUDGED_BY` and `_SNAPSHOTS_RECORDED` were both `WeakKeyDictionary`
+    instances, keyed by the live `Quarantine`. That was the wrong container:
+    `.keys()` on a `WeakKeyDictionary` dereferences every live weak key and
+    hands back the real objects — no prior possession of one required, only
+    `import azazel_boot.snapshot` and a call to an entirely ordinary public
+    method. A review read `list(_JUDGED_BY.keys())` and got back every medium
+    any preflight in the process had judged, live, through the exact
+    container chosen specifically to avoid handing one back.
+
+    This closes that door by never using the object as a dict key at all.
+    The underlying dict is keyed by `id(obj)` — an opaque integer with no
+    path back to the object — and a weak reference is kept alongside the
+    value purely to *verify* identity on lookup and to *notice* when the
+    object dies, closing the id-reuse hazard a bare `id()` key would have on
+    its own: a collected object's slot, re-used by an unrelated later object
+    allocated at the same address, would otherwise answer for it. `get` and
+    `__contains__` dereference the stored weak reference and compare it with
+    `is` against the object presented, so a coincidental `id()` collision
+    with a *different*, still-live object answers `False`, not `True`.
+
+    No method here returns the object, iterates it, or exposes the
+    underlying dict — there is nothing analogous to `.keys()` to call. The
+    `_by_id` dict, holding `(weak reference, value)` pairs, is this
+    instance's own attribute; reaching it needs `object.__setattr__`-grade
+    access to private state, the same reach the rest of this module concedes
+    everywhere else as careless-caller defence rather than a capability
+    boundary, not an ordinary public method call.
+    """
+
+    __slots__ = ("_by_id",)
+
+    def __init__(self) -> None:
+        object.__setattr__(self, "_by_id", {})
+
+    def get(self, obj: object) -> object | None:
+        entry = self._by_id.get(id(obj))
+        if entry is None:
+            return None
+        alive, value = entry
+        return value if alive() is obj else None
+
+    def __setitem__(self, obj: object, value: object) -> None:
+        oid = id(obj)
+        store = self._by_id
+
+        def _cleanup(_dead_ref: object, oid: int = oid, store: dict = store) -> None:
+            store.pop(oid, None)
+
+        store[oid] = (_weakref(obj, _cleanup), value)
+
+    def __contains__(self, obj: object) -> bool:
+        entry = self._by_id.get(id(obj))
+        if entry is None:
+            return False
+        alive, _value = entry
+        return alive() is obj
+
+
 #: The verdicts this module minted. Membership is the whole of it, and the
 #: verdict does not point back — so reading a verdict, by any means, yields
 #: nothing that can be stamped onto another one. Weak, so a verdict a caller
@@ -502,7 +576,17 @@ _MINTED_HERE: _WeakSet = _WeakSet()
 #:
 #: Weak on both sides: the medium is the key, so remembering something about it
 #: does not keep it alive, and the verdicts are held in a `WeakSet`.
-_JUDGED_BY: _WeakKeyDictionary = _WeakKeyDictionary()
+#:
+#: **A `_WeakIdentityIndex`, not a `WeakKeyDictionary`.** It was one, and
+#: `.keys()` on a `WeakKeyDictionary` dereferences every live weak key and
+#: hands back the real objects — no possession required, only
+#: `import azazel_boot.snapshot` and a call to a completely ordinary public
+#: method. A review read `list(_JUDGED_BY.keys())` and got back every
+#: `Quarantine` any preflight in the process had judged, live, through the
+#: exact container this module chose specifically to avoid handing one back.
+#: The paragraph above said "nothing that comes out of either index is a
+#: medium"; `.keys()` came out of it a medium. See `_WeakIdentityIndex` below.
+_JUDGED_BY: _WeakIdentityIndex = _WeakIdentityIndex()
 
 #: The verdicts `_mint` produced, which is to say the verdicts that judged some
 #: medium. `_MINTED_HERE` is the careless-caller list a caller can add to;
@@ -550,7 +634,10 @@ _JUDGED_FIELDS: _WeakKeyDictionary = _WeakKeyDictionary()
 #: is a medium that cannot be presented again. What the collector takes is an
 #: answer to a question nobody can ask. What it leaves is that this module
 #: holds no medium alive, anywhere, for the life of the process.
-_SNAPSHOTS_RECORDED: _WeakKeyDictionary = _WeakKeyDictionary()
+#:
+#: A `_WeakIdentityIndex`, for the same reason `_JUDGED_BY` is one: a
+#: `WeakKeyDictionary`'s `.keys()` handed the medium straight back.
+_SNAPSHOTS_RECORDED: _WeakIdentityIndex = _WeakIdentityIndex()
 
 #: The checks, in the order they are declared, **taken once at import**. The
 #: ledger's completeness rule used to build this fresh on every call, out of
@@ -726,11 +813,25 @@ def _require_an_opaque_value(name: str, value: str) -> None:
     a caller who puts a device serial in an opaque-looking token still can.
     What a fingerprint means is the caller's to keep; what it may *look* like
     is checkable, and an unbounded string in a log was not.
+
+    "Multi-line" is asked with `str.splitlines()` rather than a fixed list of
+    forbidden characters. `\n`/`\r` alone missed `\x0b`, `\x0c`, `\x85` and
+    the two Unicode line/paragraph separators — every boundary
+    `str.splitlines()` itself recognises, and the same boundaries a
+    `.splitlines()`-based log viewer would split on. A review put three
+    "lines" through as one value, joined by a form feed and a paragraph
+    separator instead of `\n`, and each rendered as a separate line wherever
+    the audit was read back. Asking the same function the value would later
+    be split by is what makes the check and the rendering agree.
     """
 
     if len(value) > 128:
         raise TypeError(f"{name} must be an opaque token, not a rendered record")
-    for forbidden in (" ", "\t", "\n", "\r", "/", "\\", "="):
+    if len(value.splitlines()) > 1:
+        raise TypeError(
+            f"{name} must be an opaque token; a multi-line value is not one"
+        )
+    for forbidden in (" ", "\t", "/", "\\", "="):
         if forbidden in value:
             raise TypeError(
                 f"{name} must be an opaque token; a path, a rendered field or "
@@ -1363,9 +1464,16 @@ class SnapshotAuditEntry:
         return (self.event, self.check, self.gate, self.schema_version, self.fingerprint)
 
     def __eq__(self, other: object) -> bool:
-        """By value, over the exact type — the dataclass default this replaces."""
+        """By value, over the exact type — the dataclass default this replaces.
 
-        if type(other) is not SnapshotAuditEntry:
+        Both operands, for the reason `SnapshotDescriptor.__eq__` states in
+        full: checking only `other` leaves the *reflected* comparison — a
+        subclass's inherited `__eq__`, called with `self` bound to the
+        subclass instance — free to answer using this class's own logic
+        against `type(self)` rather than the subclass.
+        """
+
+        if type(self) is not SnapshotAuditEntry or type(other) is not SnapshotAuditEntry:
             return NotImplemented
         return self._fields() == other._fields()
 
@@ -2170,10 +2278,26 @@ class RecoveryWorkflow:
             # nothing can drive is not a check, and this module says so about
             # `_require_this_sitting`.
             if self._quarantine.is_fenced:
-                raise AttributeError(
-                    "this stage is reached over the medium the gates read; a "
-                    "medium fenced since then is not one they passed"
-                )
+                # **`_refuse_gate`, not a raised `AttributeError`.** A
+                # round-nine review found the gap this closes: `commit` asks
+                # `_require_an_unfenced_medium()`, mints the candidate, and
+                # only then moves the stage — and the fence can still be
+                # raised in that window, by a device this method does not
+                # control. This branch used to answer with a bare
+                # `AttributeError`, the seal's usual vocabulary for a
+                # *structural* violation; reached from the legitimate path
+                # through `start`/`open_trial`/`commit` rather than from a
+                # direct malicious call, that is the wrong vocabulary — a
+                # caller who correctly wrote `except RecoveryRefused:`
+                # crashed. "The medium is fenced" is the same *business*
+                # fact every other gate expresses through `RecoveryRefused`,
+                # so it is expressed that way here too, from any caller.
+                # `_refuse_gate` calls back into this method for `_stage` →
+                # `REFUSED`, a value in `_REACHED_WITHOUT_GATES`, which does
+                # not re-enter this branch — no `try`/`except` needed, and
+                # none is added: this module raises exceptions, it does not
+                # catch them.
+                self._refuse_gate(RecoveryGate.MEDIUM_FENCED)
             object.__setattr__(self, "_cleared", None)
         if name == "_candidate" and self._cleared is not _GATES_JUST_PASSED:
             raise AttributeError(
