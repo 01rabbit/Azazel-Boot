@@ -63,7 +63,7 @@ supplying a USB dongle supplied the host identity — three laptops sharing one
 dongle shared one fingerprint. At the owner's decision
 ([ADR-0008 D4.1.1](adr/0008-debian-13-live-baseline.md)), opening persistence
 now requires a **hardware-provided stable media identity** as well, bound under
-a **key-protected HMAC** together with three other things:
+a **key-protected HMAC** together with four other things:
 
 ```
 stable media hardware identity   (USB serial descriptor, SCSI VPD WWN,
@@ -83,7 +83,7 @@ stable media hardware identity   (USB serial descriptor, SCSI VPD WWN,
 | `media_binding_mismatch` | a different medium, a different device, a re-created volume, a different image, a mismatched generation, or a forged binding |
 
 The last row is **one refusal for six causes, deliberately**. A refusal that
-says which of the four inputs was wrong is an oracle: it tells an attacker
+says which of the five inputs was wrong is an oracle: it tells an attacker
 holding three of them which one to keep working on.
 
 *Topology is never identity.* `MediaIdentitySource` has no value for a bus
@@ -444,12 +444,13 @@ and the whole partition table into every such traceback.
 
 ## 8. What this does not model
 
-[The threat model](threat-model.md) §5 has seven rows; this module decides three
-of them (offline modification, rollback, dirty-volume repair). Audit-chain
-truncation, the `LOCAL_CONTINUITY_ONLY` anchor state, persistence migration and
-passphrase loss are **not** represented here, and `unlock` grants `LITE` on
-success without consulting an anchor. That is a scope statement, not a claim
-that those rows are handled elsewhere.
+[The threat model](threat-model.md) §5 has nine rows; this module decides four
+of them (offline modification, rollback, persistence carried to a second medium
+or re-created under the same name, dirty-volume repair). Audit-chain truncation,
+the `LOCAL_CONTINUITY_ONLY` anchor state, a live substitution while a volume is
+already open, persistence migration and passphrase loss are **not** represented
+here, and `unlock` grants `LITE` on success without consulting an anchor. That is
+a scope statement, not a claim that those rows are handled elsewhere.
 
 ## 9. What this does not establish
 

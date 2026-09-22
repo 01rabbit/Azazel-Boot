@@ -12,8 +12,21 @@ every refusal in the package, which is worse than either: six —
 `ModeRefused` and `RecoveryRefused` — derived straight from `Exception`, so the
 one `except` this module promises let each of them past. They all derive from
 `Refused` now, and `tests/unit/test_refusals.py` derives the list from the
-package rather than repeating it here, so a tenth refusal is covered on the day
-it is written instead of on the day somebody remembers this paragraph.
+package rather than repeating it here, so a tenth *class named like a refusal*
+is covered on the day it is written instead of on the day somebody remembers
+this paragraph.
+
+**"Named like a refusal" is the actual mechanism, and it is narrower than "one
+base class for every refusal these modules raise" reads.** The test asks which
+classes are *spelled* `...Refused`; a refusal that is not spelled that way is
+invisible to it by construction, however the rule is written. One exists:
+`azazel_boot.commissioning.UnidentifiedHost` is a `ValueError`, raised where a
+host presents no identity to bind to, and it is not a `Refused` — an unhandled
+`UnidentifiedHost` escapes the single `except` this module promises, captured
+locals included, which is exactly the harm this docstring names. Bringing it
+under this hierarchy is a public-contract change to a module this file does
+not own, and is tracked separately rather than made here without its own
+review.
 """
 
 from __future__ import annotations

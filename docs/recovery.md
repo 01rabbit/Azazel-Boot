@@ -1,9 +1,16 @@
 # Recovery
 
-Status: **target contract**. Nothing here is implemented, and nothing here has
-ever been exercised. **No hardware, boot, or no-host-write evidence exists** —
-the [README](../README.md) status table says exactly that, and this document
-does not say more. Every procedure below is an intended design.
+Status: **target contract**, with two exceptions stated precisely rather than
+implied. [ADR-0010](adr/0010-persistence-key-and-migration.md) D6–D8 (snapshot,
+preflight and an operator-started recovery workflow that yields a candidate
+rather than lifting a quarantine) are implemented in software — see
+[snapshot and recovery](snapshot-and-recovery.md). Nothing else here is
+implemented, and **nothing here has ever been exercised on hardware**: no
+snapshot has been written, no migration run, no trial interrupted and no
+restore attempted, on any device. The [README](../README.md) status table
+states each module this way; this document does not say more for the parts
+that remain a design. Every procedure below not covered by D6–D8 is an
+intended design.
 
 Recovery on borrowed hardware is a different problem from recovery on a machine
 you own. The first thing to recover is not the session, the data, or the
@@ -199,7 +206,7 @@ recoverable thing that is not the image.
 | Offline modification of persistence contents | detected at boot through integrity-protected encryption; the volume is quarantined, not repaired into use |
 | An older persistence generation is presented | generation counters bound into the signed checkpoint chain detect it; it is not silently accepted |
 | The audit chain is truncated or spliced | two-copy signed checkpoints, with an operator-carried or remote anchor when one is available |
-| The passphrase is lost | a **documented portable passphrase and recovery path** exists, and is specifically required for the `UNVERIFIED_PLATFORM` case where platform-sealed key material is unavailable (program plan §6.7 item 2; §10 SR-08). Recovery authority cannot sign ordinary field checkpoints or hide a discontinuity |
+| The passphrase is lost | a documented portable passphrase and recovery path is **required**, specifically for the `UNVERIFIED_PLATFORM` case where platform-sealed key material is unavailable (program plan §6.7 item 2; §10 SR-08). **No such document exists in this repository today** — this is an open requirement, not a shipped one. Recovery authority cannot sign ordinary field checkpoints or hide a discontinuity |
 
 Quarantine is the recurring answer, and it is chosen over repair for a reason
 worth stating: a volume repaired into use is a volume an attacker may have

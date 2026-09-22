@@ -669,7 +669,7 @@ class MediaIdentity:
 class BindingKey:
     """The HMAC key, derived by the caller from the TPM or the commissioning secret.
 
-    A plain hash would let anyone who learns the four inputs recompute the
+    A plain hash would let anyone who learns the five inputs recompute the
     binding, which is why the standing rule is a **key-protected** HMAC rather
     than a digest. The key material is never written to the audit, a journal, a
     terminal, an issue, a pull request or an external report, so this type
@@ -696,22 +696,22 @@ class BindingKey:
         raise AttributeError("a BindingKey is fixed at construction")
 
     def __delattr__(self, name: str) -> None:
-        """The seal's other door. `__setattr__` alone left it open.
+        """`__setattr__` here is unconditional, not gated on a seal.
 
-        Every seal in this package gates on `getattr(self, "_sealed", False)`,
-        and `_sealed` is an ordinary slot: `del x._sealed` removes it with
-        plain syntax, no dunder call and nothing for a static scan to see, and
-        every later assignment is then an ordinary one. A review deleted it and
-        wrote a stage, a candidate, a quarantine and a sitting onto a workflow
-        by assignment — reaching `COMMITTED` with a forged candidate and an
-        **empty audit**, past the moving-fields allowlist, the stage graph and
-        the clearance interlock at once. A defence is not deeper than its floor.
+        This class has no `_sealed` slot to delete — its `__setattr__`
+        refuses **every** assignment from the moment the object exists, so
+        there was never a flag to remove. What `__delattr__` closes is
+        `del x.<field>`, which reaches the same slots by a different dunder:
+        the sibling classes that gate on `_sealed` needed this because
+        deleting the gate reopened assignment; this class needed it because
+        the field would otherwise simply be gone, and a caller reading it
+        afterward would meet `AttributeError` for the wrong reason.
 
-        `azazel_boot.media.DeviceIdentity` already refused this; the idiom was
-        in the codebase and in one class of twelve.
+        `azazel_boot.media.DeviceIdentity` already refused this shape; the
+        idiom was in the codebase and in one class of twelve.
         """
 
-        raise AttributeError("a BindingKey is sealed after construction")
+        raise AttributeError("a BindingKey is fixed at construction")
 
     def __reduce__(self):
         raise TypeError("a BindingKey is not serialisable")
@@ -754,7 +754,7 @@ class MediaBinding:
     """The HMAC, and nothing else.
 
     There is no `media_identity`, `serial`, `wwn`, `key` or `key_material`
-    field. The four inputs are not recoverable from it, which is what lets the
+    field. The five inputs are not recoverable from it, which is what lets the
     caller store it beside the volume.
     """
 
@@ -888,7 +888,7 @@ def media_binding_applies(
     volume, another image or an earlier generation does not match. A changed
     identity and a forged binding are **the same refusal** — distinguishing
     them would make the refusal an oracle that tells an attacker which of the
-    four inputs they got wrong.
+    five inputs they got wrong.
     """
 
     try:
@@ -1503,7 +1503,8 @@ RECOVERY_OPTIONS = MappingProxyType({
     ),
     PersistenceState.LOCKED: (
         "continue without persistence, at CORE",
-        "attempt an unlock with the documented portable passphrase or recovery path",
+        "attempt an unlock with an operator-carried passphrase or recovery "
+        "procedure, where the site has established one",
     ),
     PersistenceState.OPEN: (),
     PersistenceState.QUARANTINED: (

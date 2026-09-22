@@ -299,37 +299,46 @@ the trial, and again between the trial and the commit, and assert each refuses;
 the trial-side recheck was untested until a review deleted it and the suite
 stayed green.
 
-The gates, in order — D8's four, with two that precede them:
+The gates, in order — `RecoveryGate` has **eight** members, D8's four with the
+four that precede them:
 
-1. **the medium is not fenced**
-2. **there is something to recover** — running this over a healthy volume would
-   be a restore of live data from a snapshot: the write D8 refuses to make
-   automatically, made deliberately over something that was fine
-3. **target binding** — *which medium this recovery is for*. The quarantine is
-   asked its own question, `medium_is_bound()`, which is also `False` after a
-   fence, so no device identity crosses into this module. It used to be the
-   **host** binding wearing this gate's name: a review committed a whole
-   recovery over a quarantine that had never observed any device, and over two
-   different media in turn, and the audit said `recovery_completed` for a
-   volume the module could not name. The quarantine must also be this
-   sitting's — `PersistenceSession` refuses the identical pairing, and this
-   type-checked all three inputs and compared none of them.
-   **What is not checked here**: ADR-0008 D4.1.1's key-protected media binding
+1. **the medium is not fenced** (`MEDIUM_FENCED`)
+2. **there is something to recover** (`NOTHING_TO_RECOVER`) — running this over
+   a healthy volume would be a restore of live data from a snapshot: the write
+   D8 refuses to make automatically, made deliberately over something that was
+   fine
+3. **the medium is recognised** (`MEDIUM_NOT_RECOGNISED`) — *which medium this
+   recovery is for*, and *whose sitting it is*. The quarantine is asked its own
+   question, `medium_is_bound()`, which is also `False` after a fence, so no
+   device identity crosses into this module. It used to be the **host**
+   binding wearing this gate's name: a review committed a whole recovery over a
+   quarantine that had never observed any device, and over two different media
+   in turn, and the audit said `recovery_completed` for a volume the module
+   could not name. The quarantine must also be this sitting's —
+   `PersistenceSession` refuses the identical pairing, and this type-checked
+   all three inputs and compared none of them.
+4. **host binding** (`HOST_BINDING`) — `commissioning.binding_applies`,
+   re-derived from the supplied inventory rather than re-compared against a
+   stored answer, now named for what it answers
+5. **target binding** (`TARGET_BINDING`) — **ADR-0010 D8 gate 1**: ADR-0008
+   D4.1.1's key-protected media binding. **Not checked here directly**: it
    needs a `BindingKey`, and key material in a decision module would break the
-   rule that the secret never arrives. That check stays in
-   `azazel_boot.persistence`; this gate is not it, and does not claim to be.
-4. **host binding** — `commissioning.binding_applies`, re-derived from the
-   supplied inventory rather than re-compared against a stored answer, now
-   named for what it answers
-5. **key acquisition** — `session_mode`'s `KeyAcquisition` Protocol, reused
-   rather than reimplemented, so what crosses back is the same single enum and
-   this module never sees a passphrase. `commit` **requires** one: `None` used
-   to skip the gate entirely and leave an audit byte-identical to a legitimate
-   commit, so nothing downstream could tell a recovery that unlocked the volume
-   from one where nobody was ever prompted
-6. **integrity verification**
-7. **operator confirmation** — `confirmed` grants nothing by itself, which the
-   first test in the file drives: the volume is still quarantined afterwards
+   rule that the secret never arrives. The check stays in
+   `azazel_boot.persistence`; this gate is the caller's re-derived `bool`
+   report, `media_binding_holds`, asked again at every stage.
+6. **key acquisition** (`KEY_ACQUISITION`) — `session_mode`'s `KeyAcquisition`
+   Protocol, reused rather than reimplemented, so what crosses back is the
+   same single enum and this module never sees a passphrase. `commit`
+   **requires** one: `None` used to skip the gate entirely and leave an audit
+   byte-identical to a legitimate commit, so nothing downstream could tell a
+   recovery that unlocked the volume from one where nobody was ever prompted
+7. **integrity verification** (`INTEGRITY_VERIFICATION`)
+8. **operator confirmation** (`OPERATOR_CONFIRMATION`) — `confirmed` grants
+   nothing by itself, which the first test in the file drives: the volume is
+   still quarantined afterwards, and it is type-checked inside the gates
+   themselves, not only at `commit` — a direct call to the gate evaluator used
+   to accept a truthy non-bool and take the full clearance without ever asking
+   an operator
 
 Each is driven failing on its own to show the next is not reached, and three
 adjacent pairs are contested with **both** gates failing at once — target
@@ -424,7 +433,7 @@ which at module level *is* the module dict, into which CPython puts
 
 Four things follow, and only the last two are claims. The name rule is no longer a
 denylist: **every free name the module reads is listed, and the assertion is
-equality**, so a builtin that is not one of the fourteen is unreachable by any
+equality**, so a builtin that is not one of the seventeen is unreachable by any
 spelling. And the question is asked of the runtime instead — the workflow is
 driven end to end under `sys.addaudithook`, which cannot be removed once
 installed, and the assertion is that **no audited operation happens at all**,

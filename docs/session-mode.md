@@ -8,7 +8,9 @@ hardware. No passphrase has been attempted and no volume has been opened,
 sealed or created on any device.
 
 Implements [ADR-0010](adr/0010-persistence-key-and-migration.md) D1, D2 and D3.
-D4–D10 are decided and **not** implemented.
+D4–D8 are implemented in software elsewhere in this package and
+hardware-unverified (see below); D9 and D10 are held by static and runtime
+checks only.
 
 Related: [ADR-0011](adr/0011-unlock-helper-boundary.md) — the shape of the
 acquisition that does not yet exist ·

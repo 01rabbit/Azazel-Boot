@@ -56,8 +56,20 @@ class Component:
 #: claims more than the repository holds is the failure this table exists to
 #: prevent, so `tests/unit/test_status.py` pins the vocabulary.
 COMPONENTS: tuple[Component, ...] = (
-    Component("image_builder", "absent", "no image is built; no builder is chosen"),
-    Component("initramfs_quarantine", "absent", "the no-host-write property has no implementation"),
+    Component(
+        "image_builder",
+        "absent",
+        "tools/builder/ holds a candidate-evaluation harness (closure pinning, "
+        "reproducibility measurement, host-bootstrap probing); no builder is "
+        "chosen, no product image is built and none is signed",
+    ),
+    Component(
+        "initramfs_quarantine",
+        "absent",
+        "decision logic and a pinned policy artifact exist "
+        "(azazel_boot.quarantine, config/quarantine/policy-v1.json); the "
+        "no-host-write property is unverified on hardware",
+    ),
     Component(
         "media_writer",
         "absent",
@@ -122,8 +134,19 @@ class BootStatus:
                 "an interface inventory is read, but no NIC role is assigned "
                 "and no topology is assessed"
             ),
-            "verified_assets": "no asset verification exists",
-            "trust_health": "no media or platform trust classification exists",
+            # Decision logic **is** read — `azazel_boot.artifact` verifies a
+            # record's digest and signature — and a fitting verified asset is
+            # not thereby carried: nothing here has been run against a real
+            # medium, and this dimension is unassessed for the same reason
+            # `topology` is. The row used to say none of this existed.
+            "verified_assets": (
+                "artifact verification decision logic exists, unrun against "
+                "any real medium"
+            ),
+            "trust_health": (
+                "media eligibility and quarantine disposition decision logic "
+                "exist, unrun against any real device"
+            ),
         }
     )
 

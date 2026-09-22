@@ -665,7 +665,8 @@ def test_the_offered_options_are_exactly_these_and_no_others(state: PersistenceS
         ),
         PersistenceState.LOCKED: (
             "continue without persistence, at CORE",
-            "attempt an unlock with the documented portable passphrase or recovery path",
+            "attempt an unlock with an operator-carried passphrase or recovery "
+            "procedure, where the site has established one",
         ),
         PersistenceState.OPEN: (),
         PersistenceState.QUARANTINED: (
@@ -1197,7 +1198,7 @@ def test_a_medium_with_no_usable_identity_gets_no_binding_and_no_persistence(
 
 
 def test_without_a_key_there_is_no_binding_and_therefore_no_persistence() -> None:
-    """A plain digest is recomputable by anyone who learns the four inputs.
+    """A plain digest is recomputable by anyone who learns the five inputs.
 
     The standing rule is a key-protected HMAC bound to the platform or the
     commissioning secret. A caller with neither has no key, and the answer is

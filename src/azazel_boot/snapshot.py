@@ -55,7 +55,6 @@ D4.1's three-partition layout is not revised.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from enum import Enum
 from weakref import WeakKeyDictionary as _WeakKeyDictionary
 from weakref import WeakSet as _WeakSet
@@ -91,7 +90,6 @@ class SnapshotIntegrity(Enum):
     INDETERMINATE = "indeterminate"
 
 
-@dataclass(frozen=True)
 class SnapshotDescriptor:
     """What a snapshot says about itself. Versioned, and judged alone.
 
@@ -99,23 +97,35 @@ class SnapshotDescriptor:
     compares and never interprets. It is not a device identity, not a path and
     not a key, and the audit carries it only because "which snapshot" has to be
     answerable without naming anything about the medium.
+
+    **Not a dataclass**, for the reason `CapacityReport` gives for itself: it
+    was one, `__getstate__` and `__reduce__` raised, and `dataclasses.asdict`
+    still handed the fingerprint back — `asdict` walks `dataclasses.fields()`
+    directly and does not go through either hook. A review printed it that
+    way, through the one object every stage of a recovery holds. Four fields
+    in `__slots__`, a hand-written `__init__` doing what `__post_init__` did,
+    and a class that is not a dataclass at all closes `asdict`, `astuple` and
+    `vars()` at once, the same as `CapacityReport`.
     """
 
-    container_version: int
-    schema_version: int
-    integrity: SnapshotIntegrity
-    fingerprint: str
+    __slots__ = ("_container_version", "_schema_version", "_integrity", "_fingerprint")
 
-    def __post_init__(self) -> None:
+    def __init__(
+        self,
+        container_version: int,
+        schema_version: int,
+        integrity: SnapshotIntegrity,
+        fingerprint: str,
+    ) -> None:
         # Checked where it is built. `azazel_boot.dirty_write` learned this the
         # expensive way: an annotation is not a check, and a review built its
         # observation out of three strings naming the worst faults there are
         # and got a clean write.
-        if not isinstance(self.integrity, SnapshotIntegrity):
+        if not isinstance(integrity, SnapshotIntegrity):
             raise TypeError("integrity must be a member of SnapshotIntegrity")
         for name, value in (
-            ("container_version", self.container_version),
-            ("schema_version", self.schema_version),
+            ("container_version", container_version),
+            ("schema_version", schema_version),
         ):
             # `type(...) is int`, not `isinstance`: a round-four review built
             # this object through this constructor with `int` subclasses that
@@ -123,14 +133,48 @@ class SnapshotDescriptor:
             # substitution check compared the subclass's answers.
             if type(value) is not int or value < 1:
                 raise TypeError(f"{name} must be a positive integer version")
-        if type(self.fingerprint) is not str or not self.fingerprint.strip():
+        if type(fingerprint) is not str or not fingerprint.strip():
             raise TypeError("fingerprint must be a non-empty opaque string")
         # And **shaped** like one. "Opaque" was a word here and a check
         # nowhere: this value is the single caller-supplied string the audit
         # carries, and a review put a capacity figure, a device serial and a
         # host path through this constructor into an audit entry in which
         # every other value is redacted.
-        _require_an_opaque_value("fingerprint", self.fingerprint)
+        _require_an_opaque_value("fingerprint", fingerprint)
+        object.__setattr__(self, "_container_version", container_version)
+        object.__setattr__(self, "_schema_version", schema_version)
+        object.__setattr__(self, "_integrity", integrity)
+        object.__setattr__(self, "_fingerprint", fingerprint)
+
+    @property
+    def container_version(self) -> int:
+        return self._container_version
+
+    @property
+    def schema_version(self) -> int:
+        return self._schema_version
+
+    @property
+    def integrity(self) -> SnapshotIntegrity:
+        return self._integrity
+
+    @property
+    def fingerprint(self) -> str:
+        return self._fingerprint
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError("a SnapshotDescriptor is fixed when it is built")
+
+    def __delattr__(self, name: str) -> None:
+        """`__setattr__` here is unconditional, not gated on a seal.
+
+        This class has no `_sealed` slot to delete — its `__setattr__`
+        refuses every assignment from the moment the object exists. What this
+        closes is `del x.<field>` reaching the same slots by a different
+        dunder.
+        """
+
+        raise AttributeError("a SnapshotDescriptor is fixed when it is built")
 
     def __reduce__(self):
         raise TypeError("a SnapshotDescriptor is not serialisable")
@@ -146,6 +190,25 @@ class SnapshotDescriptor:
             f"schema_version={self.schema_version}, "
             f"integrity={self.integrity.value}, fingerprint=<redacted>)"
         )
+
+    def __eq__(self, other: object) -> bool:
+        """By value, over the exact type — the dataclass default this replaces.
+
+        `type(other) is type(self)`, not `isinstance`: this class is checked
+        the same way everywhere else in this module, and an `__eq__` that
+        admits a subclass is an `__eq__` a subclass can answer on the real
+        object's behalf. Nothing in this module *uses* this for a decision —
+        `_require_the_same_snapshot` compares `_fields_of()` tuples on
+        purpose, so a hostile `__eq__` cannot decide a substitution — this
+        exists for the ordinary convenience a value type is expected to have.
+        """
+
+        if type(other) is not SnapshotDescriptor:
+            return NotImplemented
+        return _fields_of(self) == _fields_of(other)
+
+    def __hash__(self) -> int:
+        return hash((SnapshotDescriptor, *_fields_of(self)))
 
 
 def _require_two_measurements(
@@ -211,19 +274,19 @@ class CapacityReport:
         raise AttributeError("a CapacityReport is fixed when it is built")
 
     def __delattr__(self, name: str) -> None:
-        """The seal's other door. `__setattr__` alone left it open.
+        """`__setattr__` here is unconditional, not gated on a seal.
 
-        Every seal in this package gates on `getattr(self, "_sealed", False)`,
-        and `_sealed` is an ordinary slot: `del x._sealed` removes it with
-        plain syntax, no dunder call and nothing for a static scan to see, and
-        every later assignment is then an ordinary one. A review deleted it and
-        wrote a stage, a candidate, a quarantine and a sitting onto a workflow
-        by assignment — reaching `COMMITTED` with a forged candidate and an
-        **empty audit**, past the moving-fields allowlist, the stage graph and
-        the clearance interlock at once. A defence is not deeper than its floor.
+        This class has no `_sealed` slot to delete — its `__setattr__`
+        refuses **every** assignment from the moment the object exists, so
+        there was never a flag to remove. What `__delattr__` closes is
+        `del x.<field>`, which reaches the same slots by a different dunder:
+        the sibling classes that gate on `_sealed` needed this because
+        deleting the gate reopened assignment; this class needed it because
+        the field would otherwise simply be gone, and a caller reading it
+        afterward would meet `AttributeError` for the wrong reason.
 
-        `azazel_boot.media.DeviceIdentity` already refused this; the idiom was
-        in the codebase and in one class of twelve.
+        `azazel_boot.media.DeviceIdentity` already refused this shape; the
+        idiom was in the codebase and in one class of twelve.
         """
 
         raise AttributeError("a CapacityReport is fixed when it is built")
@@ -340,19 +403,19 @@ class PreflightVerdict:
         raise AttributeError("a PreflightVerdict is fixed when it is minted")
 
     def __delattr__(self, name: str) -> None:
-        """The seal's other door. `__setattr__` alone left it open.
+        """`__setattr__` here is unconditional, not gated on a seal.
 
-        Every seal in this package gates on `getattr(self, "_sealed", False)`,
-        and `_sealed` is an ordinary slot: `del x._sealed` removes it with
-        plain syntax, no dunder call and nothing for a static scan to see, and
-        every later assignment is then an ordinary one. A review deleted it and
-        wrote a stage, a candidate, a quarantine and a sitting onto a workflow
-        by assignment — reaching `COMMITTED` with a forged candidate and an
-        **empty audit**, past the moving-fields allowlist, the stage graph and
-        the clearance interlock at once. A defence is not deeper than its floor.
+        This class has no `_sealed` slot to delete — its `__setattr__`
+        refuses **every** assignment from the moment the object exists, so
+        there was never a flag to remove. What `__delattr__` closes is
+        `del x.<field>`, which reaches the same slots by a different dunder:
+        the sibling classes that gate on `_sealed` needed this because
+        deleting the gate reopened assignment; this class needed it because
+        the field would otherwise simply be gone, and a caller reading it
+        afterward would meet `AttributeError` for the wrong reason.
 
-        `azazel_boot.media.DeviceIdentity` already refused this; the idiom was
-        in the codebase and in one class of twelve.
+        `azazel_boot.media.DeviceIdentity` already refused this shape; the
+        idiom was in the codebase and in one class of twelve.
         """
 
         raise AttributeError("a PreflightVerdict is fixed when it is minted")
@@ -1174,7 +1237,6 @@ class SnapshotAuditEvent(Enum):
     RECOVERY_FOREIGN_SITTING = "recovery_foreign_sitting"
 
 
-@dataclass(frozen=True)
 class SnapshotAuditEntry:
     """A classification, and at most which check or gate it concerns.
 
@@ -1183,15 +1245,26 @@ class SnapshotAuditEntry:
     an operator identifier. `schema_version` is here because ADR-0010's list of
     permitted payload names it, and `fingerprint` because "which snapshot" has
     to be answerable — it is the caller's opaque value, never an identity.
+
+    **Not a dataclass**, for the same reason `SnapshotDescriptor` is not one:
+    this is "the object actually destined for a log", by this module's own
+    words, and `dataclasses.asdict` walked past both raising hooks and handed
+    the fingerprint back regardless. A plain class with `__slots__` closes
+    `asdict`, `astuple` and `vars()` because there is no dataclass and no
+    `__dict__` to walk.
     """
 
-    event: SnapshotAuditEvent
-    check: PreflightCheck | None = None
-    gate: RecoveryGate | None = None
-    schema_version: int | None = None
-    fingerprint: str | None = field(default=None, repr=False)
+    __slots__ = ("_event", "_check", "_gate", "_schema_version", "_fingerprint")
 
-    def __post_init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        event: SnapshotAuditEvent,
+        check: PreflightCheck | None = None,
+        gate: RecoveryGate | None = None,
+        schema_version: int | None = None,
+        fingerprint: str | None = None,
+    ) -> None:
         """Checked here, because the repr renders what it is handed.
 
         A re-review reached this through a snapshot stand-in whose
@@ -1203,22 +1276,61 @@ class SnapshotAuditEntry:
         this removes the class of it.
         """
 
-        if not isinstance(self.event, SnapshotAuditEvent):
+        if not isinstance(event, SnapshotAuditEvent):
             raise TypeError("event must be a SnapshotAuditEvent")
-        if self.check is not None and not isinstance(self.check, PreflightCheck):
+        if check is not None and not isinstance(check, PreflightCheck):
             raise TypeError("check must be a PreflightCheck or None")
-        if self.gate is not None and not isinstance(self.gate, RecoveryGate):
+        if gate is not None and not isinstance(gate, RecoveryGate):
             raise TypeError("gate must be a RecoveryGate or None")
         # Exactly `int` and exactly `str`. `isinstance` admitted an `int`
         # subclass whose `__format__` rendered
         # `"capacity_available=… medium=usb-SN-…"` through the f-string below
         # — a capacity figure and a medium identity, which is the leak this
         # method was written to remove, arriving through the check itself.
-        if self.schema_version is not None:
-            _require_an_exact_int("schema_version", self.schema_version)
-        if self.fingerprint is not None:
-            _require_an_exact_str("fingerprint", self.fingerprint)
-            _require_an_opaque_value("fingerprint", self.fingerprint)
+        if schema_version is not None:
+            _require_an_exact_int("schema_version", schema_version)
+        if fingerprint is not None:
+            _require_an_exact_str("fingerprint", fingerprint)
+            _require_an_opaque_value("fingerprint", fingerprint)
+        object.__setattr__(self, "_event", event)
+        object.__setattr__(self, "_check", check)
+        object.__setattr__(self, "_gate", gate)
+        object.__setattr__(self, "_schema_version", schema_version)
+        object.__setattr__(self, "_fingerprint", fingerprint)
+
+    @property
+    def event(self) -> SnapshotAuditEvent:
+        return self._event
+
+    @property
+    def check(self) -> PreflightCheck | None:
+        return self._check
+
+    @property
+    def gate(self) -> RecoveryGate | None:
+        return self._gate
+
+    @property
+    def schema_version(self) -> int | None:
+        return self._schema_version
+
+    @property
+    def fingerprint(self) -> str | None:
+        return self._fingerprint
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError("a SnapshotAuditEntry is fixed when it is built")
+
+    def __delattr__(self, name: str) -> None:
+        """`__setattr__` here is unconditional, not gated on a seal.
+
+        This class has no `_sealed` slot to delete — its `__setattr__`
+        refuses every assignment from the moment the object exists. What this
+        closes is `del x.<field>` reaching the same slots by a different
+        dunder.
+        """
+
+        raise AttributeError("a SnapshotAuditEntry is fixed when it is built")
 
     def __reduce__(self):
         raise TypeError("a SnapshotAuditEntry is not serialisable")
@@ -1246,6 +1358,19 @@ class SnapshotAuditEntry:
         if self.fingerprint is not None:
             parts.append("fingerprint=<redacted>")
         return f"SnapshotAuditEntry({', '.join(parts)})"
+
+    def _fields(self) -> tuple[object, ...]:
+        return (self.event, self.check, self.gate, self.schema_version, self.fingerprint)
+
+    def __eq__(self, other: object) -> bool:
+        """By value, over the exact type — the dataclass default this replaces."""
+
+        if type(other) is not SnapshotAuditEntry:
+            return NotImplemented
+        return self._fields() == other._fields()
+
+    def __hash__(self) -> int:
+        return hash((SnapshotAuditEntry, *self._fields()))
 
 
 class RecoveryCandidate:
@@ -1294,22 +1419,25 @@ class RecoveryCandidate:
         )
 
     def __delattr__(self, name: str) -> None:
-        """The seal's other door. `__setattr__` alone left it open.
+        """`__setattr__` here is unconditional, not gated on a seal.
 
-        Every seal in this package gates on `getattr(self, "_sealed", False)`,
-        and `_sealed` is an ordinary slot: `del x._sealed` removes it with
-        plain syntax, no dunder call and nothing for a static scan to see, and
-        every later assignment is then an ordinary one. A review deleted it and
-        wrote a stage, a candidate, a quarantine and a sitting onto a workflow
-        by assignment — reaching `COMMITTED` with a forged candidate and an
-        **empty audit**, past the moving-fields allowlist, the stage graph and
-        the clearance interlock at once. A defence is not deeper than its floor.
+        This class has no `_sealed` slot to delete — its `__setattr__`
+        refuses **every** assignment from the moment the object exists, so
+        there was never a flag to remove. What `__delattr__` closes is
+        `del x.<field>`, which reaches the same slots by a different dunder:
+        the sibling classes that gate on `_sealed` needed this because
+        deleting the gate reopened assignment; this class needed it because
+        the field would otherwise simply be gone, and a caller reading it
+        afterward would meet `AttributeError` for the wrong reason.
 
-        `azazel_boot.media.DeviceIdentity` already refused this; the idiom was
-        in the codebase and in one class of twelve.
+        `azazel_boot.media.DeviceIdentity` already refused this shape; the
+        idiom was in the codebase and in one class of twelve.
         """
 
-        raise AttributeError("a RecoveryCandidate is fixed when it is minted")
+        raise AttributeError(
+            "a RecoveryCandidate is fixed when it is minted; what it says was "
+            "restored cannot be edited afterwards"
+        )
 
     def __reduce__(self):
         raise TypeError(
@@ -2231,17 +2359,16 @@ class MigrationLedger:
         # is the enum's own order, from the start, for as far as it got. A
         # pass got all the way; a refusal stopped at the check it names.
         asked = verdict.evaluated
+        # **`_EVERY_CHECK`, not a fresh `tuple(PreflightCheck)`.** The
+        # difference is not cosmetic: `PreflightCheck._member_names_` accepts
+        # reassignment, and `tuple(PreflightCheck)` then returns whatever is
+        # left — so a live re-derivation is exactly as rebindable as
+        # `PREFLIGHT_ORDER`, one step further away. `_EVERY_CHECK` is a plain
+        # tuple captured once, at import, and no rebind of the enum after that
+        # moment can shorten, reorder or extend it: the length comparison
+        # below is checked against a value the shortening cannot reach, which
+        # is what closes the question rather than moving it.
         canonical = _EVERY_CHECK
-        # **And the vocabulary itself has not moved under us.** An enum whose
-        # members were removed at runtime is not the vocabulary this build was
-        # written against, and answering a completeness question from a
-        # shortened one is answering the attacker's question.
-        if tuple(PreflightCheck) != canonical:
-            raise RecoveryRefused(
-                Refusal.VERDICT_DID_NOT_ASK_EVERY_CHECK,
-                "the set of checks has changed inside this process; a verdict "
-                "is complete against the checks this build knows",
-            )
         prefix: list[PreflightCheck] = []
         for check in canonical:
             if len(prefix) < len(asked):

@@ -10,6 +10,9 @@ next edit.
    unless everything is in order" writes one `except`. Six of the nine
    refusals did not derive from it, so that `except` let three of them through
    as unhandled tracebacks — carrying captured locals into whatever is logging.
+   The rule that closed that finds refusals **by name**, which is narrower
+   than the sentence reads: `azazel_boot.commissioning.UnidentifiedHost` is a
+   refusal in substance, is not spelled `...Refused`, and is not covered.
 
 2. A class that refuses `__reduce__` is refusing to hand its fields back.
    `object.__getstate__` is a public method on every object since 3.11 and
@@ -50,10 +53,63 @@ def _classes():
 
 
 def test_every_refusal_in_this_package_shares_the_one_base_class() -> None:
+    """Every class **spelled** like a refusal derives from `Refused`.
+
+    "Spelled" is the honest word. This finds classes by name — `endswith
+    ("Refused")` — which is a naming convention, not a structural test of
+    "is this a refusal". A class that is a refusal in substance and named
+    something else is invisible to it however the rule is written, and one
+    exists: see `test_a_refusal_spelled_differently_is_not_covered_here`.
+    """
+
     refusals = [value for value in _classes() if value.__name__.endswith("Refused")]
 
     assert len(refusals) >= 9, sorted(value.__name__ for value in refusals)
     assert not [value for value in refusals if not issubclass(value, Refused)]
+
+
+def test_a_refusal_spelled_differently_is_not_covered_here() -> None:
+    """R9: the one known gap in the naming-convention rule above, driven.
+
+    `azazel_boot.commissioning.UnidentifiedHost` is a refusal in substance —
+    its own docstring: "raised rather than returned, because the alternative
+    was a value, and the value was the same on every machine on earth" — and
+    it is a `ValueError`, not a `Refused`. A caller writing the one `except`
+    `azazel_boot.refusals` promises does not catch it, and the unhandled
+    traceback carries the frames' locals — the observations, the session id —
+    which is the exact harm that module's docstring names.
+
+    Bringing `UnidentifiedHost` under this hierarchy is a public-contract
+    change to `azazel_boot.commissioning`, a module this file does not own,
+    and needs its own review rather than a silent edit here. This test
+    exists so the gap is asserted rather than merely known, and so closing it
+    turns this red rather than leaving nothing to notice.
+    """
+
+    from azazel_boot.commissioning import UnidentifiedHost
+
+    assert not issubclass(UnidentifiedHost, Refused)
+    assert issubclass(UnidentifiedHost, ValueError)
+
+    from azazel_boot.commissioning import bind_session
+    from azazel_boot.inventory import InterfaceObservation
+
+    unidentifiable = (
+        InterfaceObservation(
+            interface_key="unidentified:enp3s0",
+            permanent_mac="aa:aa:aa:aa:aa:01",
+            incomplete_reasons=("no_discriminator_beyond_mac",),
+        ),
+    )
+    try:
+        bind_session(unidentifiable, session_id="s1")
+    except Refused:
+        raise AssertionError(
+            "UnidentifiedHost now derives from Refused; narrow the docstring "
+            "and this test rather than leaving them stale"
+        ) from None
+    except UnidentifiedHost:
+        pass
 
 
 def test_a_class_that_refuses_to_be_pickled_refuses_to_hand_its_fields_back() -> None:

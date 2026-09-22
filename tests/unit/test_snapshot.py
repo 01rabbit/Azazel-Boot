@@ -313,8 +313,6 @@ def test_nothing_in_this_module_can_lift_a_quarantine_or_a_fence() -> None:
         "KeyAcquisition",
         "PassphraseChannel",
         "annotations",
-        "dataclass",
-        "field",
         "Enum",
         "KNOWN_CONTAINER_VERSIONS",
         "PREFLIGHT_ORDER",
@@ -842,8 +840,6 @@ def test_preflight_is_read_only_by_construction() -> None:
             named.update(alias.name for alias in node.names)
     assert named == {
         "annotations",
-        "dataclass",
-        "field",
         "Enum",
         "WeakKeyDictionary",
         "WeakSet",
@@ -859,7 +855,6 @@ def test_preflight_is_read_only_by_construction() -> None:
 
     assert imported == {
         "__future__",
-        "dataclasses",
         "enum",
         # Added deliberately: `_MINTED_HERE` is a `WeakSet` now, because a
         # sentinel stamped onto a verdict is a sentinel a caller can read off
@@ -1261,7 +1256,10 @@ def test_a_workflow_rebuilt_over_the_same_medium_starts_at_the_beginning(
 def test_no_audit_entry_can_carry_contents_a_figure_or_an_identity() -> None:
     """Checked by field name, because a field is how the rest arrives."""
 
-    names = {field.name for field in dataclasses.fields(SnapshotAuditEntry)}
+    # Not a dataclass, for the same reason `SnapshotDescriptor` is not one —
+    # `dataclasses.fields()` was the route `asdict()` used to hand the
+    # fingerprint back regardless of the two raising hooks.
+    names = {name.lstrip("_") for name in SnapshotAuditEntry.__slots__}
     assert names == {"event", "check", "gate", "schema_version", "fingerprint"}
 
     # The loop below cannot fail while the exact set above holds. It is kept
@@ -1492,8 +1490,10 @@ def test_this_module_cannot_reach_a_host_a_network_a_vm_or_a_second_partition() 
 
     So the first rule below is not a denylist. Every free name — every name
     this module reads without binding it — is listed, and the assertion is
-    **equality**. A builtin that is not one of these fourteen is not reachable
+    **equality**. A builtin that is not one of these seventeen is not reachable
     by any spelling, because reaching it needs a name, and the name is absent.
+    The count moves as the module grows — it was fourteen, then fifteen — and
+    what holds is the equality, not the number.
     `locals`, `breakpoint`, `globals`, `vars`, `open`, `__import__`, `eval` and
     whatever the next round finds are all refused by the same line, which is
     the difference between a list of what is forbidden and a list of what is
@@ -1534,10 +1534,12 @@ def test_this_module_cannot_reach_a_host_a_network_a_vm_or_a_second_partition() 
     } - bound
     assert free == {
         "AttributeError",
+        "NotImplemented",
         "TypeError",
         "bool",
         "frozenset",
         "getattr",  # and only in the seal's one shape, pinned below
+        "hash",  # and only in the two value types' own `__hash__`
         "int",
         "isinstance",
         "len",
@@ -3133,7 +3135,11 @@ def test_the_snapshot_pin_compares_every_field_the_descriptor_has() -> None:
         and isinstance(node.value, ast.Name)
         and node.value.id == "snapshot"
     }
-    declared = {field.name for field in dataclasses.fields(SnapshotDescriptor)}
+    # `SnapshotDescriptor` is not a dataclass — `dataclasses.fields()` was the
+    # route `dataclasses.asdict()` used to hand the fingerprint back through,
+    # so the class stopped being one. `__slots__`, with the leading
+    # underscore each field is stored under stripped, is its declaration now.
+    declared = {name.lstrip("_") for name in SnapshotDescriptor.__slots__}
     assert compared == declared, (
         "the substitution check must compare every field of SnapshotDescriptor; "
         f"missing {sorted(declared - compared)}, unknown {sorted(compared - declared)}"
@@ -3357,8 +3363,8 @@ def test_mutating_the_held_descriptor_between_the_stages_is_a_substitution(
         snap, observations, media_binding_holds=True, session_id=SESSION, started_by_operator=True
     )
 
-    object.__setattr__(snap, "schema_version", 2)
-    object.__setattr__(snap, "fingerprint", "snapshot-fingerprint-0000")
+    object.__setattr__(snap, "_schema_version", 2)
+    object.__setattr__(snap, "_fingerprint", "snapshot-fingerprint-0000")
 
     with pytest.raises(RecoveryRefused) as refused:
         flow.open_trial(snap, observations, media_binding_holds=True, session_id=SESSION)
@@ -3564,8 +3570,25 @@ def _swallow(call, *args, **keywords):
 #: message. Used to *count* which of them a drive actually reached — a probe
 #: that lands on a different rule from the one it was written for is the
 #: incidental-refusal antipattern expressed as a drive rather than a `match=`.
+#: **Disambiguated**, not merely distinct. `"cannot be replaced"` used to
+#: stand for both `RecoveryWorkflow.__setattr__`'s seal message and
+#: `_sealed_assign`'s not-in-`_MOVES_DURING_A_RECOVERY` message — both
+#: `AttributeError`, both ending in the same six words — so `reached["cannot
+#: be replaced"] > 0` could not say which of the two had actually answered.
+#: Each fragment here is a prefix unique to one message.
+#:
+#: Two more `AttributeError` rules exist in `_sealed_assign` — the
+#: fence-since-the-clearance check and "a candidate is minted by a commit and
+#: by nothing else" — and are **not** listed: reaching either needs a real
+#: clearance already spent or partly spent, which the probes below build
+#: fresh workflows to avoid rather than arrange. Both are driven directly,
+#: with their own assertions, by `test_a_fence_raised_between_the_gates_and_
+#: the_stage_is_a_refusal` and `test_a_candidate_is_held_only_by_a_workflow_
+#: that_committed`; this drive's job is the input space around the calls it
+#: does make, not every shape the seal can raise.
 _SEAL_RULES = (
-    "cannot be replaced",
+    "a RecoveryWorkflow is sealed after construction",
+    "only the stage, the snapshot's pinned fields",
     "has ended",
     "travels its own graph",
     "reached by passing the gates",
@@ -3951,6 +3974,13 @@ def test_no_input_to_this_module_changes_anything_about_the_quarantine(
             reached[
                 _rule_reached(flow._sealed_assign, "_stage", RecoveryStage.TRIAL_OPEN)
             ] += 1
+            # **Plain assignment**, not `_sealed_assign`. Every probe above
+            # calls the seal's one writer directly, so `__setattr__`'s own
+            # message — the one a caller actually meets writing `flow.x = y`
+            # — was never reached by this drive at all; it only looked
+            # reached because its message shared a six-word suffix with
+            # `_sealed_assign`'s, before the two were disambiguated.
+            reached[_rule_reached(setattr, flow, "_quarantine", rule)] += 1
 
             # The ledger, over **this** medium. `for_the_ledger` used to be
             # minted over a freshly built quarantine, so the judged-medium pin
@@ -4310,6 +4340,9 @@ def test_this_module_performs_no_io_when_it_actually_runs() -> None:
             ):
                 probe(at(stage, rule, snapshot)._sealed_assign, name, value)
             probe(flow._sealed_assign, "_stage", RecoveryStage.TRIAL_OPEN)
+            # Plain assignment, so `__setattr__`'s own message is reached
+            # here too, not only `_sealed_assign`'s.
+            probe(setattr, flow, "_quarantine", rule)
 
             probe(ledger.may_migrate, PreflightVerdict(None), quarantine=rule)
             probe(
@@ -4803,8 +4836,8 @@ def test_a_snapshot_mutated_during_the_prompt_is_a_substitution(observations) ->
 
     class MutatesDuringThePrompt(Opens):
         def attempt(self):
-            object.__setattr__(snap, "schema_version", 99)
-            object.__setattr__(snap, "fingerprint", "a-completely-different-snapshot")
+            object.__setattr__(snap, "_schema_version", 99)
+            object.__setattr__(snap, "_fingerprint", "a-completely-different-snapshot")
             return super().attempt()
 
     flow = workflow(observations)
@@ -4968,13 +5001,26 @@ def test_a_snapshot_subclass_is_refused_like_every_other_stand_in(observations) 
     a genuine **subclass**; the snapshot had only a stand-in that was not one.
     Weakening its check to `isinstance` therefore survived the whole suite —
     and with it the entire round-four attack returns, because a subclass can
-    simply decline `__post_init__` and carry fields that answer comparisons for
+    simply decline validation and carry fields that answer comparisons for
     themselves.
+
+    `SnapshotDescriptor` used to be a dataclass whose auto-generated
+    `__init__` called a separately overridable `__post_init__` hook, and
+    declining that hook declined every check in it. It is a hand-written
+    `__init__` now — the same edit that stopped `dataclasses.asdict` handing
+    the fingerprint back — so the hook a subclass could skip no longer
+    exists; validation is the constructor itself. A subclass can still skip
+    it, the only way any subclass can skip any base method: by overriding
+    `__init__` outright. That is the shape driven below, and it is the shape
+    the type pin at the point of use — not the constructor — exists for.
     """
 
     class Sneaky(SnapshotDescriptor):
-        def __post_init__(self) -> None:
-            pass
+        def __init__(self, container_version, schema_version, integrity, fingerprint) -> None:
+            object.__setattr__(self, "_container_version", container_version)
+            object.__setattr__(self, "_schema_version", schema_version)
+            object.__setattr__(self, "_integrity", integrity)
+            object.__setattr__(self, "_fingerprint", fingerprint)
 
     class Lies(int):
         def __eq__(self, other) -> bool:
@@ -5896,6 +5942,31 @@ def test_the_gates_cannot_be_reached_without_all_of_them(observations) -> None:
         flow._require_the_gates(
             snap, observations, session_id=SESSION, media_binding_holds=True
         )
+    # **Each on its own**, not only both omitted together. Omitting neither
+    # parameter's message says anything about whether the *other* one is
+    # also required — a call missing both raises CPython's own "missing 2
+    # required keyword-only arguments: 'acquisition' and 'confirmed'", which
+    # matches `"acquisition"` whether or not `confirmed` has a default at
+    # all. A review gave `confirmed` a default of `None` and this call above
+    # still passed.
+    with pytest.raises(TypeError, match="missing 1 required keyword-only argument: 'confirmed'"):
+        flow._require_the_gates(
+            snap,
+            observations,
+            session_id=SESSION,
+            media_binding_holds=True,
+            acquisition=None,
+        )
+    with pytest.raises(
+        TypeError, match="missing 1 required keyword-only argument: 'acquisition'"
+    ):
+        flow._require_the_gates(
+            snap,
+            observations,
+            session_id=SESSION,
+            media_binding_holds=True,
+            confirmed=None,
+        )
     # `acquisition=None` is honest for `start` and `open_trial`, so the
     # clearance it issues says so: it cannot reach `COMMITTED`.
     flow._require_the_gates(
@@ -6653,7 +6724,7 @@ def test_a_descriptor_rewritten_after_the_preflight_is_not_the_one_it_judged() -
         snapshot=descriptor(fingerprint="snapshot-fingerprint-before")
     )
     ledger = MigrationLedger()
-    object.__setattr__(snapshot, "fingerprint", "snapshot-fingerprint-after")
+    object.__setattr__(snapshot, "_fingerprint", "snapshot-fingerprint-after")
 
     with pytest.raises(RecoveryRefused) as refused:
         ledger.note_snapshot_written(verdict, snapshot, quarantine=medium)
@@ -7301,3 +7372,380 @@ def test_the_seals_other_door_is_shut_on_every_class_that_has_one() -> None:
         flow._stage = RecoveryStage.COMMITTED
     assert flow.stage is RecoveryStage.NOT_STARTED
     assert rule.volume_is_quarantined is True
+
+
+def test_confirmed_is_type_checked_inside_the_gates_directly(observations) -> None:
+    """R9 F3: `confirmed` was the one gate input still the caller's alone.
+
+    Round 8 pinned the snapshot, the observations, the sitting and
+    `media_binding_holds` inside `_require_the_gates` because a review reaches
+    it directly, at the same bound-method reach as `_sealed_assign`.
+    `confirmed` was checked only in `commit`. `confirmed="declined"` is truthy,
+    so `confirmed is not None` is `True`, the full-D8 clearance was issued, and
+    a direct call reached `COMMITTED` with a forged candidate and no
+    `OPERATOR_CONFIRMATION` refusal anywhere in the audit.
+    """
+
+    flow = workflow(observations)
+    snap = descriptor(fingerprint="snapshot-fingerprint-confirmed-typecheck")
+    flow.start(
+        snap, observations, media_binding_holds=True, session_id=SESSION, started_by_operator=True
+    )
+    flow.open_trial(snap, observations, media_binding_holds=True, session_id=SESSION)
+
+    with pytest.raises(TypeError, match="confirmed"):
+        flow._require_the_gates(
+            snap,
+            observations,
+            session_id=SESSION,
+            media_binding_holds=True,
+            acquisition=Opens(),
+            confirmed="declined",
+        )
+    assert flow._cleared is None
+    assert flow.stage is RecoveryStage.TRIAL_OPEN
+
+    # And the hostile value from the module's own worked example, driven all
+    # the way: it never reaches COMMITTED, and nothing is minted.
+    with pytest.raises(TypeError, match="confirmed"):
+        flow._require_the_gates(
+            snap,
+            observations,
+            session_id=SESSION,
+            media_binding_holds=True,
+            acquisition=Opens(),
+            confirmed=[0],
+        )
+    with pytest.raises(AttributeError, match="reached by passing the gates"):
+        flow._sealed_assign("_stage", RecoveryStage.COMMITTED)
+    assert flow.stage is RecoveryStage.TRIAL_OPEN
+
+
+def test_a_gate_refusal_on_an_already_finished_workflow_stays_in_vocabulary(
+    observations,
+) -> None:
+    """R9 F5: round 7's re-check covered exactly the one row it drove.
+
+    `attempt()` is caller code called mid-gate, and a review interrupts the
+    workflow from inside it. `commit` re-checks the stage **after**
+    `_require_the_gates` returns, so that re-check only ever sees a gate that
+    passed. Any gate refusal reached from *inside* `_require_the_gates` after
+    the workflow went terminal met `_sealed_assign`'s terminal rule instead,
+    which raises `AttributeError` — outside `RecoveryRefused`, outside
+    `Refused`, and outside the single `except` this package promises. Two rows
+    reach it: an operator who stops mid-prompt and then declines, and one who
+    stops and has the medium pulled.
+    """
+
+    class EndsTheWorkflow:
+        """An acquisition whose `attempt()` interrupts its own workflow."""
+
+        channel = PassphraseChannel.LOCAL_HIDDEN_PROMPT
+
+        def __init__(self, flow: RecoveryWorkflow, *, then_fence: bool = False) -> None:
+            self._flow = flow
+            self._then_fence = then_fence
+
+        def attempt(self) -> AttemptOutcome:
+            self._flow.interrupt(session_id=SESSION)
+            if self._then_fence:
+                self._flow._quarantine.fence()
+            return AttemptOutcome.OPENED
+
+    # Row D: interrupted, then a declined confirmation reaches the gate that
+    # used to raise `AttributeError` from inside a terminal-stage move.
+    declined = workflow(observations)
+    snap = descriptor(fingerprint="snapshot-fingerprint-interrupted-declined")
+    declined.start(
+        snap, observations, media_binding_holds=True, session_id=SESSION, started_by_operator=True
+    )
+    declined.open_trial(snap, observations, media_binding_holds=True, session_id=SESSION)
+    with pytest.raises(RecoveryRefused) as refused:
+        declined.commit(
+            snap,
+            observations,
+            media_binding_holds=True,
+            session_id=SESSION,
+            acquisition=EndsTheWorkflow(declined),
+            confirmed=False,
+        )
+    assert refused.value.refusal is Refusal.WORKFLOW_ALREADY_FINISHED
+    assert declined.stage is RecoveryStage.INTERRUPTED
+    assert declined._candidate is None
+
+    # Row E: interrupted, then fenced, then a commit that would have refused
+    # `MEDIUM_FENCED` inside `_require_the_gates`'s post-prompt re-read.
+    fenced = workflow(observations)
+    snap2 = descriptor(fingerprint="snapshot-fingerprint-interrupted-fenced")
+    fenced.start(
+        snap2, observations, media_binding_holds=True, session_id=SESSION, started_by_operator=True
+    )
+    fenced.open_trial(snap2, observations, media_binding_holds=True, session_id=SESSION)
+    with pytest.raises(RecoveryRefused) as refused2:
+        fenced.commit(
+            snap2,
+            observations,
+            media_binding_holds=True,
+            session_id=SESSION,
+            acquisition=EndsTheWorkflow(fenced, then_fence=True),
+            confirmed=True,
+        )
+    assert refused2.value.refusal is Refusal.WORKFLOW_ALREADY_FINISHED
+    assert fenced.stage is RecoveryStage.INTERRUPTED
+    assert fenced._candidate is None
+    assert fenced._quarantine.volume_is_quarantined is True
+
+
+def test_a_rebound_enum_does_not_shorten_what_completeness_is_asked_against(
+    monkeypatch,
+) -> None:
+    """R9 F2: "the enum cannot be shortened by an assignment" was false.
+
+    `PreflightCheck._member_names_` accepts reassignment, and `tuple
+    (PreflightCheck)` then returns whatever is left — so the completeness
+    operand this module's own comment called unshortenable was exactly as
+    rebindable as `PREFLIGHT_ORDER`, just one more step away. A review shortened
+    both with two assignments and authorised a migration over a snapshot whose
+    integrity had failed, to an unsupported schema, with no room and no
+    binding, having asked one check of ten.
+
+    `_EVERY_CHECK` is fixed at import, so a live shortening is **detected**
+    rather than obeyed — not a capability boundary, the same as every other
+    limit this module states about a determined caller inside the process, but
+    a live rebind is refused rather than answered.
+    """
+
+    from azazel_boot import snapshot as module
+
+    medium, snapshot, passing = a_migration(
+        snapshot=descriptor(
+            fingerprint="snapshot-fingerprint-shortened-enum",
+            integrity=SnapshotIntegrity.FAILED,
+        ),
+        current_schema=5,
+        target_schema=1,
+        capacity=capacity(required=10**9, available=0),
+        binding_holds=False,
+        generation_holds=False,
+        image_digest_holds=False,
+    )
+
+    # `monkeypatch` restores both attributes on teardown, including the enum's
+    # own private list — this modifies live interpreter state shared by every
+    # other test in the process, and an unrestored shortening would corrupt
+    # every later use of `PreflightCheck` in this run.
+    original_names = list(PreflightCheck._member_names_)
+    monkeypatch.setattr(module, "PREFLIGHT_ORDER", (PreflightCheck.MEDIUM_FENCED,))
+    monkeypatch.setattr(PreflightCheck, "_member_names_", ["MEDIUM_FENCED"])
+    assert tuple(PreflightCheck) != module._EVERY_CHECK
+
+    shortened = preflight(
+        medium,
+        snapshot=snapshot,
+        capacity=capacity(required=10**9, available=0),
+        current_schema=5,
+        target_schema=1,
+        binding_holds=False,
+        generation_holds=False,
+        image_digest_holds=False,
+    )
+    assert shortened.may_migrate is True  # the enum itself now has one member
+    with pytest.raises(RecoveryRefused) as refused:
+        MigrationLedger().may_migrate(shortened, quarantine=medium)
+    assert refused.value.refusal is Refusal.VERDICT_DID_NOT_ASK_EVERY_CHECK
+
+    monkeypatch.setattr(PreflightCheck, "_member_names_", original_names)
+    assert tuple(PreflightCheck) == module._EVERY_CHECK
+
+
+def test_neither_value_type_hands_its_fingerprint_back_through_vars_or_asdict() -> None:
+    """R9 F17: `dataclasses.asdict` walked past both raising hooks.
+
+    `__reduce__` and `__getstate__` refuse serialisation, and the docstring
+    each carries says refusing one door and not the other refuses neither.
+    Both classes were still `@dataclass`, though, and `dataclasses.asdict`
+    does not go through either hook — it calls `dataclasses.fields()` and
+    reads each field directly. A review rendered `dataclasses.asdict(snapshot)`
+    and `vars(entry)` and read the fingerprint back through the one object
+    `docs/snapshot-and-recovery.md` calls "the object actually destined for a
+    log", past the exact defence `CapacityReport`'s own docstring narrates
+    fixing for a different pair of fields.
+
+    Neither class is a dataclass any more, for the reason `CapacityReport`
+    is not one: `dataclasses.fields()` returns nothing for a class dataclasses
+    does not know about, so `asdict`/`astuple` refuse rather than walk.
+    """
+
+    snapshot = descriptor(fingerprint="snapshot-fingerprint-vars-asdict")
+    entry = SnapshotAuditEntry(
+        event=SnapshotAuditEvent.SNAPSHOT_WRITTEN,
+        schema_version=2,
+        fingerprint="snapshot-fingerprint-audit-vars-asdict",
+    )
+
+    for value in (snapshot, entry):
+        assert not dataclasses.is_dataclass(value)
+        with pytest.raises(TypeError):
+            vars(value)
+        with pytest.raises(TypeError):
+            dataclasses.asdict(value)
+        with pytest.raises(TypeError):
+            dataclasses.astuple(value)
+        with pytest.raises(TypeError):
+            value.__getstate__()
+        with pytest.raises(TypeError):
+            value.__reduce__()
+        with pytest.raises(TypeError):
+            copy.deepcopy(value)
+        with pytest.raises(TypeError):
+            pickle.dumps(value)
+
+    assert "snapshot-fingerprint-vars-asdict" not in repr(snapshot)
+    assert "snapshot-fingerprint-audit-vars-asdict" not in repr(entry)
+
+    # And the ordinary convenience a value type is expected to have is not
+    # lost in the process: equal fields compare equal, by exact type.
+    assert descriptor(fingerprint="snapshot-fingerprint-eq") == descriptor(
+        fingerprint="snapshot-fingerprint-eq"
+    )
+    assert SnapshotAuditEntry(
+        event=SnapshotAuditEvent.RECOVERY_STARTED
+    ) == SnapshotAuditEntry(event=SnapshotAuditEvent.RECOVERY_STARTED)
+    assert descriptor(fingerprint="snapshot-fingerprint-eq") != descriptor(
+        fingerprint="snapshot-fingerprint-other"
+    )
+
+
+def test_both_delattr_docstrings_describe_the_class_they_are_on() -> None:
+    """R9 (self-review): the `__delattr__` fix was pasted onto five classes
+    whose `__setattr__` has no `_sealed` gate to delete.
+
+    A bulk edit added the same `__delattr__` docstring — a `_sealed` slot, a
+    `RecoveryWorkflow` reaching `COMMITTED` with a forged candidate — to every
+    class that gained the method, including three in this module
+    (`CapacityReport`, `PreflightVerdict`, `RecoveryCandidate`) and two
+    elsewhere (`BindingKey`, `CommissionedMode`) whose `__setattr__` refuses
+    unconditionally and has no `_sealed` slot at all. The words were accurate
+    for `RecoveryWorkflow` and false for the rest — the exact "a claim in a
+    docstring is not a property" failure this repository keeps finding
+    elsewhere in its own prose.
+    """
+
+    for cls in (CapacityReport, PreflightVerdict, RecoveryCandidate):
+        assert "_sealed" not in cls.__slots__
+        # The wrong docstring claimed a gate this class does not have; the
+        # right one says explicitly that there is none.
+        assert "no `_sealed` slot" in (cls.__delattr__.__doc__ or "")
+
+
+def test_the_two_value_types_refuse_direct_slot_assignment_and_a_subclass_eq() -> None:
+    """R9 (self-review): three gaps the eq/asdict fix left open, mutation-found.
+
+    `SnapshotDescriptor` and `SnapshotAuditEntry` expose their fields as
+    read-only properties, which alone blocks `x.container_version = 5` — a
+    property with no setter refuses that by the descriptor protocol, with or
+    without `__setattr__`. It does **not** block `x._container_version = 5`,
+    the slot the property reads: that is refused only by the class's own
+    `__setattr__`, and nothing drove it directly. And `__eq__`'s `type(other)
+    is not SnapshotDescriptor` was never driven against a genuine subclass,
+    so weakening it to `isinstance` — which would let a subclass's own
+    `__eq__` decide the answer, the exact class of attack `_fields_of`
+    exists to avoid trusting — was unpinned.
+    """
+
+    snapshot = descriptor(fingerprint="snapshot-fingerprint-slot-assign")
+    with pytest.raises(AttributeError, match="fixed when it is built"):
+        snapshot._container_version = 99
+    with pytest.raises(AttributeError, match="fixed when it is built"):
+        snapshot._fingerprint = "snapshot-fingerprint-replaced"
+    assert snapshot.container_version == 1
+    assert snapshot.fingerprint == "snapshot-fingerprint-slot-assign"
+
+    entry = SnapshotAuditEntry(event=SnapshotAuditEvent.SNAPSHOT_WRITTEN, schema_version=1)
+    with pytest.raises(AttributeError, match="fixed when it is built"):
+        entry._schema_version = 99
+    assert entry.schema_version == 1
+
+    class Liar(SnapshotDescriptor):
+        def __eq__(self, other: object) -> bool:
+            return True
+
+        def __hash__(self) -> int:
+            return 0
+
+    liar = Liar(1, 1, SnapshotIntegrity.VERIFIED, "snapshot-fingerprint-liar")
+    other = descriptor(fingerprint="snapshot-fingerprint-not-the-liar")
+    assert liar == liar  # the subclass's own __eq__, answering for itself
+    # But the **real** class's `__eq__` — asked the other way round, which
+    # Python tries when the left operand's answer is `NotImplemented` — does
+    # not delegate to the subclass and does not agree that they are equal.
+    assert SnapshotDescriptor.__eq__(other, liar) is NotImplemented
+
+
+def test_the_audit_entrys_own_opaque_check_is_not_the_descriptors(observations) -> None:
+    """R9 (self-review): the opaque-fingerprint check lives in two `__init__`s.
+
+    `test_a_fingerprint_is_an_opaque_token_and_not_a_rendered_record` drives
+    `SnapshotDescriptor` only. `SnapshotAuditEntry` calls the same helper from
+    its own constructor, and nothing proved that call was still there.
+    """
+
+    for rejected in (
+        "capacity_available=17179869184 medium=usb-SN-AA11BB22 host=/dev/nvme0n1p3",
+        "/dev/nvme0n1p3",
+        "a" * 129,
+    ):
+        with pytest.raises(TypeError, match="opaque"):
+            SnapshotAuditEntry(event=SnapshotAuditEvent.SNAPSHOT_WRITTEN, fingerprint=rejected)
+
+    accepted = SnapshotAuditEntry(
+        event=SnapshotAuditEvent.SNAPSHOT_WRITTEN, fingerprint="b3c1d9e07f2a4856"
+    )
+    assert accepted.fingerprint == "b3c1d9e07f2a4856"
+
+
+def test_the_gates_own_fence_recheck_is_load_bearing_on_its_own(observations) -> None:
+    """R9: the test written for `_require_the_gates`'s post-prompt fence read
+    passed for a different reason — `commit`'s own outer re-check.
+
+    `test_the_medium_is_read_again_after_the_passphrase_prompt` drives through
+    `commit`, which asks `_require_an_unfenced_medium()` again right before
+    minting — a **second**, independent mechanism, added later, sitting
+    outside `_require_the_gates` entirely. Disabling the gates' own re-read of
+    the fence after `attempt()` left that test green, because the outer check
+    caught the same fence and produced the identical refusal, gate and audit.
+    The line the test names was not what answered it.
+
+    Driven through `_require_the_gates` directly, which is the only way to
+    isolate the two: nothing outside this call can rescue a missing re-read
+    inside it.
+    """
+
+    quarantine = a_quarantine()
+
+    class PulledDuringThePrompt(Opens):
+        def attempt(self):
+            quarantine.fence()
+            return super().attempt()
+
+    flow = workflow(observations, quarantine=quarantine)
+    snap = descriptor(fingerprint="snapshot-fingerprint-fence-inside-gates")
+    flow.start(
+        snap, observations, media_binding_holds=True, session_id=SESSION, started_by_operator=True
+    )
+    flow.open_trial(snap, observations, media_binding_holds=True, session_id=SESSION)
+    assert quarantine.is_fenced is False
+
+    with pytest.raises(RecoveryRefused) as refused:
+        flow._require_the_gates(
+            snap,
+            observations,
+            session_id=SESSION,
+            media_binding_holds=True,
+            acquisition=PulledDuringThePrompt(),
+            confirmed=True,
+        )
+    assert refused.value.refusal is Refusal.GATE_REFUSED
+    assert quarantine.is_fenced is True
+    assert flow.stage is RecoveryStage.REFUSED
+    assert flow.audit()[-1].gate is RecoveryGate.MEDIUM_FENCED
