@@ -57,11 +57,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+from weakref import WeakKeyDictionary as _WeakKeyDictionary
 from weakref import WeakSet as _WeakSet
 
 from .commissioning import SessionBinding, binding_applies
 from .inventory import InterfaceObservation
 from .quarantine import Quarantine
+from .refusals import Refused
 from .session_mode import AttemptOutcome, KeyAcquisition, PassphraseChannel
 
 #: The snapshot container formats this module can read. An unknown version is
@@ -223,8 +225,20 @@ class PreflightCheck(Enum):
 
     Each failing check refuses with its **own** member, so an operator learns
     which one — ADR-0010 D7 — without learning any figure behind it.
+
+    **Declared in the order they are asked in**, because that order is now
+    load-bearing twice over. `PREFLIGHT_ORDER` below is the tuple `preflight`
+    iterates, and a module global is a thing a caller can rebind: a review
+    rebound it, obtained a legitimately minted verdict that had been asked one
+    check, and `MigrationLedger` accepted it. The ledger asks its completeness
+    question against **this class**, which no assignment shortens or permutes,
+    so the declaration order here is what `PREFLIGHT_ORDER` is checked against
+    rather than a matter of taste. `tests/unit/test_snapshot.py` asserts the
+    two agree, so they cannot drift apart in the source either.
     """
 
+    MEDIUM_FENCED = "medium_fenced"
+    VOLUME_QUARANTINED = "volume_quarantined"
     SNAPSHOT_ABSENT = "snapshot_absent"
     SNAPSHOT_CONTAINER_UNKNOWN = "snapshot_container_unknown"
     SNAPSHOT_INTEGRITY = "snapshot_integrity"
@@ -233,8 +247,6 @@ class PreflightCheck(Enum):
     BINDING = "binding"
     GENERATION = "generation"
     IMAGE_DIGEST = "image_digest"
-    MEDIUM_FENCED = "medium_fenced"
-    VOLUME_QUARANTINED = "volume_quarantined"
 
 
 class PreflightVerdict:
@@ -259,7 +271,7 @@ class PreflightVerdict:
     `verdict_was_minted_here` is what a consumer asks.
     """
 
-    __slots__ = ("_refused_by", "_snapshot", "_evaluated", "_judged", "__weakref__")
+    __slots__ = ("_refused_by", "_snapshot", "_evaluated", "__weakref__")
 
     def __init__(self, refused_by: PreflightCheck | None) -> None:
         """No token, and nothing to read off a verdict at all.
@@ -276,12 +288,20 @@ class PreflightVerdict:
         module keeps, in `_MINTED_HERE` — a `WeakSet` the verdict does not
         point at and a caller holding one cannot read. A value that is not on
         the object cannot be copied off it.
+
+        Round eight found that sentence false again, and worse than the token
+        was. `_judged` held the **live `Quarantine`**: `fence()`,
+        `quarantine_volume()`, the sitting and the medium identity, one
+        attribute access from anyone a verdict was legitimately handed — on
+        refusals as well as passes, through an object whose own docstring said
+        there was nothing to read off it. Which medium a verdict judged is now
+        kept the way mintedness is, in `_JUDGED_BY`, and the sentence is true
+        again for the same reason it was written.
         """
 
         object.__setattr__(self, "_refused_by", refused_by)
         object.__setattr__(self, "_snapshot", None)
         object.__setattr__(self, "_evaluated", ())
-        object.__setattr__(self, "_judged", None)
 
     def __setattr__(self, name: str, value: object) -> None:
         raise AttributeError("a PreflightVerdict is fixed when it is minted")
@@ -348,10 +368,21 @@ class PreflightVerdict:
 #: verdict a caller was legitimately handed.
 _MINTED_HERE: _WeakSet = _WeakSet()
 
-#: The verdicts a write has already been recorded against, in any ledger. Kept
-#: here rather than on the ledger because a verdict replayed into a *second*
-#: ledger is the same false count as one replayed into the first.
-_ALREADY_SPENT: _WeakSet = _WeakSet()
+#: Which medium each verdict's preflight judged — kept **beside** the verdict
+#: rather than on it. It was a `_judged` slot, and that slot handed the live
+#: `Quarantine` to every holder of a verdict: `fence()`, `quarantine_volume()`,
+#: the sitting and the boot medium identity, one attribute access away, on
+#: refusals as well as passes. The same reasoning `_MINTED_HERE` rests on
+#: applies unchanged — a value that is not on the object cannot be read off it
+#: — and it is weak on the verdict so that the association ends with it.
+_JUDGED_BY: _WeakKeyDictionary = _WeakKeyDictionary()
+
+#: And the four values the snapshot had **at the moment it was judged**.
+#: `note_snapshot_written` re-derived them from the descriptor it was handed,
+#: which asks the object as it is *now*: `object.__setattr__` rewrites a frozen
+#: dataclass's field, so one judged snapshot produced a second key and the
+#: "once" below counted the second record as a first write.
+_JUDGED_FIELDS: _WeakKeyDictionary = _WeakKeyDictionary()
 
 #: And the **snapshots**, by value, across every ledger in the process. Marking
 #: the verdict spent was exactly one `preflight()` call wide: a preflight is
@@ -359,17 +390,25 @@ _ALREADY_SPENT: _WeakSet = _WeakSet()
 #: and recorded four writes for one judged snapshot — with the per-ledger list
 #: below satisfied every time, because each ledger was new.
 #:
-#: `(sitting, the snapshot's four values)` for every write recorded in this
+#: `(the medium, the snapshot's four values)` for every write recorded in this
 #: process. It was a `WeakSet` of descriptors, and both halves of that were
 #: wrong: dropping the last reference evaporated the entry, so a review
 #: recorded five writes for one snapshot value through the public API alone —
 #: and an entry for one sitting refused an unrelated later sitting's own write,
 #: because the key said nothing about whose medium it was.
 #:
+#: The sitting id was the first attempt at "whose medium", and it is not one: a
+#: sitting has one `PersistenceSession` and can hold more than one quarantined
+#: medium, so two media in one boot collided and a genuine second write was
+#: refused with "a second write that did not happen" — the exact failure the
+#: paragraph above diagnoses, one level up. The key is the `Quarantine`
+#: **object**, compared with `is`, because that is what "this medium, in this
+#: sitting" is.
+#:
 #: Strong, so "once" is a property of this module rather than of the garbage
-#: collector. The residue is one short tuple of immutable values per write
-#: actually recorded in a boot, and nothing about the medium.
-_SNAPSHOTS_RECORDED: list[tuple[object, ...]] = []
+#: collector. The residue is one short tuple of immutable values and one
+#: reference per write actually recorded in a boot.
+_SNAPSHOTS_RECORDED: list[tuple[Quarantine, tuple[object, ...]]] = []
 
 #: The order the gates are asked in, named once so that it is a contract rather
 #: than the order the lines happen to sit in. A review permuted eight adjacent
@@ -391,10 +430,12 @@ PREFLIGHT_ORDER = (
     PreflightCheck.IMAGE_DIGEST,
 )
 
-#: The only four fields a recovery moves. `_sealed_assign` writes these and
+#: The only three fields a recovery moves. `_sealed_assign` writes these and
 #: nothing else — not the quarantine, not the binding, not the sitting, and
-#: not once the stage is terminal.
-_MOVES_DURING_A_RECOVERY = frozenset({"_stage", "_snapshot", "_pinned", "_candidate"})
+#: not once the stage is terminal. It was four: `_snapshot` held the caller's
+#: own descriptor, was read nowhere, and was what a review moved the commit's
+#: mint onto to commit a substituted snapshot with the suite green.
+_MOVES_DURING_A_RECOVERY = frozenset({"_stage", "_pinned", "_candidate"})
 
 #: The edges the stage may travel. Naming the fields that move was not enough:
 #: `_stage` and `_pinned` were both on the list above and `NOT_STARTED` and
@@ -402,7 +443,7 @@ _MOVES_DURING_A_RECOVERY = frozenset({"_stage", "_snapshot", "_pinned", "_candid
 #: and minted a candidate whose entire audit was `['recovery_completed']` — no
 #: start, no operator, no trial — through a bound method on every instance.
 #: Written once, when the workflow starts, and never again.
-_PINNED_AT_THE_START = frozenset({"_snapshot", "_pinned"})
+_PINNED_AT_THE_START = frozenset({"_pinned"})
 
 #: Issued by `_require_the_gates` when every gate has just passed, and consumed
 #: by the one transition that may follow. Naming the fields that move and the
@@ -573,26 +614,119 @@ def _require_an_actual_bool(name: str, value: object) -> None:
         raise TypeError(f"{name} must be a bool; a truthy object is not a check")
 
 
+def _remember_the_medium(verdict: PreflightVerdict, quarantine: Quarantine) -> None:
+    """The index's one write, named so that the travel is visible.
+
+    `tests/unit/test_snapshot.py` holds every quarantine in this module to four
+    reads and a short list of places it may travel to unread. Putting the
+    write behind a name puts it on that list deliberately rather than as a
+    shape the walk happens not to look at.
+    """
+
+    _JUDGED_BY[verdict] = quarantine
+
+
+def _a_medium_was_judged(verdict: PreflightVerdict) -> bool:
+    """Whether this verdict judged **any** medium.
+
+    Asked separately from the identity question so that the two get different
+    classifications. `_mint` requires a medium, so a verdict with none is one
+    somebody put on `_MINTED_HERE` rather than one a preflight produced, and
+    telling an operator "the medium moved since the preflight" about a call
+    that never had a preflight is the misclassification this module refuses to
+    make elsewhere.
+    """
+
+    return _JUDGED_BY.get(verdict) is not None
+
+
+def _medium_was_judged(verdict: PreflightVerdict, quarantine: Quarantine) -> bool:
+    """Whether this verdict's preflight judged **this** medium. By identity.
+
+    Not "is not a different one": a verdict with no medium recorded answers
+    `False` here, where the `is not None` this replaces answered "fine".
+    """
+
+    return _JUDGED_BY.get(verdict) is quarantine
+
+
+def _remember_a_write(quarantine: Quarantine, fields: tuple[object, ...]) -> None:
+    """Record that a write was recorded over this medium, for this value."""
+
+    _SNAPSHOTS_RECORDED.append((quarantine, fields))
+
+
+def _a_write_is_recorded(quarantine: Quarantine, fields: tuple[object, ...]) -> bool:
+    """Whether **this** medium already has a write recorded for these values.
+
+    `is` on the medium, `==` on the values: two media in one sitting are two
+    media, and the same snapshot value written over each is two writes.
+    """
+
+    for medium, written in _SNAPSHOTS_RECORDED:
+        if medium is quarantine and written == fields:
+            return True
+    return False
+
+
+def _raise_already_spent() -> None:
+    """Raise from a frame holding nothing derived from the snapshot.
+
+    This refusal was raised from `note_snapshot_written`, whose locals at that
+    moment held `written` and `recorded` — tuples built out of the descriptor's
+    four values, which is exactly what `SnapshotDescriptor.__repr__` redacts
+    and what `_raise_gate_refused` exists to keep out of a captured-locals
+    traceback. The fingerprint and the sitting rendered in plaintext in a
+    module that builds two helpers to stop precisely that.
+
+    The limit `azazel_boot.session_mode` states applies unchanged: the frame
+    above still holds what it was handed, and a frame cannot forget its own
+    argument.
+    """
+
+    raise RecoveryRefused(
+        Refusal.VERDICT_ALREADY_SPENT,
+        "this snapshot's write is already recorded; a second record against "
+        "it would be a second write that did not happen",
+    )
+
+
 def _mint(
     refused_by: PreflightCheck | None,
+    quarantine: Quarantine,
     snapshot: SnapshotDescriptor | None = None,
     evaluated: tuple[PreflightCheck, ...] = (),
-    judged: Quarantine | None = None,
 ) -> PreflightVerdict:
-    """Build a verdict, stamp it, and record **which snapshot it judged**.
+    """Build a verdict and record **which medium and which snapshot it judged**.
 
     The verdict named no snapshot, so `note_snapshot_written` could only
     re-check that *some* passing verdict existed: a re-review recorded
     `SNAPSHOT_WRITTEN` against a snapshot whose integrity was `FAILED`, on a
     verdict minted for a different, verified one. Both objects were real and
     the verdict was legitimately minted; nothing tied them together.
+
+    The medium is a **required positional** rather than a keyword with a
+    `None` default, because the default was the whole of the hole downstream:
+    `_require_the_medium_now` could only ask "not a *different* one", and a
+    verdict minted without a medium passed that question over any medium at
+    all. There is no verdict here that judged nothing.
+
+    It is spelled `quarantine` for a second reason. The static walk in
+    `tests/unit/test_snapshot.py` holds every quarantine in this module to four
+    reads **by the name it travels under** — `self._quarantine` or the bare
+    `quarantine` — so a quarantine spelled `judged` was outside the rule that
+    exists to bound exactly this. A guard keyed on a spelling is one rename
+    wide, and this parameter was the rename.
     """
 
+    _require_a_real_quarantine(quarantine)
     verdict = PreflightVerdict(refused_by)
     object.__setattr__(verdict, "_snapshot", snapshot)
     object.__setattr__(verdict, "_evaluated", tuple(evaluated))
-    object.__setattr__(verdict, "_judged", judged)
     _MINTED_HERE.add(verdict)
+    _remember_the_medium(verdict, quarantine)
+    if snapshot is not None:
+        _JUDGED_FIELDS[verdict] = _fields_of(snapshot)
     return verdict
 
 
@@ -759,9 +893,9 @@ def preflight(
             generation_holds=generation_holds,
             image_digest_holds=image_digest_holds,
         ):
-            return _mint(check, None, tuple(asked), quarantine)
+            return _mint(check, quarantine, None, tuple(asked))
 
-    return _mint(None, snapshot, tuple(asked), quarantine)
+    return _mint(None, quarantine, snapshot, tuple(asked))
 
 
 class RecoveryStage(Enum):
@@ -859,7 +993,7 @@ class Refusal(Enum):
     VERDICT_DID_NOT_ASK_EVERY_CHECK = "verdict_did_not_ask_every_check"
 
 
-class RecoveryRefused(Exception):
+class RecoveryRefused(Refused):
     """The act did not happen, and the message names the rule.
 
     It never carries a fingerprint, a schema version, a capacity figure, a
@@ -1063,7 +1197,6 @@ class RecoveryWorkflow:
         "_session_id",
         "_stage",
         "_audit",
-        "_snapshot",
         "_pinned",
         "_candidate",
         "_cleared",
@@ -1085,7 +1218,6 @@ class RecoveryWorkflow:
         self._binding = binding
         self._session_id = session_id
         self._stage = RecoveryStage.NOT_STARTED
-        self._snapshot: SnapshotDescriptor | None = None
         self._pinned: SnapshotDescriptor | None = None
         self._cleared: object | None = None
         self._candidate: RecoveryCandidate | None = None
@@ -1179,7 +1311,20 @@ class RecoveryWorkflow:
             confirmed=None,
         )
 
-        self._sealed_assign("_snapshot", snapshot)
+        # **The values, and only the values.** There was a `_snapshot` slot
+        # here as well, holding the caller's own descriptor. It was written in
+        # `__init__` and in `start` and **read nowhere** — a field whose
+        # presence implies a check that does not exist, which is the sin this
+        # module names in `_require_this_sitting`. A review changed the
+        # commit's one line from `self._pinned` to `self._snapshot` and the
+        # suite stayed green: the workflow committed on a descriptor mutated
+        # from inside the passphrase prompt, minted a candidate for schema 99,
+        # and recorded a `recovery_completed` naming it, with no
+        # `RECOVERY_SNAPSHOT_SUBSTITUTED` anywhere — because the substitution
+        # check compares the argument against `_pinned` and never looked at
+        # `_snapshot` at all. The slot is gone rather than compared: there is
+        # nothing left to swap the mint over to.
+        #
         # The **values**, not the object. `held = self._snapshot` was the same
         # object the caller passed in and passed again, so the four field
         # comparisons compared an object with itself: a review mutated the
@@ -1438,7 +1583,29 @@ class RecoveryWorkflow:
         Each is driven failing on its own in `tests/unit/test_snapshot.py` to
         show the next is not reached, because an order nobody tests is an order
         that holds until someone tidies the function.
+
+        **And its inputs are checked here, not only at the three entrances.**
+        Making `acquisition` and `confirmed` required closed the way to a
+        clearance without D8's gates 2 and 4 and left the rest of the direct
+        call open: every other input — the snapshot the integrity gate reads,
+        the observations the host binding is derived from, the sitting — was
+        checked in `start`, `open_trial` and `commit` and nowhere the direct
+        caller passes through. A review called this method on a live workflow
+        with a two-attribute snapshot stand-in, a forged observation tuple and
+        another sitting's id, took the clearance, and moved the stage. A gate
+        that trusts its arguments is a gate over the caller's own values.
         """
+
+        _require_a_real_snapshot(snapshot)
+        _require_real_observations(observations)
+        self._require_this_sitting(session_id)
+        # And the snapshot this workflow pinned, once it has one. `start` has
+        # not pinned anything yet and is the one stage where this is silent;
+        # every later stage asks it at its entrance too, and asking it here is
+        # what makes reaching this function reaching the substitution check
+        # rather than reaching past it.
+        if self._pinned is not None:
+            self._require_the_same_snapshot(snapshot)
 
         if self._quarantine.is_fenced:
             self._refuse_gate(RecoveryGate.MEDIUM_FENCED)
@@ -1563,14 +1730,14 @@ class RecoveryWorkflow:
 
         This does not claim to be a capability boundary: `object.__setattr__`
         is not defensible in Python and this module says so about the
-        quarantine. What it removes is the accidental reach — the four fields
+        quarantine. What it removes is the accidental reach — the three fields
         that legitimately move are named, and a terminal workflow moves none
         of them.
         """
 
         if name not in _MOVES_DURING_A_RECOVERY:
             raise AttributeError(
-                "only the stage, the snapshot, its pinned fields and the "
+                "only the stage, the snapshot's pinned fields and the "
                 "candidate move; the quarantine, the binding and the sitting "
                 "cannot be replaced"
             )
@@ -1600,6 +1767,25 @@ class RecoveryWorkflow:
                 raise AttributeError(
                     "this stage is reached by passing the gates; a workflow "
                     "does not arrive at one it did not pass"
+                )
+            # **And the fence, once more, at the moment the clearance is
+            # spent.** A clearance is issued when the gates pass and says
+            # nothing about *when*: a review took one, fenced the medium, and
+            # then moved the stage, arriving at `TRIAL_OPEN` and at
+            # `COMMITTED` over a medium that was fenced at every instant after
+            # the read. This is the last instant before the stage moves.
+            #
+            # The fence and not the volume quarantine, because only one of
+            # them can change here. `quarantine_volume()` is one-way and the
+            # gates refuse unless it is already on, so it cannot be off by the
+            # time a clearance is spent, and the quarantine itself cannot be
+            # swapped — this method refuses that two rules above. A branch
+            # nothing can drive is not a check, and this module says so about
+            # `_require_this_sitting`.
+            if self._quarantine.is_fenced:
+                raise AttributeError(
+                    "this stage is reached over the medium the gates read; a "
+                    "medium fenced since then is not one they passed"
                 )
             object.__setattr__(self, "_cleared", None)
         if name == "_candidate" and self._cleared is not _GATES_JUST_PASSED:
@@ -1680,17 +1866,11 @@ class MigrationLedger:
     back at the moment it is needed.
     """
 
-    __slots__ = ("_audit", "_written", "_sealed")
+    __slots__ = ("_audit", "_sealed")
 
     def __init__(self) -> None:
         object.__setattr__(self, "_sealed", False)
         self._audit: list[SnapshotAuditEntry] = []
-        #: The snapshots this ledger has already recorded a write for, by
-        #: value. Marking the *verdict* spent was one `preflight()` call wide:
-        #: a preflight is free, read-only and unlimited, so four of them over
-        #: one snapshot minted four spendable verdicts and this ledger recorded
-        #: four writes for one write. Spent-ness belongs to the snapshot.
-        self._written: list[tuple[object, ...]] = []
         object.__setattr__(self, "_sealed", True)
 
     def __setattr__(self, name: str, value: object) -> None:
@@ -1761,31 +1941,42 @@ class MigrationLedger:
         # check and this accepted it. The enum cannot be shortened by an
         # assignment, so "every check, once" is a question the attacker's own
         # value cannot answer.
+        #
+        # **And the order, not only the set.** Set equality was the passing
+        # half's whole question, so a rebound order that asked all ten in a
+        # permuted order passed it — and the refusing half asked something
+        # that could not fail: `refused_by` is set from the check the loop
+        # stopped on, so it *is* the last of `evaluated` for every verdict
+        # this module mints, and no other verdict reaches here. A guard that
+        # cannot fail for its own reason is not a guard.
+        #
+        # What holds instead is one sentence for both halves: what was asked
+        # is the enum's own order, from the start, for as far as it got. A
+        # pass got all the way; a refusal stopped at the check it names.
         asked = verdict.evaluated
-        complete = len(asked) == len(PreflightCheck) and set(asked) == set(PreflightCheck)
-        if verdict.may_migrate and not complete:
+        canonical = tuple(PreflightCheck)
+        prefix: list[PreflightCheck] = []
+        for check in canonical:
+            if len(prefix) < len(asked):
+                prefix.append(check)
+        in_order = tuple(prefix) == asked
+        if verdict.may_migrate and not (in_order and len(asked) == len(canonical)):
             raise RecoveryRefused(
                 Refusal.VERDICT_DID_NOT_ASK_EVERY_CHECK,
-                "a passing verdict is one that was asked every check; a "
-                "shorter one answers a question nobody finished",
+                "a passing verdict is one that was asked every check, in the "
+                "order they are asked in; a shorter one answers a question "
+                "nobody finished",
             )
-        # **And a refusal names the check that refused, last.** This ran only
-        # on the passing half, so a rebound order produced a refusal whose
-        # classification was a check the run never got to — and that
-        # classification is the whole of what an operator is told and what the
-        # audit keeps. The word "in order" is gone from the message above,
-        # because set equality is what it checks; the order is pinned by
-        # `tests/unit/test_snapshot.py`'s ten-position drive.
         if not verdict.may_migrate:
             stopped_at = None
             for check in asked:
                 stopped_at = check
-            named = stopped_at is verdict.refused_by
-            if not named or len(set(asked)) != len(asked):
+            if not in_order or stopped_at is not verdict.refused_by:
                 raise RecoveryRefused(
                     Refusal.VERDICT_DID_NOT_ASK_EVERY_CHECK,
-                    "a refusal names the check it stopped at; a classification "
-                    "the run never reached is not one",
+                    "a refusal is the checks that ran, in order, ending at the "
+                    "one it names; a classification the run never reached is "
+                    "not one",
                 )
 
     def _require_the_medium_now(
@@ -1813,7 +2004,19 @@ class MigrationLedger:
         # workflow's gates do" — and the workflow binds its quarantine at
         # construction. A review spent a verdict minted over one medium in one
         # sitting against a different medium in a different sitting.
-        if verdict._judged is not None and verdict._judged is not quarantine:
+        #
+        # **Unconditional.** The first fix read `verdict._judged is not None
+        # and ... is not quarantine`, so a verdict that judged no medium was
+        # spendable against every medium — and the `None` the shortcut existed
+        # for is now unreachable, because `_mint` requires one. A guard that
+        # its own attacker's value switches off is not a guard.
+        if not _a_medium_was_judged(verdict):
+            raise RecoveryRefused(
+                Refusal.VERDICT_NOT_MINTED_BY_A_PREFLIGHT,
+                "a verdict this module minted judged a medium; one that "
+                "judged none was put on the list rather than produced",
+            )
+        if not _medium_was_judged(verdict, quarantine):
             raise RecoveryRefused(
                 Refusal.MEDIUM_MOVED_SINCE_THE_PREFLIGHT,
                 "a verdict is spent against the medium its preflight judged; "
@@ -1857,7 +2060,13 @@ class MigrationLedger:
         """
 
         _require_a_real_snapshot(snapshot)
-        self._require_the_medium_now(verdict, quarantine)
+        # **Whether this is one of ours, first.** `_require_the_medium_now`
+        # asks the module's verdict→medium index about the value it was
+        # handed, and answering "no medium was judged" for something that is
+        # not a verdict at all classifies it `MEDIUM_MOVED_SINCE_THE_PREFLIGHT`
+        # — an operator told the medium moved, about a call that never had a
+        # preflight. `may_migrate` orders these two the other way round for
+        # this reason; this path did not.
         if (
             not verdict_was_minted_here(verdict)
             or not verdict.may_migrate
@@ -1869,26 +2078,43 @@ class MigrationLedger:
                 "that snapshot; a passing verdict for a different one is not "
                 "permission to record this one",
             )
+        self._require_the_medium_now(verdict, quarantine)
         # Asked here as well, after the verdict is known to be one of ours. It
         # was enforced on the **permission** path and not on the **recording**
         # path, so a verdict `may_migrate` had refused for asking one check was
         # still accepted as the record of a write.
         self._require_every_gate_was_asked(verdict)
-        written = _fields_of(snapshot)
-        recorded = (quarantine.session_id, written)
-        if (
-            verdict in _ALREADY_SPENT
-            or written in self._written
-            or recorded in _SNAPSHOTS_RECORDED
-        ):
+        # **The values the preflight judged**, not the values the descriptor
+        # answers now. The dataclass is frozen and its fields are pinned to
+        # exactly `int` and exactly `str`, and neither stops
+        # `object.__setattr__` from rewriting one between the preflight and
+        # this call — the same in-place mutation `_require_the_same_snapshot`
+        # exists for, on the path that has no workflow to pin anything. A
+        # review rewrote the fingerprint after a passing preflight and recorded
+        # a second write for one judged snapshot, because the key was derived
+        # from the mutated object both times.
+        judged = _JUDGED_FIELDS.get(verdict)
+        if judged is None or judged != _fields_of(snapshot):
             raise RecoveryRefused(
-                Refusal.VERDICT_ALREADY_SPENT,
-                "this snapshot's write is already recorded; a second record "
-                "against it would be a second write that did not happen",
+                Refusal.SNAPSHOT_CHANGED_UNDER_THE_WORKFLOW,
+                "the snapshot presented now is not the one this verdict's "
+                "preflight judged; a substituted snapshot is refused, not "
+                "recorded",
             )
-        _ALREADY_SPENT.add(verdict)
-        self._written.append(written)
-        _SNAPSHOTS_RECORDED.append(recorded)
+        # **One rule, and it is the one that can fail.** There were three:
+        # this verdict, in a `WeakSet`; this ledger's own list of values; and
+        # the module-wide record. A review proved the first two unreachable —
+        # a replayed verdict carries the same medium and the same judged
+        # values, so the module-wide record answers first, every time — and
+        # the middle one was worse than dead. It was keyed on the values
+        # alone, with no medium: inside one ledger, a *second medium's* first
+        # write was refused as "a second write that did not happen", which is
+        # the failure the module-wide key was given a medium to fix. Two
+        # spare guards that could not fire, in front of one that could, one of
+        # which refused a legitimate caller when it did.
+        if _a_write_is_recorded(quarantine, judged):
+            _raise_already_spent()
+        _remember_a_write(quarantine, judged)
 
         self._audit.append(
             SnapshotAuditEntry(

@@ -63,7 +63,20 @@ COMPONENTS: tuple[Component, ...] = (
         "absent",
         "decision logic only: it opens no device, and no medium has been written",
     ),
-    Component("persistence", "absent", "no encrypted USB persistence"),
+    Component(
+        "persistence",
+        "absent",
+        "decision logic only: sittings, a layout it is told about, dirty-write "
+        "classification and a media binding; it creates, unlocks, mounts and "
+        "writes no volume, and no encrypted persistence exists",
+    ),
+    Component(
+        "snapshot_and_recovery",
+        "absent",
+        "decision logic only: a preflight that refuses and a recovery that "
+        "yields a candidate; no snapshot has been written, no migration run "
+        "and no volume restored, on any device",
+    ),
     Component(
         "commissioning",
         "absent",
@@ -99,7 +112,16 @@ class BootStatus:
     capability_reasons: Mapping[str, str] = field(
         default_factory=lambda: {
             "resource": "no resource probe exists",
-            "topology": "no interface inventory exists",
+            # An inventory **is** read — `azazel_boot.inventory` walks a
+            # sysfs tree it is handed — and reading one is not assessing a
+            # topology: no NIC role is assigned, no segment is identified and
+            # nothing here decides what the network is. The row used to say no
+            # inventory existed, which stopped being true and read as a
+            # smaller claim than it was.
+            "topology": (
+                "an interface inventory is read, but no NIC role is assigned "
+                "and no topology is assessed"
+            ),
             "verified_assets": "no asset verification exists",
             "trust_health": "no media or platform trust classification exists",
         }

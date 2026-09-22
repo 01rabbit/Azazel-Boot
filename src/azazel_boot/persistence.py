@@ -78,6 +78,7 @@ from .commissioning import SessionBinding, binding_applies
 from .dirty_write import DirtySignal, WriteObservation, classify
 from .inventory import InterfaceObservation
 from .quarantine import Device, Disposition, Quarantine
+from .refusals import Refused
 
 
 class Capability(Enum):
@@ -266,7 +267,7 @@ class VolumeAuditEntry:
     act: OrdinaryAct | None = None
 
 
-class PersistenceRefused(Exception):
+class PersistenceRefused(Refused):
     """The act did not happen.
 
     The detail names the **rule**, never the value: a partition table is
@@ -618,6 +619,18 @@ class MediaIdentity:
             "encrypted commissioning record and nowhere else"
         )
 
+    def __getstate__(self):
+        """The other door `__reduce__` closes, which was left open.
+
+        `object.__getstate__` is a public method on every object since 3.11:
+        it hands back the instance state — `__dict__`, or the slots by name —
+        with no pickling involved, so `value.__getstate__()` read every field
+        the redacting `__repr__` above exists to keep out of a log. Refusing
+        one serialisation door and not the other is refusing neither.
+        """
+
+        raise TypeError("a MediaIdentity does not hand back its fields")
+
     def __repr__(self) -> str:
         return f"MediaIdentity(source={self._source.value}, value=<redacted>)"
 
@@ -666,6 +679,18 @@ class BindingKey:
 
     def __reduce__(self):
         raise TypeError("a BindingKey is not serialisable")
+
+    def __getstate__(self):
+        """The other door `__reduce__` closes, which was left open.
+
+        `object.__getstate__` is a public method on every object since 3.11:
+        it hands back the instance state — `__dict__`, or the slots by name —
+        with no pickling involved, so `value.__getstate__()` read every field
+        the redacting `__repr__` above exists to keep out of a log. Refusing
+        one serialisation door and not the other is refusing neither.
+        """
+
+        raise TypeError("a BindingKey does not hand back its fields")
 
     def __repr__(self) -> str:
         return "BindingKey(<redacted>)"
@@ -992,6 +1017,18 @@ class PersistenceSession:
         """Refuse to pickle rather than writing the binding into a file or queue."""
 
         raise TypeError("a PersistenceSession is not serialisable")
+
+    def __getstate__(self):
+        """The other door `__reduce__` closes, which was left open.
+
+        `object.__getstate__` is a public method on every object since 3.11:
+        it hands back the instance state — `__dict__`, or the slots by name —
+        with no pickling involved, so `value.__getstate__()` read every field
+        the redacting `__repr__` above exists to keep out of a log. Refusing
+        one serialisation door and not the other is refusing neither.
+        """
+
+        raise TypeError("a PersistenceSession does not hand back its fields")
 
     def __repr__(self) -> str:
         """Redacted: a generated repr would print the binding into any traceback."""

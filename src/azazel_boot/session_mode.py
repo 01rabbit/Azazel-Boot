@@ -74,6 +74,7 @@ from typing import Protocol
 from azazel_boot.commissioning import SessionBinding, binding_applies
 from azazel_boot.inventory import InterfaceObservation
 from azazel_boot.quarantine import Quarantine
+from azazel_boot.refusals import Refused
 
 #: D2's budget: five verification attempts in one boot.
 #:
@@ -188,7 +189,7 @@ class Refusal(Enum):
     CHANNEL_NOT_A_LOCAL_HIDDEN_PROMPT = "channel_not_a_local_hidden_prompt"
 
 
-class ModeRefused(Exception):
+class ModeRefused(Refused):
     """No mode was decided, and nothing changed.
 
     The detail names the rule. It never carries a passphrase, a key, a device
@@ -272,6 +273,18 @@ class CommissionedMode:
             "not to a file that outlives it"
         )
 
+    def __getstate__(self):
+        """The other door `__reduce__` closes, which was left open.
+
+        `object.__getstate__` is a public method on every object since 3.11:
+        it hands back the instance state — `__dict__`, or the slots by name —
+        with no pickling involved, so `value.__getstate__()` read every field
+        the redacting `__repr__` above exists to keep out of a log. Refusing
+        one serialisation door and not the other is refusing neither.
+        """
+
+        raise TypeError("a CommissionedMode does not hand back its fields")
+
     def __repr__(self) -> str:
         return f"CommissionedMode(mode={self._mode.value}, boot=<redacted>)"
 
@@ -341,6 +354,18 @@ class BootSession:
 
     def __reduce__(self):
         raise TypeError("a BootSession is not serialisable")
+
+    def __getstate__(self):
+        """The other door `__reduce__` closes, which was left open.
+
+        `object.__getstate__` is a public method on every object since 3.11:
+        it hands back the instance state — `__dict__`, or the slots by name —
+        with no pickling involved, so `value.__getstate__()` read every field
+        the redacting `__repr__` above exists to keep out of a log. Refusing
+        one serialisation door and not the other is refusing neither.
+        """
+
+        raise TypeError("a BootSession does not hand back its fields")
 
     def __repr__(self) -> str:
         """Redacted, including the budget.

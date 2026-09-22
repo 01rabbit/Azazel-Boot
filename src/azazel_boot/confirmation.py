@@ -58,6 +58,7 @@ from azazel_boot.commissioning import (
     describe_for_operator,
 )
 from azazel_boot.inventory import InterfaceObservation
+from azazel_boot.refusals import Refused
 
 
 class PlatformTrust(Enum):
@@ -148,7 +149,7 @@ class ScreenRefusal(Enum):
     NOT_THIS_SESSION = "not_this_session"
 
 
-class ConfirmationRefused(Exception):
+class ConfirmationRefused(Refused):
     """The confirmation did not happen.
 
     The detail names the rule. It never echoes a code, a label, an identity or
@@ -310,6 +311,18 @@ class ConfirmationScreen:
 
     def __reduce__(self):
         raise TypeError("a ConfirmationScreen is not serialisable")
+
+    def __getstate__(self):
+        """The other door `__reduce__` closes, which was left open.
+
+        `object.__getstate__` is a public method on every object since 3.11:
+        it hands back the instance state — `__dict__`, or the slots by name —
+        with no pickling involved, so `value.__getstate__()` read every field
+        the redacting `__repr__` above exists to keep out of a log. Refusing
+        one serialisation door and not the other is refusing neither.
+        """
+
+        raise TypeError("a ConfirmationScreen does not hand back its fields")
 
     def __repr__(self) -> str:
         return (

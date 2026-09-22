@@ -42,12 +42,20 @@ So it is checked structurally, not trusted as prose:
 - no method on either acting class whose name contains `unquarantine`, `clear`,
   `lift`, `restore`, `reopen`, `release`, `trust`, `permit`, `enable`, `mount`,
   `fsck`, `repair`, `export`, `download` or `upload`;
-- **`self._quarantine` may appear only as the receiver of `is_fenced` or
-  `volume_is_quarantined`.** The object never escapes those two expressions.
+- **a quarantine may appear only as the receiver of its four reads** —
+  `is_fenced`, `volume_is_quarantined`, `medium_is_bound()` and `session_id` —
+  or in one of the travels the test names: into this module's own `_require_*`
+  checks, into the gate evaluator, into `type(...)`, into the workflow's one
+  slot, into an identity comparison, and into the two module-side indexes.
   That is the load-bearing rule, and it replaces a shape match on
   `self._quarantine.<attr>`, which a third review defeated by aliasing the
   quarantine to a local first — `q = self._quarantine; q._audit.clear()` —
-  emptying the audit and the dispositions with neither flag moving;
+  emptying the audit and the dispositions with neither flag moving. The rule
+  finds a quarantine **by the name it travels under**, so it is paired with a
+  second one: a parameter annotated `Quarantine` is spelled `quarantine`,
+  everywhere. `_mint` took one as `judged`, and the live object went into the
+  verdict through a parameter the walk was not looking at — a guard keyed on a
+  spelling is one rename wide;
 - no *call* to `fence`, `quarantine_volume`, `approve_export`, `withdraw_export`
   or `observe`, no assignment to `_fenced` or `_volume_quarantined`, and no
   `object.__setattr__` except on a function's **own first parameter** or on an
@@ -176,6 +184,23 @@ volume since judged torn, which is what D9 refuses under the name of an
 upgrade. `may_migrate` and `note_snapshot_written` take the quarantine and
 re-read it, as the workflow's gates do.
 
+**And it is spent against the medium its own preflight judged**, by identity,
+unconditionally: a verdict minted over one medium is not an answer about
+another. Which medium that was is a fact the module keeps **beside** the
+verdict, in `_JUDGED_BY`, for the reason mintedness is: the first version put
+the `Quarantine` on the verdict as `_judged`, which handed `fence()`,
+`quarantine_volume()`, the sitting and the boot medium identity to everyone a
+verdict was handed — through the object whose own docstring says there is
+nothing to read off it. The four values the snapshot had when it was judged are
+kept the same way, so a descriptor rewritten in place between the preflight and
+the record is refused rather than recorded under a key no preflight produced.
+
+**One medium, one write — and a sitting is not a medium.** The record was keyed
+on `(sitting, the snapshot's four values)`, and a `PersistenceSession` holds one
+sitting and can hold more than one quarantined medium: two media in one boot
+collided, and the second's genuine first write was refused as "a second write
+that did not happen". The key is the `Quarantine` object.
+
 **And the ledger asks `evaluated` back.** Reporting which checks ran bought
 nothing while nothing consumed it: rebinding `PREFLIGHT_ORDER` produced a
 legitimately minted passing verdict, asked one check, over a medium that was
@@ -192,6 +217,27 @@ operator cannot consent to it, so there is nothing to consent with.
 
 A refusal **keeps the old schema working**, which is the safe outcome rather
 than a degraded one — driven by unlocking on the old schema afterwards.
+
+**One spend rule, and it is the one that can fail.** There were three: the
+verdict in a `WeakSet`, the ledger's own list of written values, and the
+module-wide record. A review proved the first two unable to fire in front of
+the third — a replayed verdict carries the same medium and the same judged
+values, so the module-wide record answers first, every time — and the middle
+one was worse than dead: keyed on the values with no medium, it refused a
+*second medium's* first write inside one ledger, which is the failure the
+module-wide key was given a medium to fix. Two guards that could not fire, in
+front of one that could, one of which refused a legitimate caller when it did.
+
+**The workflow holds no snapshot object.** It held the caller's descriptor in a
+`_snapshot` slot that was written twice and read nowhere — a field whose
+presence implies a check that does not exist — and a review moved the commit's
+one mint line from `_pinned` to it, committing on a descriptor mutated from
+inside the passphrase prompt, minting a candidate for schema 99 and recording a
+`recovery_completed` naming it, with no substitution recorded anywhere and the
+suite green. The slot is gone rather than compared: what the workflow pins at
+the start is a descriptor built from the values read at that moment, in an
+object the caller never had a reference to, and there is nothing left to swap
+the mint over to.
 
 ## Recovery (D8)
 
@@ -285,8 +331,34 @@ The gates, in order — D8's four, with two that precede them:
 7. **operator confirmation** — `confirmed` grants nothing by itself, which the
    first test in the file drives: the volume is still quarantined afterwards
 
-Each is driven failing on its own to show the next is not reached. A binding
-from another machine refuses with the acquisition **never invoked**.
+Each is driven failing on its own to show the next is not reached, and three
+adjacent pairs are contested with **both** gates failing at once — target
+binding against key acquisition, the host binding against target binding, and
+integrity against operator confirmation. Every row of the "each gate with every
+later gate also failing" drive passed `media_binding_holds=True`, so the gate
+that reads it was contested against nothing and three reorderings shipped green.
+A binding from another machine refuses with the acquisition **never invoked**.
+
+**Reaching the gates is reaching all of them, and reaching their inputs too.**
+`_require_the_gates` is a bound method at the same reach as `_sealed_assign`,
+and a review called it directly with `acquisition=None` to take a clearance
+without D8's gates 2 and 4. Both are required arguments now, where `None` means
+"this stage does not ask it" rather than "skip it", and the clearance says
+*which* set passed: only a run that asked an acquisition **and** a confirmation
+issues the one a commit spends. The rest of the inputs were still the caller's,
+though — the snapshot the integrity gate reads, the observations the host
+binding is derived from, the sitting, and the snapshot this workflow pinned —
+so those are checked inside the gates as well, not only at the three entrances
+a direct call does not use.
+
+**A clearance is spent over the medium the gates read.** It said the gates
+passed and nothing about *when*: a review passed them, fenced the medium, and
+then moved the stage, arriving at a stage reached over a medium that was fenced
+at every instant after the read. The fence is re-read at the moment the
+clearance is spent. The volume quarantine is not, and the reason is written
+down: `quarantine_volume()` is one-way, the gates refuse unless it is already
+on, and the quarantine itself cannot be swapped — so that branch is one nothing
+could drive, and a branch nothing can drive is not a check.
 
 **One pair cannot be contested, and saying so is better than a test that looks
 like it proves it.** D8 orders key acquisition before integrity, but at the
@@ -369,10 +441,15 @@ Nine audit classifications. `SnapshotAuditEntry` has five fields — `event`,
 snapshot contents, a byte count, a free-space figure, a capacity, a raw key, a
 passphrase, a device identity, a path or an operator identifier.
 
-**The capacity figures never render at all.** `CapacityReport.__repr__` is
-`CapacityReport(<redacted>)`, and a test asserts no digit appears in it: those
-numbers describe how much medium the operator is carrying and how much of it is
-used.
+**This module never renders the capacity figures.** `CapacityReport.__repr__`
+is `CapacityReport(<redacted>)`, a test asserts no digit appears in it, and no
+audit entry, refusal message or verdict carries one: those numbers describe how
+much medium the operator is carrying and how much of it is used. What that does
+**not** say is that the numbers are gone. The caller measured them, passed them
+in and still holds them, and they are still on the object it built — reading
+`report._available` renders one perfectly well. The claim is about what this
+module puts into a log, a screen and a traceback, which is the place the
+figures would otherwise reach; it is not a secrecy property of the object.
 
 `SnapshotDescriptor` redacts its fingerprint for the same reason, **and so does
 `SnapshotAuditEntry`** — which is the object actually destined for a log. The

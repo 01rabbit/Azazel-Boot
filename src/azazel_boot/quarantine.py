@@ -57,6 +57,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
+from .refusals import Refused
+
 #: The version an artifact record carries as `quarantine_policy_version`.
 #: `config/quarantine/policy-v1.json` is the pinned artifact a build consumes;
 #: `tests/unit/test_quarantine_policy.py` asserts every field of it against the
@@ -201,7 +203,7 @@ IMAGE_REFUSAL_SEVERITY = (
 )
 
 
-class ImageRefused(Exception):
+class ImageRefused(Refused):
     """A built initramfs does not satisfy the contract, so it is not a Boot image.
 
     It carries every fault found, not just the first: the refusal is the record,
@@ -227,7 +229,7 @@ class ImageRefused(Exception):
         super().__init__("; ".join(f"{name.value}: {detail}" for name, detail in ordered))
 
 
-class ExportRefused(Exception):
+class ExportRefused(Refused):
     """An export was not approved in a way that authorises this write.
 
     The detail never names a device. The refusal is the same whichever disk it
@@ -438,6 +440,18 @@ class Quarantine:
             "a Quarantine is not serialisable; it holds the session's observed "
             "identities and its fence"
         )
+
+    def __getstate__(self):
+        """The other door `__reduce__` closes, which was left open.
+
+        `object.__getstate__` is a public method on every object since 3.11:
+        it hands back the instance state — `__dict__`, or the slots by name —
+        with no pickling involved, so `value.__getstate__()` read every field
+        the redacting `__repr__` above exists to keep out of a log. Refusing
+        one serialisation door and not the other is refusing neither.
+        """
+
+        raise TypeError("a Quarantine does not hand back its fields")
 
     @property
     def session_id(self) -> str:

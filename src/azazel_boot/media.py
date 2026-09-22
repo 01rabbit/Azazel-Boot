@@ -123,6 +123,18 @@ class DeviceIdentity:
             "if a component genuinely needs it"
         )
 
+    def __getstate__(self):
+        """The other door `__reduce__` closes, which was left open.
+
+        `object.__getstate__` is a public method on every object since 3.11:
+        it hands back the instance state — `__dict__`, or the slots by name —
+        with no pickling involved, so `value.__getstate__()` read every field
+        the redacting `__repr__` above exists to keep out of a log. Refusing
+        one serialisation door and not the other is refusing neither.
+        """
+
+        raise TypeError("a DeviceIdentity does not hand back its fields")
+
     def disclose(self) -> str:
         """The raw value, for the one component that must open the device."""
 
