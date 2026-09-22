@@ -128,7 +128,7 @@ class SnapshotDescriptor:
         raise TypeError("a SnapshotDescriptor is not serialisable")
 
     def __getstate__(self):
-        raise TypeError("a SnapshotDescriptor does not hand back its fields")
+        raise TypeError("a SnapshotDescriptor is not serialisable")
 
     def __repr__(self) -> str:
         """Redacted. A fingerprint in a repr is a fingerprint in every traceback."""
@@ -140,6 +140,21 @@ class SnapshotDescriptor:
         )
 
 
+def _require_two_measurements(
+    *, required_is_a_count: bool, available_is_a_count: bool
+) -> None:
+    """Raise from a frame holding two booleans and nothing else.
+
+    Neither figure is in scope here, so a captured-locals traceback of either
+    refusal carries no measurement of anybody's medium.
+    """
+
+    if not required_is_a_count:
+        raise TypeError("required must be a non-negative integer")
+    if not available_is_a_count:
+        raise TypeError("available must be a non-negative integer")
+
+
 class CapacityReport:
     """Space, as the caller measured it. **These numbers never render.**
 
@@ -147,6 +162,18 @@ class CapacityReport:
     much of it is used — and ADR-0010 D10's rule about the audit is that it
     holds classifications. Which check refused is a classification; how many
     bytes were short is a measurement of somebody's hardware.
+
+    **The limit, stated rather than claimed away**: the refusal below is raised
+    from a frame holding two booleans, but *this* frame holds what it was
+    handed, so a captured-locals traceback of a construction that refused shows
+    the caller's own arguments. `azazel_boot.session_mode` states the same
+    limit about the passphrase, in the same words: a frame cannot forget its
+    own argument.
+
+    The figures sit in `__slots__` and are reachable as ordinary private
+    attributes, as anything in a Python object is. What is closed is every
+    **public** rendering — `dataclasses.asdict`, `astuple`, `vars()`,
+    `__getstate__`, `copy`, `pickle` — and the constructor's own traceback.
 
     **Not a dataclass**, which is the whole of the difference. It was one, with
     a redacting `__repr__`, and the claim in this docstring was "these numbers
@@ -160,9 +187,15 @@ class CapacityReport:
     __slots__ = ("_required", "_available")
 
     def __init__(self, *, required: int, available: int) -> None:
-        for name, value in (("required", required), ("available", available)):
-            if type(value) is not int or value < 0:
-                raise TypeError(f"{name} must be a non-negative integer")
+        # Refused from a frame holding **two booleans**. Validating inline left
+        # the figures as locals, so a caller whose free-space probe returned
+        # `None` got a `TypeError` whose captured-locals traceback rendered the
+        # other, real figure — on an ordinary path, in the constructor of the
+        # class whose docstring says these numbers never render.
+        _require_two_measurements(
+            required_is_a_count=type(required) is int and required >= 0,
+            available_is_a_count=type(available) is int and available >= 0,
+        )
         object.__setattr__(self, "_required", required)
         object.__setattr__(self, "_available", available)
 
@@ -226,7 +259,7 @@ class PreflightVerdict:
     `verdict_was_minted_here` is what a consumer asks.
     """
 
-    __slots__ = ("_refused_by", "_snapshot", "_evaluated", "__weakref__")
+    __slots__ = ("_refused_by", "_snapshot", "_evaluated", "_judged", "__weakref__")
 
     def __init__(self, refused_by: PreflightCheck | None) -> None:
         """No token, and nothing to read off a verdict at all.
@@ -248,6 +281,7 @@ class PreflightVerdict:
         object.__setattr__(self, "_refused_by", refused_by)
         object.__setattr__(self, "_snapshot", None)
         object.__setattr__(self, "_evaluated", ())
+        object.__setattr__(self, "_judged", None)
 
     def __setattr__(self, name: str, value: object) -> None:
         raise AttributeError("a PreflightVerdict is fixed when it is minted")
@@ -325,12 +359,17 @@ _ALREADY_SPENT: _WeakSet = _WeakSet()
 #: and recorded four writes for one judged snapshot — with the per-ledger list
 #: below satisfied every time, because each ledger was new.
 #:
-#: Weak, and keyed by **value** — `SnapshotDescriptor` is a frozen dataclass,
-#: so an equal descriptor hashes equal — which is what "this snapshot's write
-#: is already recorded" means. Weak so that a descriptor nobody holds any more
-#: is not kept alive by having been recorded: the question is about snapshots
-#: in hand, and this module keeps no census of the ones that are gone.
-_SNAPSHOTS_RECORDED: _WeakSet = _WeakSet()
+#: `(sitting, the snapshot's four values)` for every write recorded in this
+#: process. It was a `WeakSet` of descriptors, and both halves of that were
+#: wrong: dropping the last reference evaporated the entry, so a review
+#: recorded five writes for one snapshot value through the public API alone —
+#: and an entry for one sitting refused an unrelated later sitting's own write,
+#: because the key said nothing about whose medium it was.
+#:
+#: Strong, so "once" is a property of this module rather than of the garbage
+#: collector. The residue is one short tuple of immutable values per write
+#: actually recorded in a boot, and nothing about the medium.
+_SNAPSHOTS_RECORDED: list[tuple[object, ...]] = []
 
 #: The order the gates are asked in, named once so that it is a contract rather
 #: than the order the lines happen to sit in. A review permuted eight adjacent
@@ -377,6 +416,14 @@ _PINNED_AT_THE_START = frozenset({"_snapshot", "_pinned"})
 #: Issued, not asserted: the value is this object, and nothing a caller can
 #: name produces it.
 _GATES_JUST_PASSED = object()
+
+#: The clearance a stage that asks no acquisition gets. `start` and
+#: `open_trial` legitimately have none, so `acquisition=None` there is honest —
+#: and a review used the same `None` to call `_require_the_gates` directly and
+#: reach `COMMITTED` without D8's gates 2 and 4. A clearance now says **which**
+#: it is: only a run that asked an acquisition and a confirmation issues the
+#: one a commit spends.
+_PRE_TRIAL_GATES_PASSED = object()
 
 _STAGE_EDGES = frozenset(
     {
@@ -530,6 +577,7 @@ def _mint(
     refused_by: PreflightCheck | None,
     snapshot: SnapshotDescriptor | None = None,
     evaluated: tuple[PreflightCheck, ...] = (),
+    judged: Quarantine | None = None,
 ) -> PreflightVerdict:
     """Build a verdict, stamp it, and record **which snapshot it judged**.
 
@@ -543,6 +591,7 @@ def _mint(
     verdict = PreflightVerdict(refused_by)
     object.__setattr__(verdict, "_snapshot", snapshot)
     object.__setattr__(verdict, "_evaluated", tuple(evaluated))
+    object.__setattr__(verdict, "_judged", judged)
     _MINTED_HERE.add(verdict)
     return verdict
 
@@ -710,9 +759,9 @@ def preflight(
             generation_holds=generation_holds,
             image_digest_holds=image_digest_holds,
         ):
-            return _mint(check, None, tuple(asked))
+            return _mint(check, None, tuple(asked), quarantine)
 
-    return _mint(None, snapshot, tuple(asked))
+    return _mint(None, snapshot, tuple(asked), quarantine)
 
 
 class RecoveryStage(Enum):
@@ -894,7 +943,7 @@ class SnapshotAuditEntry:
         raise TypeError("a SnapshotAuditEntry is not serialisable")
 
     def __getstate__(self):
-        raise TypeError("a SnapshotAuditEntry does not hand back its fields")
+        raise TypeError("a SnapshotAuditEntry is not serialisable")
 
     def __repr__(self) -> str:
         """Redacting, because **this** is the object destined for a log.
@@ -1126,6 +1175,8 @@ class RecoveryWorkflow:
             observations,
             session_id=session_id,
             media_binding_holds=media_binding_holds,
+            acquisition=None,
+            confirmed=None,
         )
 
         self._sealed_assign("_snapshot", snapshot)
@@ -1174,6 +1225,8 @@ class RecoveryWorkflow:
             observations,
             session_id=session_id,
             media_binding_holds=media_binding_holds,
+            acquisition=None,
+            confirmed=None,
         )
 
         self._sealed_assign("_stage", RecoveryStage.TRIAL_OPEN)
@@ -1192,7 +1245,8 @@ class RecoveryWorkflow:
         """Finish, and produce a **candidate**. The quarantine does not move.
 
         This is the whole of what a successful recovery yields: an object
-        saying which schema version was restored and which snapshot it came
+        saying which schema version a restore would reach and which snapshot it
+        came
         from. The `Quarantine` is exactly as quarantined afterwards as before,
         the fence is untouched, and no capability rises.
 
@@ -1214,6 +1268,7 @@ class RecoveryWorkflow:
             session_id=session_id,
             media_binding_holds=media_binding_holds,
             acquisition=acquisition,
+            confirmed=confirmed,
         )
         # **Again, after the prompt.** The two quarantine flags were re-read
         # after `attempt()` and the pin was not, so a review mutated the frozen
@@ -1224,8 +1279,12 @@ class RecoveryWorkflow:
         # `RECOVERY_SNAPSHOT_SUBSTITUTED` anywhere. The substitution this whole
         # design exists to notice, through the one wait in the function.
         self._require_the_same_snapshot(snapshot)
-        if not confirmed:
-            self._refuse_gate(RecoveryGate.OPERATOR_CONFIRMATION)
+        # `attempt()` is caller code called mid-gate, and a review interrupted
+        # the workflow from inside it. The stage move then raised
+        # `AttributeError` from the seal — outside this module's refusal
+        # vocabulary, so a caller writing `except RecoveryRefused` crashed.
+        # `WORKFLOW_ALREADY_FINISHED` exists for exactly this.
+        self._require_stage(RecoveryStage.TRIAL_OPEN)
 
         # The candidate is minted and held **before** the stage becomes
         # terminal, because `_sealed_assign` refuses to move anything once it
@@ -1364,9 +1423,17 @@ class RecoveryWorkflow:
         *,
         session_id: str,
         media_binding_holds: bool,
-        acquisition: KeyAcquisition | None = None,
+        acquisition: KeyAcquisition | None,
+        confirmed: bool | None,
     ) -> None:
         """D8's gates, in D8's order, with the three that precede them.
+
+        `acquisition` and `confirmed` are **required**, and `None` means "this
+        stage has none" rather than "skip the gate". They had defaults, and a
+        review called this method directly — it is a bound method at the same
+        reach as `_sealed_assign`, which the clearance exists to blunt — with
+        `acquisition=None`, obtained a clearance without D8's gates 2 and 4,
+        and moved the stage. Reaching this function is now reaching all of D8.
 
         Each is driven failing on its own in `tests/unit/test_snapshot.py` to
         show the next is not reached, because an order nobody tests is an order
@@ -1441,7 +1508,20 @@ class RecoveryWorkflow:
 
         # Every gate passed, just now. The token is spent by the next stage
         # transition and by nothing else.
-        object.__setattr__(self, "_cleared", _GATES_JUST_PASSED)
+        # D8 gate 4, here rather than in `commit`, so that reaching this
+        # function is reaching all of D8. `None` means "this stage does not ask
+        # it"; `False` is an operator who declined.
+        if confirmed is not None and not confirmed:
+            self._refuse_gate(RecoveryGate.OPERATOR_CONFIRMATION)
+
+        # Every gate passed, just now — and the clearance names which set.
+        # The commit's is issued only where D8's gates 2 and 4 were asked.
+        asked_all_of_d8 = acquisition is not None and confirmed is not None
+        object.__setattr__(
+            self,
+            "_cleared",
+            _GATES_JUST_PASSED if asked_all_of_d8 else _PRE_TRIAL_GATES_PASSED,
+        )
 
     def _refuse_gate(self, gate: RecoveryGate) -> None:
         self._sealed_assign("_stage", RecoveryStage.REFUSED)
@@ -1508,7 +1588,15 @@ class RecoveryWorkflow:
         # `INTERRUPTED` are the two a refusal and an interruption reach, and
         # they are the only ones a workflow moves to without a clearance.
         if name == "_stage" and value not in _REACHED_WITHOUT_GATES:
-            if self._cleared is not _GATES_JUST_PASSED:
+            # `COMMITTED` spends the clearance only a full D8 run issues; the
+            # earlier stages accept either, because they legitimately ask no
+            # acquisition and no confirmation.
+            wanted = (
+                (_GATES_JUST_PASSED,)
+                if value is RecoveryStage.COMMITTED
+                else (_GATES_JUST_PASSED, _PRE_TRIAL_GATES_PASSED)
+            )
+            if self._cleared not in wanted:
                 raise AttributeError(
                     "this stage is reached by passing the gates; a workflow "
                     "does not arrive at one it did not pass"
@@ -1543,7 +1631,15 @@ def candidate_applies_to(flow: RecoveryWorkflow, candidate: RecoveryCandidate) -
     produced it.
     """
 
-    return type(candidate) is RecoveryCandidate and flow.holds(candidate)
+    # **Both operands.** The sentence above says "a constructed one, a
+    # subclassed one and one from another workflow are all answered `False`",
+    # unconditionally — and a stand-in with a `holds` that returns `True`
+    # answered `True` for a candidate nobody minted.
+    return (
+        type(flow) is RecoveryWorkflow
+        and type(candidate) is RecoveryCandidate
+        and flow.holds(candidate)
+    )
 
 
 def _raise_gate_refused() -> None:
@@ -1635,7 +1731,7 @@ class MigrationLedger:
                 "a migration runs on a verdict this module produced; a value "
                 "that merely has the right shape is not one",
             )
-        self._require_the_medium_now(quarantine)
+        self._require_the_medium_now(verdict, quarantine)
         self._require_every_gate_was_asked(verdict)
 
         if not verdict.may_migrate:
@@ -1670,11 +1766,31 @@ class MigrationLedger:
         if verdict.may_migrate and not complete:
             raise RecoveryRefused(
                 Refusal.VERDICT_DID_NOT_ASK_EVERY_CHECK,
-                "a passing verdict is one that was asked every check in "
-                "order; a shorter one answers a question nobody finished",
+                "a passing verdict is one that was asked every check; a "
+                "shorter one answers a question nobody finished",
             )
+        # **And a refusal names the check that refused, last.** This ran only
+        # on the passing half, so a rebound order produced a refusal whose
+        # classification was a check the run never got to — and that
+        # classification is the whole of what an operator is told and what the
+        # audit keeps. The word "in order" is gone from the message above,
+        # because set equality is what it checks; the order is pinned by
+        # `tests/unit/test_snapshot.py`'s ten-position drive.
+        if not verdict.may_migrate:
+            stopped_at = None
+            for check in asked:
+                stopped_at = check
+            named = stopped_at is verdict.refused_by
+            if not named or len(set(asked)) != len(asked):
+                raise RecoveryRefused(
+                    Refusal.VERDICT_DID_NOT_ASK_EVERY_CHECK,
+                    "a refusal names the check it stopped at; a classification "
+                    "the run never reached is not one",
+                )
 
-    def _require_the_medium_now(self, quarantine: Quarantine) -> None:
+    def _require_the_medium_now(
+        self, verdict: PreflightVerdict, quarantine: Quarantine
+    ) -> None:
         """The fence and the quarantine, **at the moment of use**.
 
         `preflight` asks them first, and `PREFLIGHT_ORDER`'s table justifies
@@ -1691,6 +1807,18 @@ class MigrationLedger:
         """
 
         _require_a_real_quarantine(quarantine)
+        # **The one it judged.** This re-read whatever quarantine the caller
+        # handed in on this call and never asked whether that was the one the
+        # preflight looked at, while the doc claimed it re-read "as the
+        # workflow's gates do" — and the workflow binds its quarantine at
+        # construction. A review spent a verdict minted over one medium in one
+        # sitting against a different medium in a different sitting.
+        if verdict._judged is not None and verdict._judged is not quarantine:
+            raise RecoveryRefused(
+                Refusal.MEDIUM_MOVED_SINCE_THE_PREFLIGHT,
+                "a verdict is spent against the medium its preflight judged; "
+                "another medium is another question",
+            )
         if quarantine.is_fenced or quarantine.volume_is_quarantined:
             self._audit.append(
                 SnapshotAuditEntry(
@@ -1729,7 +1857,7 @@ class MigrationLedger:
         """
 
         _require_a_real_snapshot(snapshot)
-        self._require_the_medium_now(quarantine)
+        self._require_the_medium_now(verdict, quarantine)
         if (
             not verdict_was_minted_here(verdict)
             or not verdict.may_migrate
@@ -1747,10 +1875,11 @@ class MigrationLedger:
         # still accepted as the record of a write.
         self._require_every_gate_was_asked(verdict)
         written = _fields_of(snapshot)
+        recorded = (quarantine.session_id, written)
         if (
             verdict in _ALREADY_SPENT
             or written in self._written
-            or snapshot in _SNAPSHOTS_RECORDED
+            or recorded in _SNAPSHOTS_RECORDED
         ):
             raise RecoveryRefused(
                 Refusal.VERDICT_ALREADY_SPENT,
@@ -1759,7 +1888,7 @@ class MigrationLedger:
             )
         _ALREADY_SPENT.add(verdict)
         self._written.append(written)
-        _SNAPSHOTS_RECORDED.add(snapshot)
+        _SNAPSHOTS_RECORDED.append(recorded)
 
         self._audit.append(
             SnapshotAuditEntry(

@@ -2,9 +2,14 @@
 
 This module is the whole of Boot's non-operational surface. It reports what
 exists in this repository and what does not, and it **never reports a
-capability**. Boot has no hardware inventory, no commissioning, no network and
-no enforcement code, so every capability dimension reads as *not assessed* —
-which is not the same as "absent" and is emphatically not "available".
+capability**. Boot performs no enforcement, opens no device, writes no medium
+and has no network, so every capability dimension reads as *not assessed* —
+which is not the same as "absent" and is emphatically not "available". What
+does exist is decision logic: `azazel_boot.inventory` reads a sysfs tree,
+`azazel_boot.confirmation` shapes an operator confirmation, and neither
+assigns a role, opens anything or confirms anything on its own. This module
+said they did not exist, which was true when it was written and stopped being
+true without it noticing.
 
 Three properties matter more than anything this module computes:
 
@@ -59,7 +64,12 @@ COMPONENTS: tuple[Component, ...] = (
         "decision logic only: it opens no device, and no medium has been written",
     ),
     Component("persistence", "absent", "no encrypted USB persistence"),
-    Component("commissioning", "absent", "no hardware inventory and no operator confirmation flow"),
+    Component(
+        "commissioning",
+        "absent",
+        "decision logic only: it reads a sysfs tree and states what an "
+        "operator would have to settle; it assigns no role and confirms nothing",
+    ),
     Component("networking", "absent", "no NIC roles, no capture, no enforcement"),
     Component("deception", "absent", "no Deception isolation"),
     Component("architecture_contract", "target_contract", "docs/architecture.md"),

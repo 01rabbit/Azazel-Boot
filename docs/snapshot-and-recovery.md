@@ -381,6 +381,14 @@ in every traceback, and the same value then rendered verbatim through the audit
 entry's generated repr. A review found it by rendering `repr(workflow.audit())`,
 which the absence test had not.
 
+**The same fourth limit `azazel_boot.quarantine` states applies here.** A
+`__setattr__` stops an attribute being rebound; it does not stop the object it
+points at being mutated, and both `RecoveryWorkflow` and `MigrationLedger`
+hold their audits in plain lists. `flow._audit.clear()` erases the record of a
+recovery while the candidate still applies. That is the same reach as
+`object.__setattr__`, and the same answer: careless-caller defence, not a
+capability boundary.
+
 The refusal raised from `_raise_gate_refused` holds **nothing** in its frame —
 no gate, no snapshot, no binding, no sitting. A stage asked for another
 sitting is now **terminal and audited** (`recovery_foreign_sitting`) on the

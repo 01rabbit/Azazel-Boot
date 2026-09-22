@@ -116,9 +116,9 @@ in-flight item; it is not supposed to produce an unrecoverable volume.
 | --- | --- | --- |
 | A trial boot of a newly installed generation does not confirm healthy | automatic fallback to the prior verified generation, without an operator diagnosing anything. The trial is **one-shot**, so a machine that never completes it does not loop into it | [ADR-0003](adr/0003-immutable-ab-update.md) D1 |
 | An update fails outright | return to the prior verified generation "without losing the last valid audit checkpoint" | program plan §5 R7 exit gate |
-| Power is interrupted after any inactive-slot, boot-metadata, checkpoint, or persistence-migration write | **one verified bootable generation and the last valid audit checkpoint remain recoverable**, at every one of those write points; a failed trial restores any required persistence snapshot | program plan §5 R7 exit gate; [ADR-0003](adr/0003-immutable-ab-update.md) D2 |
+| Power is interrupted after any inactive-slot, boot-metadata, checkpoint, or persistence-migration write | **one verified bootable generation and the last valid audit checkpoint remain recoverable**, at every one of those write points; a failed trial restores **nothing** — see [ADR-0010](adr/0010-persistence-key-and-migration.md) D8 and [snapshot and recovery](snapshot-and-recovery.md) | program plan §5 R7 exit gate; [ADR-0003](adr/0003-immutable-ab-update.md) D2 |
 | Boot metadata is torn by an interrupted write | metadata is signed and **redundant** — at least two copies, so a torn write to one does not lose the ability to boot | [ADR-0003](adr/0003-immutable-ab-update.md) D1 |
-| A persistence migration fails | migrations are backward compatible, or require a verified pre-trial snapshot and a restore path; a failed trial restores the snapshot | [threat model](threat-model.md) §5; program plan §6.7 item 2 |
+| A persistence migration fails | migrations are backward compatible, or require a verified pre-trial snapshot; **a failed trial restores nothing** — [ADR-0010](adr/0010-persistence-key-and-migration.md) D8 makes restoring an explicit operator-started workflow that yields a *candidate*, and the quarantine does not lift | [threat model](threat-model.md) §5; [snapshot and recovery](snapshot-and-recovery.md); program plan §6.7 item 2 |
 
 Two things this list does **not** recover, and must not be read as recovering:
 

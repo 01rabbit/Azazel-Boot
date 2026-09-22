@@ -149,6 +149,29 @@ def _a_quarantine_that_never_saw_the_medium() -> Quarantine:
     return rule
 
 
+def a_migration(**overrides):
+    """One medium, one snapshot, and the verdict its own preflight minted.
+
+    A verdict now names the quarantine its preflight judged, so a ledger call
+    that builds a *fresh* `a_quarantine()` is presenting a different medium —
+    which is the finding this helper exists to stop the suite from re-creating
+    by accident.
+    """
+
+    rule = overrides.pop("quarantine", None) or a_quarantine(quarantined=False)
+    snapshot = overrides.pop("snapshot", None) or descriptor()
+    arguments = {
+        "capacity": capacity(),
+        "current_schema": 1,
+        "target_schema": 2,
+        "binding_holds": True,
+        "generation_holds": True,
+        "image_digest_holds": True,
+    }
+    arguments.update(overrides)
+    return rule, snapshot, preflight(rule, snapshot=snapshot, **arguments)
+
+
 def a_quarantine(*, fenced: bool = False, quarantined: bool = True) -> Quarantine:
     rule = Quarantine(session_id=SESSION, boot_medium_identity=MEDIUM.identity)
     rule.observe(MEDIUM)
@@ -224,7 +247,8 @@ def test_a_completed_recovery_leaves_the_volume_quarantined(observations) -> Non
 
 
 def test_a_candidate_is_not_a_volume_and_grants_nothing(observations) -> None:
-    """It says what was restored. It cannot do anything with it."""
+    """It says which schema version a restore would reach — not that one
+    happened — and it cannot do anything with it."""
 
     candidate = run_to_commit(workflow(observations), observations)
 
@@ -406,7 +430,7 @@ def test_this_module_never_calls_anything_that_would_change_a_quarantine() -> No
                 if isinstance(outer, ast.Call)
                 and isinstance(outer.func, ast.Name)
                 and outer.func.id
-                in {"_require_a_real_quarantine", "_gate_fails", "type"}
+                in {"_require_a_real_quarantine", "_gate_fails", "type", "_mint"}
                 and any(argument is node for argument in outer.args)
             ]
             method_calls = [
@@ -427,7 +451,19 @@ def test_this_module_never_calls_anything_that_would_change_a_quarantine() -> No
                     for target in outer.targets
                 )
             ]
-            assert passed_to or method_calls or assigned_to_the_slot, (
+            # And compared by identity, which reads nothing off it: the ledger
+            # asks whether the quarantine it was handed **is** the one the
+            # verdict's preflight judged.
+            compared = [
+                outer
+                for outer in ast.walk(TREE)
+                if isinstance(outer, ast.Compare)
+                and (
+                    outer.left is node
+                    or any(operand is node for operand in outer.comparators)
+                )
+            ]
+            assert passed_to or method_calls or assigned_to_the_slot or compared, (
                 "a quarantine is used other than as a receiver of its four reads"
             )
             continue
@@ -664,9 +700,11 @@ def test_a_refused_migration_keeps_the_old_schema_usable(observations) -> None:
     unusable would be a degraded outcome dressed as a safe one.
     """
 
+    judged_medium = a_quarantine(quarantined=False)
+
     ledger = MigrationLedger()
     verdict = preflight(
-        a_quarantine(quarantined=False),
+        judged_medium,
         snapshot=None,
         capacity=capacity(),
         current_schema=1,
@@ -675,7 +713,7 @@ def test_a_refused_migration_keeps_the_old_schema_usable(observations) -> None:
         generation_holds=True,
         image_digest_holds=True,
     )
-    assert ledger.may_migrate(verdict, quarantine=a_quarantine(quarantined=False)) is False
+    assert ledger.may_migrate(verdict, quarantine=judged_medium) is False
 
     live = session(observations)
     status = live.unlock(MEDIUM, layout(), observations, **MEDIA_ARGS, **unlock_arguments())
@@ -1199,9 +1237,11 @@ def test_the_audit_vocabulary_is_exactly_nine_classifications() -> None:
 def test_a_refused_migration_records_the_check_and_no_figure() -> None:
     """The capacity numbers describe the operator's medium. They stay there."""
 
+    judged_medium = a_quarantine(quarantined=False)
+
     ledger = MigrationLedger()
     verdict = preflight(
-        a_quarantine(quarantined=False),
+        judged_medium,
         snapshot=descriptor(),
         capacity=capacity(required=987654321, available=123456789),
         current_schema=1,
@@ -1211,7 +1251,7 @@ def test_a_refused_migration_records_the_check_and_no_figure() -> None:
         image_digest_holds=True,
     )
     assert verdict.refused_by is PreflightCheck.REQUIRED_SPACE
-    assert ledger.may_migrate(verdict, quarantine=a_quarantine(quarantined=False)) is False
+    assert ledger.may_migrate(verdict, quarantine=judged_medium) is False
 
     rendered = repr(ledger.audit()) + str(ledger.audit())
     assert "987654321" not in rendered
@@ -1527,6 +1567,29 @@ def test_this_module_cannot_reach_a_host_a_network_a_vm_or_a_second_partition() 
         and not _is_a_bare_super_init(node)
     ]
 
+    # **And no dunder is read at all except to call it.** Both dunder rules —
+    # this one and the `object.__setattr__` rule in
+    # `test_this_module_never_calls_anything_that_would_change_a_quarantine` —
+    # matched on `ast.Call` whose `func` is an `ast.Attribute`. A module-level
+    # `_write = object.__setattr__` is an `ast.Attribute` **Load**, not a call,
+    # and `_write(rule, name, value)` is a call whose `func` is an `ast.Name`:
+    # neither rule looks at either node, no new free name appears, and a review
+    # cleared the volume quarantine through it with the suite green. So a
+    # dunder attribute may only be the callee of a call.
+    called = {
+        id(node.func)
+        for node in ast.walk(TREE)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    }
+    assert not [
+        node
+        for node in ast.walk(TREE)
+        if isinstance(node, ast.Attribute)
+        and node.attr.startswith("__")
+        and node.attr.endswith("__")
+        and id(node) not in called
+    ]
+
     # **No subscript load outside an annotation.** Refusing only
     # `Subscript`-as-callee was sidestepped by binding the callable to a name
     # first — `writer = builtins["open"]`, then `writer(...)`. This module
@@ -1791,10 +1854,21 @@ def test_no_public_method_ever_turns_either_flag_off(observations, elsewhere) ->
     # was driven with `MEDIUM_FENCED` alone, so a re-review gated the clear on
     # `OPERATOR_CONFIRMATION` — an operator declining the confirmation
     # un-fenced and un-quarantined the volume, fully green.
+    # **Derived, not written out.** This list was hand-written, and it went
+    # stale the moment D8 gate 1 was split: `TARGET_BINDING` and
+    # `MEDIUM_NOT_RECOGNISED` were never driven here, and a payload on either
+    # refusal branch cleared both flags with the whole suite green — which is
+    # the same failure the paragraph above records, one gate along. The set of
+    # gates these cases actually reach is collected and asserted against
+    # `RecoveryGate` itself, so a new gate cannot be added without a case.
+    reached: set[RecoveryGate] = set()
     for gate_case in (
         lambda: (a_quarantine(fenced=True), "start", {}),
         lambda: (a_quarantine(quarantined=False), "start", {}),
+        lambda: (_a_quarantine_that_never_saw_the_medium(), "start", {}),
         lambda: (a_quarantine(), "commit", {"elsewhere": True}),
+        lambda: (a_quarantine(), "start", {"no_media_binding": True}),
+        lambda: (a_quarantine(), "commit", {"no_media_binding": True}),
         lambda: (a_quarantine(), "commit", {"bad_channel": True}),
         lambda: (a_quarantine(), "commit", {"confirmed": False}),
         lambda: (a_quarantine(), "start", {"bad_snapshot": True}),
@@ -1803,6 +1877,7 @@ def test_no_public_method_ever_turns_either_flag_off(observations, elsewhere) ->
         lambda: (a_quarantine(), "start", {"not_operator": True}),
     ):
         quarantine, where, options = gate_case()
+        binds = not options.get("no_media_binding")
         before = (_flags(quarantine), quarantine.audit(), len(quarantine.audit()))
         flow = workflow(observations, quarantine=quarantine)
         good = descriptor()
@@ -1820,7 +1895,7 @@ def test_no_public_method_ever_turns_either_flag_off(observations, elsewhere) ->
                 flow.commit(
                     good,
                     elsewhere if options.get("elsewhere") else observations,
-                    media_binding_holds=True,
+                    media_binding_holds=binds,
                     session_id=SESSION,
                     acquisition=Opens(channel=NOT_A_CHANNEL)
                     if options.get("bad_channel")
@@ -1840,7 +1915,7 @@ def test_no_public_method_ever_turns_either_flag_off(observations, elsewhere) ->
                     if options.get("bad_snapshot")
                     else good,
                     observations,
-                    media_binding_holds=True,
+                    media_binding_holds=binds,
                     session_id="another" if options.get("other_sitting") else SESSION,
                     started_by_operator=not options.get("not_operator"),
                 )
@@ -1848,6 +1923,14 @@ def test_no_public_method_ever_turns_either_flag_off(observations, elsewhere) ->
             pass
         after = (_flags(quarantine), quarantine.audit(), len(quarantine.audit()))
         assert after == before, f"{where} {options} changed the quarantine"
+        reached.update(
+            entry.gate for entry in flow.audit() if entry.gate is not None
+        )
+
+    assert reached == set(RecoveryGate), (
+        "every gate's refusal must be driven across a quarantine comparison; "
+        f"never reached: {sorted(gate.value for gate in set(RecoveryGate) - reached)}"
+    )
 
     # Every `MigrationLedger` method, and `preflight` itself.
     ledger = MigrationLedger()
@@ -2126,24 +2209,26 @@ def test_a_hand_built_verdict_does_not_authorise_a_migration() -> None:
     preflight ever having run.
     """
 
+    judged_medium = a_quarantine(quarantined=False)
+
     ledger = MigrationLedger()
     forged = PreflightVerdict(None)
 
     assert verdict_was_minted_here(forged) is False
     with pytest.raises(RecoveryRefused) as refused:
-        ledger.may_migrate(forged, quarantine=a_quarantine(quarantined=False))
+        ledger.may_migrate(forged, quarantine=judged_medium)
     assert refused.value.refusal is Refusal.VERDICT_NOT_MINTED_BY_A_PREFLIGHT
 
     with pytest.raises(RecoveryRefused):
         ledger.note_snapshot_written(
             forged,
             descriptor(),
-            quarantine=a_quarantine(quarantined=False),
+            quarantine=judged_medium,
         )
     assert ledger.audit() == ()
 
     minted = preflight(
-        a_quarantine(quarantined=False),
+        judged_medium,
         snapshot=descriptor(),
         capacity=capacity(),
         current_schema=1,
@@ -2153,7 +2238,7 @@ def test_a_hand_built_verdict_does_not_authorise_a_migration() -> None:
         image_digest_holds=True,
     )
     assert verdict_was_minted_here(minted) is True
-    assert ledger.may_migrate(minted, quarantine=a_quarantine(quarantined=False)) is True
+    assert ledger.may_migrate(minted, quarantine=judged_medium) is True
 
 
 def test_a_snapshot_is_recorded_as_written_only_after_the_caller_acted() -> None:
@@ -2164,10 +2249,12 @@ def test_a_snapshot_is_recorded_as_written_only_after_the_caller_acted() -> None
     not occurred and might never occur.
     """
 
+    judged_medium = a_quarantine(quarantined=False)
+
     ledger = MigrationLedger()
     judged = descriptor()
     minted = preflight(
-        a_quarantine(quarantined=False),
+        judged_medium,
         snapshot=judged,
         capacity=capacity(),
         current_schema=1,
@@ -2177,10 +2264,10 @@ def test_a_snapshot_is_recorded_as_written_only_after_the_caller_acted() -> None
         image_digest_holds=True,
     )
 
-    assert ledger.may_migrate(minted, quarantine=a_quarantine(quarantined=False)) is True
+    assert ledger.may_migrate(minted, quarantine=judged_medium) is True
     assert ledger.audit() == ()  # permission granted; nothing written yet
 
-    ledger.note_snapshot_written(minted, judged, quarantine=a_quarantine(quarantined=False))
+    ledger.note_snapshot_written(minted, judged, quarantine=judged_medium)
     assert ledger.audit()[-1].event is SnapshotAuditEvent.SNAPSHOT_WRITTEN
 
     # **The verdict names the snapshot it judged.** It used to name none, so
@@ -2190,7 +2277,7 @@ def test_a_snapshot_is_recorded_as_written_only_after_the_caller_acted() -> None
     # objects were real and the verdict legitimately minted; nothing tied them.
     other = descriptor(integrity=SnapshotIntegrity.FAILED, schema_version=2)
     with pytest.raises(RecoveryRefused) as refused:
-        ledger.note_snapshot_written(minted, other, quarantine=a_quarantine(quarantined=False))
+        ledger.note_snapshot_written(minted, other, quarantine=judged_medium)
     assert refused.value.refusal is Refusal.VERDICT_NOT_MINTED_BY_A_PREFLIGHT
 
     # An equal-but-distinct descriptor is not the one that was judged either:
@@ -2204,7 +2291,7 @@ def test_a_snapshot_is_recorded_as_written_only_after_the_caller_acted() -> None
     # antipattern this repository has now hit five times, in the one test whose
     # comment says the tie is identity.
     unspent = preflight(
-        a_quarantine(quarantined=False),
+        judged_medium,
         snapshot=judged,
         capacity=capacity(),
         current_schema=1,
@@ -2216,7 +2303,7 @@ def test_a_snapshot_is_recorded_as_written_only_after_the_caller_acted() -> None
     twin = descriptor()
     assert twin == judged and twin is not judged
     with pytest.raises(RecoveryRefused) as tie:
-        ledger.note_snapshot_written(unspent, twin, quarantine=a_quarantine(quarantined=False))
+        ledger.note_snapshot_written(unspent, twin, quarantine=judged_medium)
     assert tie.value.refusal is Refusal.VERDICT_NOT_MINTED_BY_A_PREFLIGHT
 
     # And both methods exist, which the class docstring used to claim while
@@ -2491,8 +2578,10 @@ def test_the_token_cannot_be_read_off_a_verdict_and_reused() -> None:
     attribute — no attribute.
     """
 
+    judged_medium = a_quarantine(quarantined=False)
+
     refused = preflight(
-        a_quarantine(quarantined=False),
+        judged_medium,
         snapshot=descriptor(integrity=SnapshotIntegrity.FAILED),
         capacity=capacity(),
         current_schema=1,
@@ -2511,7 +2600,13 @@ def test_the_token_cannot_be_read_off_a_verdict_and_reused() -> None:
             if name == "__weakref__":
                 continue
             held = object.__getattribute__(verdict, name)
-            assert held is None or isinstance(held, PreflightCheck | tuple), name
+            # A check, the checks asked, the descriptor judged, or the
+            # quarantine judged — all things the caller already had. What is
+            # absent is anything that *says the verdict was minted*: there is
+            # no token to copy onto another one.
+            assert held is None or isinstance(
+                held, PreflightCheck | tuple | SnapshotDescriptor | Quarantine
+            ), name
 
     rebuilt = PreflightVerdict(None)
     assert rebuilt.may_migrate is True
@@ -2519,7 +2614,7 @@ def test_the_token_cannot_be_read_off_a_verdict_and_reused() -> None:
 
     ledger = MigrationLedger()
     with pytest.raises(RecoveryRefused) as error:
-        ledger.may_migrate(rebuilt, quarantine=a_quarantine(quarantined=False))
+        ledger.may_migrate(rebuilt, quarantine=judged_medium)
     assert error.value.refusal is Refusal.VERDICT_NOT_MINTED_BY_A_PREFLIGHT
     assert ledger.audit() == ()
 
@@ -3338,13 +3433,26 @@ QUARANTINE_DELATTR = Quarantine.__delattr__
 QUARANTINE_CLASS = {name: value for name, value in vars(Quarantine).items()}
 
 
-def _swallow(call, *args, **keywords) -> None:
-    """Drive it and keep going. A refusal is the ordinary outcome here."""
+def _swallow(call, *args, **keywords):
+    """Drive it and keep going. A refusal is the ordinary outcome here.
+
+    **`TypeError` is not caught**, and that is the whole of the lesson. It was,
+    and when `media_binding_holds` became a required keyword the four calls
+    below stopped passing it: every one died with "missing 1 required
+    keyword-only argument" *before entering the method*, and this swallowed it.
+    The guard whose docstring calls itself "the claim" then executed **one of
+    twenty-eight lines** of `_require_the_gates` and reached `COMMITTED` zero
+    times, across every row of its product, for as long as the split lasted.
+
+    A guard that swallows `TypeError` cannot tell "the module refused" from "I
+    called it wrong". The module's own type refusals are `TypeError` too, so
+    where one is expected it is asked for by name.
+    """
 
     try:
-        call(*args, **keywords)
-    except (RecoveryRefused, TypeError, AttributeError):
-        pass
+        return call(*args, **keywords)
+    except (RecoveryRefused, AttributeError):
+        return None
 
 
 def _whole_quarantine_state(rule: Quarantine) -> dict[str, object]:
@@ -3439,6 +3547,7 @@ def test_no_input_to_this_module_changes_anything_about_the_quarantine(
 
     binding = SessionBinding(host_fingerprint=host_fingerprint(observations), session_id=SESSION)
     drives = 0
+    committed = 0
     for (
         schema_version,
         container_version,
@@ -3450,6 +3559,7 @@ def test_no_input_to_this_module_changes_anything_about_the_quarantine(
         outcome,
         room,
         reports_hold,
+        media_binding,
     ) in product(
         (1, 2, 3),
         (1, 2),
@@ -3460,6 +3570,10 @@ def test_no_input_to_this_module_changes_anything_about_the_quarantine(
         (True, False),
         tuple(AttemptOutcome),
         (True, False),
+        (True, False),
+        # D8 gate 1's report. `media_binding_holds=False` reached a refusal
+        # branch no test watched the quarantine across, and a payload there
+        # cleared both flags with the suite green.
         (True, False),
     ):
         rule = a_quarantine(fenced=fenced, quarantined=quarantined)
@@ -3510,21 +3624,37 @@ def test_no_input_to_this_module_changes_anything_about_the_quarantine(
         for _sitting in (1, 2):
             flow = RecoveryWorkflow(rule, binding, session_id=SESSION)
             _swallow(
-                flow.start, snap, observations, session_id=SESSION, started_by_operator=by_operator
-            )
-            _swallow(flow.open_trial, snap, observations, session_id=SESSION)
-            _swallow(
-                flow.commit,
+                flow.start,
                 snap,
                 observations,
+                media_binding_holds=True,
                 session_id=SESSION,
-                acquisition=Opens(outcome),
-                confirmed=confirmed,
+                started_by_operator=by_operator,
+            )
+            _swallow(
+                flow.open_trial,
+                snap,
+                observations,
+                media_binding_holds=True,
+                session_id=SESSION,
+            )
+            committed += (
+                _swallow(
+                    flow.commit,
+                    snap,
+                    observations,
+                    media_binding_holds=media_binding,
+                    session_id=SESSION,
+                    acquisition=Opens(outcome),
+                    confirmed=confirmed,
+                )
+                is not None
             )
             _swallow(
                 flow.commit,
                 snap,
                 observations,
+                media_binding_holds=media_binding,
                 session_id=SESSION,
                 acquisition=Opens(outcome),
                 confirmed=confirmed,
@@ -3601,7 +3731,12 @@ def test_no_input_to_this_module_changes_anything_about_the_quarantine(
         )
         assert _quarantine_defences_intact(rule) == (True,) * 7
 
-    assert drives == 3 * 2 * 3 * 2 * 2 * 2 * 2 * 2 * 2 * len(AttemptOutcome)
+    assert drives == 3 * 2 * 3 * 2 * 2 * 2 * 2 * 2 * 2 * 2 * len(AttemptOutcome)
+    # **And it reached the thing it guards.** The drive was silently dead on
+    # the workflow for as long as `_swallow` caught `TypeError`, so the count
+    # is asserted rather than assumed: a guard that never commits says nothing
+    # about what a commit does to the quarantine.
+    assert committed > 0, "the drive never reached a commit"
 
 
 def test_this_module_performs_no_io_when_it_actually_runs() -> None:
@@ -4049,9 +4184,11 @@ def test_one_preflight_records_one_write_in_any_ledger() -> None:
     why the spent-ness is kept module-side rather than per-ledger.
     """
 
-    snapshot = descriptor()
+    judged_medium = a_quarantine(quarantined=False)
+
+    snapshot = descriptor(fingerprint="snapshot-fingerprint-any-ledger")
     verdict = preflight(
-        a_quarantine(quarantined=False),
+        judged_medium,
         snapshot=snapshot,
         capacity=capacity(),
         current_schema=1,
@@ -4061,7 +4198,7 @@ def test_one_preflight_records_one_write_in_any_ledger() -> None:
         image_digest_holds=True,
     )
     first, second = MigrationLedger(), MigrationLedger()
-    first.note_snapshot_written(verdict, snapshot, quarantine=a_quarantine(quarantined=False))
+    first.note_snapshot_written(verdict, snapshot, quarantine=judged_medium)
     assert len(first.audit()) == 1
 
     for ledger in (first, second):
@@ -4069,7 +4206,7 @@ def test_one_preflight_records_one_write_in_any_ledger() -> None:
             ledger.note_snapshot_written(
                 verdict,
                 snapshot,
-                quarantine=a_quarantine(quarantined=False),
+                quarantine=judged_medium,
             )
         assert refused.value.refusal is Refusal.VERDICT_ALREADY_SPENT
     assert len(first.audit()) == 1
@@ -4090,9 +4227,11 @@ def test_the_write_record_asks_whether_the_verdict_passed() -> None:
     that names the presented snapshot. Only this clause can refuse it.
     """
 
+    judged_medium = a_quarantine(quarantined=False)
+
     snapshot = descriptor(integrity=SnapshotIntegrity.FAILED)
     refused_verdict = preflight(
-        a_quarantine(quarantined=False),
+        judged_medium,
         snapshot=snapshot,
         capacity=capacity(),
         current_schema=1,
@@ -4112,7 +4251,7 @@ def test_the_write_record_asks_whether_the_verdict_passed() -> None:
         ledger.note_snapshot_written(
             refused_verdict,
             snapshot,
-            quarantine=a_quarantine(quarantined=False),
+            quarantine=judged_medium,
         )
     assert refused.value.refusal is Refusal.VERDICT_NOT_MINTED_BY_A_PREFLIGHT
     assert ledger.audit() == ()
@@ -4356,7 +4495,7 @@ def test_a_preflight_is_free_so_spending_is_keyed_on_the_snapshot() -> None:
     """
 
     healthy = a_quarantine(quarantined=False)
-    snapshot = descriptor()
+    snapshot = descriptor(fingerprint="snapshot-fingerprint-keyed-on-value")
     ledger = MigrationLedger()
 
     def judged():
@@ -4404,8 +4543,10 @@ def test_a_passing_verdict_that_skipped_a_check_is_refused() -> None:
     check.
     """
 
+    judged_medium = a_quarantine(quarantined=False)
+
     verdict = preflight(
-        a_quarantine(quarantined=False),
+        judged_medium,
         snapshot=descriptor(),
         capacity=capacity(),
         current_schema=1,
@@ -4426,9 +4567,9 @@ def test_a_passing_verdict_that_skipped_a_check_is_refused() -> None:
     # recording one, so a verdict `may_migrate` had just refused was still
     # accepted as the record of a write.
     for act in (
-        lambda: ledger.may_migrate(verdict, quarantine=a_quarantine(quarantined=False)),
+        lambda: ledger.may_migrate(verdict, quarantine=judged_medium),
         lambda: ledger.note_snapshot_written(
-            verdict, verdict._snapshot, quarantine=a_quarantine(quarantined=False)
+            verdict, verdict._snapshot, quarantine=judged_medium
         ),
     ):
         with pytest.raises(RecoveryRefused) as refused:
@@ -4845,10 +4986,16 @@ def test_no_rendering_path_hands_back_what_the_repr_redacts(observations) -> Non
 
     `CapacityReport` stopped being a dataclass, because the claim about its
     figures was a claim about a **boundary** and a `__repr__` is a rendering.
-    Everything else refuses to be bulk-serialised. What `SnapshotDescriptor`
-    and `SnapshotAuditEntry` still answer field by field is deliberate: the
-    fingerprint is this design's opaque answer to "which snapshot", and
-    ADR-0010 permits that classification in an audit.
+    Everything refuses `__getstate__`, `copy` and `pickle`.
+
+    `SnapshotDescriptor` and `SnapshotAuditEntry` remain dataclasses, so
+    `dataclasses.asdict`, `astuple` and `vars()` still answer field by field —
+    **deliberately**, and the messages on their refusals were corrected to say
+    "is not serialisable" rather than "does not hand back its fields", which
+    was false of exactly those three paths. The fingerprint is this design's
+    opaque answer to "which snapshot" and ADR-0010 permits that
+    classification in an audit; the figures are neither, which is why only one
+    of the three classes stopped being a dataclass.
     """
 
     canary_fingerprint = "CANARY-FINGERPRINT-AAAA"
@@ -5263,3 +5410,285 @@ def test_a_medium_with_exactly_enough_room_is_not_refused() -> None:
         image_digest_holds=True,
     )
     assert verdict.may_migrate is True
+
+
+# --------------------------------------------------------------------------
+# The seventh review
+# --------------------------------------------------------------------------
+
+
+def test_a_verdict_is_spent_against_the_medium_its_preflight_judged() -> None:
+    """R7: the ledger re-read whatever quarantine the call handed it.
+
+    The doc said it re-reads "as the workflow's gates do", and the workflow
+    binds its quarantine at construction and checks the sitting. The ledger had
+    no equivalent, so a verdict minted over one medium in one sitting was spent
+    against a different medium in a different sitting that had never been
+    preflighted at all.
+    """
+
+    judged_medium, snapshot, verdict = a_migration()
+    elsewhere = Quarantine(
+        session_id="another-sitting", boot_medium_identity="usb-SN-SOMEONE-ELSE"
+    )
+    elsewhere.observe(Device(identity="usb-SN-SOMEONE-ELSE", device_class=DeviceClass.BOOT_MEDIUM))
+
+    ledger = MigrationLedger()
+    for act in (
+        lambda: ledger.may_migrate(verdict, quarantine=elsewhere),
+        lambda: ledger.note_snapshot_written(verdict, snapshot, quarantine=elsewhere),
+    ):
+        with pytest.raises(RecoveryRefused) as refused:
+            act()
+        assert refused.value.refusal is Refusal.MEDIUM_MOVED_SINCE_THE_PREFLIGHT
+    assert ledger.audit() == ()
+    assert ledger.may_migrate(verdict, quarantine=judged_medium) is True
+
+
+def test_a_refusal_names_the_check_the_run_actually_stopped_at() -> None:
+    """R7: the completeness rule ran on the passing half only.
+
+    So a rebound `PREFLIGHT_ORDER` produced a **refusal** whose classification
+    was a check the run never reached — and that classification is the whole of
+    what an operator is told and what the ledger records, permanently.
+    """
+
+    judged_medium, snapshot, _ = a_migration(
+        snapshot=descriptor(integrity=SnapshotIntegrity.FAILED)
+    )
+    honest = preflight(
+        judged_medium,
+        snapshot=snapshot,
+        capacity=capacity(),
+        current_schema=1,
+        target_schema=2,
+        binding_holds=True,
+        generation_holds=True,
+        image_digest_holds=True,
+    )
+    assert honest.refused_by is PreflightCheck.SNAPSHOT_INTEGRITY
+    assert honest.evaluated[len(honest.evaluated) - 1] is PreflightCheck.SNAPSHOT_INTEGRITY
+
+    object.__setattr__(honest, "_evaluated", (PreflightCheck.BINDING,))
+    ledger = MigrationLedger()
+    with pytest.raises(RecoveryRefused) as refused:
+        ledger.may_migrate(honest, quarantine=judged_medium)
+    assert refused.value.refusal is Refusal.VERDICT_DID_NOT_ASK_EVERY_CHECK
+    assert ledger.audit() == ()
+
+
+def test_the_gates_cannot_be_reached_without_all_of_them(observations) -> None:
+    """R7: the clearance's issuer sat at the reach it was built to blunt.
+
+    `_require_the_gates` is a bound method on every instance, exactly like
+    `_sealed_assign`, and its `acquisition` defaulted to `None` — so a review
+    called it directly, got a clearance without D8's gate 2 or gate 4, moved
+    the stage, and minted an accepted candidate for schema 99 on an audit
+    byte-identical to a legitimate commit.
+
+    Both are required arguments now, and both are asked before the clearance,
+    so reaching this method is passing all of D8. The residual limit is the one
+    this module states everywhere: `object.__setattr__` reaches everything, and
+    a determined caller can name `_GATES_JUST_PASSED`.
+    """
+
+    flow = workflow(observations)
+    snap = descriptor()
+    flow.start(
+        snap,
+        observations,
+        media_binding_holds=True,
+        session_id=SESSION,
+        started_by_operator=True,
+    )
+    flow.open_trial(snap, observations, media_binding_holds=True, session_id=SESSION)
+
+    with pytest.raises(TypeError, match="acquisition"):
+        flow._require_the_gates(
+            snap, observations, session_id=SESSION, media_binding_holds=True
+        )
+    # `acquisition=None` is honest for `start` and `open_trial`, so the
+    # clearance it issues says so: it cannot reach `COMMITTED`.
+    flow._require_the_gates(
+        snap,
+        observations,
+        session_id=SESSION,
+        media_binding_holds=True,
+        acquisition=None,
+        confirmed=None,
+    )
+    with pytest.raises(AttributeError, match="reached by passing the gates"):
+        flow._sealed_assign("_stage", RecoveryStage.COMMITTED)
+    with pytest.raises(AttributeError, match="gates passed"):
+        flow._sealed_assign("_candidate", RecoveryCandidate(99, FINGERPRINT))
+    assert flow.stage is RecoveryStage.TRIAL_OPEN
+
+    with pytest.raises(RecoveryRefused) as refused:
+        flow._require_the_gates(
+            snap,
+            observations,
+            session_id=SESSION,
+            media_binding_holds=True,
+            acquisition=Opens(),
+            confirmed=False,
+        )
+    assert refused.value.refusal is Refusal.GATE_REFUSED
+    assert flow.audit()[-1].gate is RecoveryGate.OPERATOR_CONFIRMATION
+
+
+def test_one_write_is_one_record_even_after_the_snapshot_is_dropped() -> None:
+    """R7: "Once" was decided by the garbage collector.
+
+    `_SNAPSHOTS_RECORDED` was a `WeakSet` of descriptors, so dropping the last
+    reference evaporated the entry and an equal descriptor recorded again —
+    five times, through the public API alone. And the key said nothing about
+    whose medium it was, so one sitting's entry refused an unrelated later
+    sitting's own write.
+    """
+
+    import gc
+
+    judged_medium, snapshot, verdict = a_migration(
+        snapshot=descriptor(fingerprint="snapshot-fingerprint-dropped")
+    )
+    MigrationLedger().note_snapshot_written(verdict, snapshot, quarantine=judged_medium)
+
+    del snapshot, verdict
+    gc.collect()
+
+    again = descriptor(fingerprint="snapshot-fingerprint-dropped")
+    with pytest.raises(RecoveryRefused) as refused:
+        MigrationLedger().note_snapshot_written(
+            preflight(
+                judged_medium,
+                snapshot=again,
+                capacity=capacity(),
+                current_schema=1,
+                target_schema=2,
+                binding_holds=True,
+                generation_holds=True,
+                image_digest_holds=True,
+            ),
+            again,
+            quarantine=judged_medium,
+        )
+    assert refused.value.refusal is Refusal.VERDICT_ALREADY_SPENT
+
+    # And a **different sitting** is a different question, so its own write is
+    # its own: one sitting's residue does not decide another's audit.
+    other = Quarantine(session_id="a-later-sitting", boot_medium_identity=MEDIUM.identity)
+    other.observe(MEDIUM)
+    theirs = descriptor(fingerprint="snapshot-fingerprint-dropped")
+    ledger = MigrationLedger()
+    ledger.note_snapshot_written(
+        preflight(
+            other,
+            snapshot=theirs,
+            capacity=capacity(),
+            current_schema=1,
+            target_schema=2,
+            binding_holds=True,
+            generation_holds=True,
+            image_digest_holds=True,
+        ),
+        theirs,
+        quarantine=other,
+    )
+    assert len(ledger.audit()) == 1
+
+
+def test_an_acquisition_that_ends_the_workflow_is_refused_in_this_vocabulary(
+    observations,
+) -> None:
+    """R7: `attempt()` is caller code called mid-gate.
+
+    A review interrupted the workflow from inside it and the stage move then
+    raised `AttributeError` from the seal — outside this module's refusal
+    vocabulary, so a caller writing `except RecoveryRefused` got a crash.
+    Fail-closed either way; `WORKFLOW_ALREADY_FINISHED` exists for the case.
+    """
+
+    flow = workflow(observations)
+    snap = descriptor()
+    flow.start(
+        snap,
+        observations,
+        media_binding_holds=True,
+        session_id=SESSION,
+        started_by_operator=True,
+    )
+    flow.open_trial(snap, observations, media_binding_holds=True, session_id=SESSION)
+
+    class EndsTheWorkflow(Opens):
+        def attempt(self):
+            flow.interrupt(session_id=SESSION)
+            return super().attempt()
+
+    with pytest.raises(RecoveryRefused) as refused:
+        flow.commit(
+            snap,
+            observations,
+            media_binding_holds=True,
+            session_id=SESSION,
+            acquisition=EndsTheWorkflow(),
+            confirmed=True,
+        )
+    assert refused.value.refusal is Refusal.WORKFLOW_ALREADY_FINISHED
+    assert flow.stage is RecoveryStage.INTERRUPTED
+    assert flow.holds(RecoveryCandidate(1, FINGERPRINT)) is False
+
+
+def test_the_capacity_refusal_holds_no_measurement() -> None:
+    """R7: the figures rendered in the constructor's own traceback.
+
+    A caller whose free-space probe returned `None` got a `TypeError` whose
+    captured-locals traceback carried the **other**, real figure — on an
+    ordinary path, in the constructor of the class whose docstring says these
+    numbers never render. The refusal is raised from a frame holding two
+    booleans now.
+    """
+
+    import traceback
+
+    for arguments in (
+        {"required": 424242, "available": None},
+        {"required": "x", "available": 919191},
+    ):
+        with pytest.raises(TypeError) as raised:
+            CapacityReport(**arguments)
+        # **The refusing frame.** `CapacityReport.__init__` holds what it was
+        # handed — a frame cannot forget its own argument, which this design
+        # states as a limit rather than claiming away — so the assertion is
+        # about the frame the `TypeError` is raised from, which used to hold
+        # both figures and now holds two booleans.
+        summary = traceback.TracebackException.from_exception(
+            raised.value, capture_locals=True
+        )
+        by_name = {frame.name: frame for frame in summary.stack}
+        assert "_require_two_measurements" in by_name
+        rendered = repr(by_name["_require_two_measurements"].locals)
+        assert "424242" not in rendered, rendered
+        assert "919191" not in rendered, rendered
+        assert set(by_name["_require_two_measurements"].locals or {}) == {
+            "required_is_a_count",
+            "available_is_a_count",
+        }
+
+
+def test_a_workflow_stand_in_does_not_make_a_candidate_apply(observations) -> None:
+    """R7: `candidate_applies_to` pinned one operand and its docstring two.
+
+    "A constructed one, a subclassed one and one from another workflow are all
+    answered `False`" is unconditional, and an object with a `holds` that
+    returns `True` answered `True` for a candidate nobody minted.
+    """
+
+    class NotAWorkflow:
+        def holds(self, candidate) -> bool:
+            return True
+
+    assert candidate_applies_to(NotAWorkflow(), RecoveryCandidate(99, FINGERPRINT)) is False
+
+    real = workflow(observations)
+    candidate = run_to_commit(real, observations)
+    assert candidate_applies_to(real, candidate) is True
