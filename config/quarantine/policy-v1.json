@@ -1,0 +1,29 @@
+{
+  "schema": "azazel-boot/quarantine-policy@1",
+  "version": "quarantine.v1",
+  "comment": "The host-storage quarantine, as a versioned artifact. A build pins this by its version; the payload carries that version in its artifact record. Nothing here has ever run.",
+  "early_hooks": [
+    "az-quarantine-block-devices",
+    "az-disable-resume",
+    "az-disable-automount",
+    "az-disable-volume-assembly",
+    "az-mark-boot-medium"
+  ],
+  "forbidden_actions": [
+    "automount",
+    "writable_mount",
+    "swap_activation",
+    "resume_from_hibernation",
+    "fsck",
+    "journal_replay",
+    "lvm_assembly",
+    "md_assembly",
+    "zfs_import",
+    "indexing",
+    "firmware_update"
+  ],
+  "excluded_from_the_zero_write_claim": [
+    "firmware_nvram_boot_entry",
+    "firmware_nvram_boot_order"
+  ]
+}
