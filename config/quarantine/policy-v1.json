@@ -9,7 +9,8 @@
     "az-disable-volume-assembly",
     "az-mark-boot-medium"
   ],
-  "forbidden_actions": [
+  "actions": [
+    "read",
     "automount",
     "writable_mount",
     "swap_activation",
@@ -20,10 +21,25 @@
     "md_assembly",
     "zfs_import",
     "indexing",
-    "firmware_update"
+    "firmware_update",
+    "export_write"
+  ],
+  "blocked_on_a_quarantined_device": "every action above, including read",
+  "never_allowed_anywhere": [
+    "firmware_update",
+    "resume_from_hibernation"
+  ],
+  "unblockable_by_approval": [
+    "export_write"
   ],
   "excluded_from_the_zero_write_claim": [
     "firmware_nvram_boot_entry",
     "firmware_nvram_boot_order"
-  ]
+  ],
+  "initramfs_requirements": {
+    "quarantine_hook_runs_first": true,
+    "quarantine_persists_into_userspace": true,
+    "resume_enabled": false,
+    "automount_rules": []
+  }
 }

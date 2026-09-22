@@ -1,11 +1,15 @@
-"""The initramfs contract, checked against the built artifact rather than hoped for.
+"""The initramfs contract, and the pinned artifact a build consumes.
 
 `ADR-0002` C5 — deterministic control of the initramfs — is the criterion most
 likely to eliminate a build tool, and the reason is in `verify_initramfs`: the
 quarantine has to be *first*, the hook set has to be exactly what Boot pinned,
-and a tool that injects its own hook or reorders them produces an image that is
-not a Boot image. Expressing that as a check on the artifact means a builder
-cannot satisfy it by documentation.
+and it has to survive into userspace.
+
+An adversarial review found two things this file now checks. The policy file's
+action list was asserted by nothing and had already drifted from the module, so
+a reader of the pinned artifact would have drawn the wrong conclusion about what
+is blocked. And the first refusal masked the rest, so a version-string typo hid
+resume being enabled — the fault that consumes the owner's hibernation image.
 """
 
 from __future__ import annotations
@@ -18,7 +22,11 @@ import pytest
 from azazel_boot.quarantine import (
     EARLY_HOOKS,
     EXCLUDED_FROM_THE_ZERO_WRITE_CLAIM,
+    NEVER_ALLOWED_ANYWHERE,
     POLICY_VERSION,
+    UNBLOCKABLE_BY_APPROVAL,
+    WRITING_ACTIONS,
+    Action,
     ImageRefused,
     InitramfsManifest,
     Refusal,
@@ -28,30 +36,65 @@ from azazel_boot.quarantine import (
 POLICY_FILE = Path(__file__).resolve().parents[2] / "config" / "quarantine" / "policy-v1.json"
 
 
+@pytest.fixture(scope="module")
+def policy() -> dict:
+    return json.loads(POLICY_FILE.read_text(encoding="utf-8"))
+
+
 def manifest(**overrides) -> InitramfsManifest:
     attributes = {
         "policy_version": POLICY_VERSION,
         "hooks": EARLY_HOOKS,
         "resume_enabled": False,
         "automount_rules": (),
+        "quarantine_persists_into_userspace": True,
     }
     attributes.update(overrides)
     return InitramfsManifest(**attributes)
 
 
-def test_the_pinned_policy_file_and_the_module_agree() -> None:
-    """A build pins the file; the running code implements it. They cannot drift."""
+# --- the pinned artifact and the module may not drift ----------------------
 
-    document = json.loads(POLICY_FILE.read_text(encoding="utf-8"))
-    assert document["version"] == POLICY_VERSION
-    assert tuple(document["early_hooks"]) == EARLY_HOOKS
-    assert tuple(document["excluded_from_the_zero_write_claim"]) == (
+
+def test_the_pinned_policy_file_and_the_module_agree_on_every_field(policy: dict) -> None:
+    assert policy["version"] == POLICY_VERSION
+    assert tuple(policy["early_hooks"]) == EARLY_HOOKS
+    assert tuple(policy["excluded_from_the_zero_write_claim"]) == (
         EXCLUDED_FROM_THE_ZERO_WRITE_CLAIM
     )
+    assert {member.value for member in Action} == set(policy["actions"])
+    assert {member.value for member in NEVER_ALLOWED_ANYWHERE} == set(
+        policy["never_allowed_anywhere"]
+    )
+    assert {member.value for member in UNBLOCKABLE_BY_APPROVAL} == set(
+        policy["unblockable_by_approval"]
+    )
+
+
+def test_the_policy_file_states_the_initramfs_requirements_the_module_checks(
+    policy: dict,
+) -> None:
+    requirements = policy["initramfs_requirements"]
+    assert requirements["quarantine_hook_runs_first"] is True
+    assert requirements["quarantine_persists_into_userspace"] is True
+    assert requirements["resume_enabled"] is False
+    assert requirements["automount_rules"] == []
+
+
+def test_every_action_but_read_is_a_writing_action() -> None:
+    """Dropping a member from this set would silently delete its tests."""
+
+    assert {member.value for member in WRITING_ACTIONS} == {
+        member.value for member in Action
+    } - {"read"}
+    assert len(WRITING_ACTIONS) == len(Action) - 1
 
 
 def test_the_quarantine_hook_is_the_first_one() -> None:
     assert EARLY_HOOKS[0] == "az-quarantine-block-devices"
+
+
+# --- what a built image must satisfy ---------------------------------------
 
 
 def test_a_conforming_manifest_is_accepted() -> None:
@@ -87,7 +130,18 @@ def test_a_missing_hook_is_refused(index: int) -> None:
     hooks = tuple(hook for position, hook in enumerate(EARLY_HOOKS) if position != index)
     with pytest.raises(ImageRefused) as refused:
         verify_initramfs(manifest(hooks=hooks))
-    assert refused.value.refusal is Refusal.HOOK_MISSING
+    assert Refusal.HOOK_MISSING in {fault[0] for fault in refused.value.faults}
+
+
+def test_an_empty_hook_list_is_refused_without_an_index_error() -> None:
+    with pytest.raises(ImageRefused) as refused:
+        verify_initramfs(manifest(hooks=()))
+    assert Refusal.HOOK_MISSING in {fault[0] for fault in refused.value.faults}
+
+
+def test_a_duplicated_hook_is_refused() -> None:
+    with pytest.raises(ImageRefused):
+        verify_initramfs(manifest(hooks=(EARLY_HOOKS[0], *EARLY_HOOKS)))
 
 
 def test_an_image_built_against_another_policy_version_is_refused() -> None:
@@ -108,6 +162,34 @@ def test_an_automount_rule_in_the_image_is_refused() -> None:
     with pytest.raises(ImageRefused) as refused:
         verify_initramfs(manifest(automount_rules=("99-helpful.rules",)))
     assert refused.value.refusal is Refusal.AUTOMOUNT_RULE_PRESENT
+
+
+def test_a_quarantine_that_does_not_survive_into_userspace_is_refused() -> None:
+    """Threat model section 3.1: re-establishing it in userspace starts too late."""
+
+    with pytest.raises(ImageRefused) as refused:
+        verify_initramfs(manifest(quarantine_persists_into_userspace=False))
+    assert refused.value.refusal is Refusal.QUARANTINE_NOT_PERSISTENT
+
+
+def test_a_trivial_fault_does_not_mask_a_dangerous_one() -> None:
+    """A version typo must not hide resume being enabled."""
+
+    with pytest.raises(ImageRefused) as refused:
+        verify_initramfs(
+            manifest(
+                policy_version="typo",
+                resume_enabled=True,
+                automount_rules=("99-helpful.rules",),
+            )
+        )
+    found = {fault[0] for fault in refused.value.faults}
+    assert {
+        Refusal.RESUME_ENABLED,
+        Refusal.AUTOMOUNT_RULE_PRESENT,
+        Refusal.WRONG_POLICY_VERSION,
+    } <= found
+    assert refused.value.refusal is Refusal.RESUME_ENABLED
 
 
 def test_firmware_nvram_changes_are_named_as_excluded_rather_than_prevented() -> None:

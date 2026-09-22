@@ -15,7 +15,11 @@ Related: [Threat model](threat-model.md) section 3 ·
 `config/quarantine/policy-v1.json` is the versioned artifact a build pins, and
 `quarantine.v1` is the value the artifact record carries as
 `quarantine_policy_version`. `azazel_boot.quarantine` implements it, and a test
-asserts the two cannot drift apart.
+asserts **every field** of the file against the module: the version, the hook
+list, the full action set, the actions refused everywhere, the one action an
+approval can unblock, the NVRAM exclusions and the initramfs requirements. An
+earlier version of that test checked three fields, and the file had already
+drifted from the module on a fourth.
 
 The policy has two halves: what a built initramfs must look like, and how the
 running rule decides.
@@ -34,8 +38,15 @@ running rule decides.
 is not the quarantine, which is missing one, which carries a hook Boot did not
 pin, which has resume enabled, or which ships an automount rule.
 
-This is [ADR-0002](adr/0002-image-builder.md) C5 expressed as a check on the
-artifact rather than a hope about the builder. By the time a general-purpose
+`verify_initramfs` reports **every** fault it finds, worst first, rather than
+stopping at the first: a version-string typo must not mask resume being enabled.
+
+This is [ADR-0002](adr/0002-image-builder.md) C5 written as a condition an image
+either meets or does not. It is **not yet a check performed on a built
+initramfs**: nothing in this repository produces a manifest from a real one, so
+today a builder satisfies it by filling in a structure. Producing the manifest
+from the artifact is what would turn this from a contract into evidence, and
+that work has not been done. By the time a general-purpose
 userspace is running, udev has automounted, LVM and md have scanned, systemd has
 resumed and a filesystem driver has replayed a dirty journal — each of those is
 a write, and each happens before any Boot policy code would run
@@ -56,26 +67,57 @@ identity is not the booted medium's is quarantined.
 **An unobserved device is blocked.** A device with no disposition is not a
 device with no rule.
 
+**A disposition never improves.** Once quarantined, a device stays quarantined
+for the session, even if it later presents itself as the medium. Refusing the
+medium is a broken product; allowing a host write is a broken promise, and only
+one of those is recoverable. Once the medium is bound, a second device asserting
+its identity is quarantined.
+
+**Two actions are refused everywhere, the medium included**: running a firmware
+updater, and resuming from a hibernation image. The threat model forbids a
+firmware updater without scoping it to host devices, and it is the most direct
+route to the firmware NVRAM changes the same document declares unpreventable.
+
 | Device | What is allowed |
 | --- | --- |
-| the booted medium | its own operations |
-| host storage | nothing, unless it is the approved export target |
+| the booted medium | its own operations, except the two refused everywhere |
+| host storage | nothing, unless it is the currently approved export target |
 | a device that could not be classified | nothing |
 | a device never observed | nothing |
+
+**Reading host storage is blocked too.** The operator-initiated read-only
+inspection that [the threat model](threat-model.md) section 3 permits has **no
+implementation here**, and this module does not pretend to offer one.
+
+### What identity cannot defend against
+
+Identity is the only thing separating the medium from a host disk. An adversary
+with transient physical access who can present a device reporting the booted
+medium's stable identity *before the medium itself is seen* cannot be
+distinguished in software. What the rule does do is refuse a second claimant
+once the medium is bound, and never re-promote anything it has quarantined.
 
 ## 4. The export path
 
 Writing to host storage happens only through an export the operator explicitly
-approved. An approval names **one** target, carries a reason and a confirmation,
-and belongs to **one** session. It authorises an export write and nothing else —
-not a mount, not a repair. A second approval replaces the first rather than
-accumulating, and a new session starts with none:
-[the threat model](threat-model.md) section 3.2 requires that it is "never a
-persisted preference".
+approved. An approval names **one** target that has **actually appeared**,
+carries a reason and a confirmation, and belongs to **one** session. It
+authorises an export write and nothing else — not a mount, not a repair, not a
+read. A second approval replaces the first rather than accumulating, a new
+session starts with none, and an operator who changes their mind can withdraw
+one: [the threat model](threat-model.md) section 3.2 requires that it is "never
+a persisted preference".
 
-The audit keeps the device *class*, the action and the verdict. It does not keep
-a device identity — audit is for traceability, not a place to accumulate
-identifiers.
+**An approval does not survive the device re-appearing.** A dock pulled and
+replaced by another disk reporting the same identity is not the device that was
+approved, so any re-observation withdraws the approval naming it. An approval
+also cannot be armed in advance for a device that has never appeared.
+
+The audit keeps the **quarantine's own conclusion** — not the class the device
+claimed, which an impostor sets freely — with the action and the verdict, and it
+records approvals, their refusals and their withdrawals. It does not keep a
+device identity, and neither does any refusal message: those strings reach a
+console and a log on media that travels through uncontrolled hands.
 
 ## 5. What is excluded from the zero-write claim
 

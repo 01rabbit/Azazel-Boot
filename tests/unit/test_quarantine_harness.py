@@ -1,24 +1,34 @@
 """A whole session against synthetic block devices, with no machine involved.
 
-The harness below is a sequence of events a real session produces — boot, a
-hotplug, a dock, a resume from suspend, the USB being pulled — driven against
-the quarantine's decision logic. It is **simulation**, and it is kept strictly
-apart from hardware evidence: it can show that the rule blocks what it is meant
-to block, and it can show nothing whatsoever about a laptop.
+The harness is a sequence of events a real session produces — boot, a hotplug, a
+dock, a device pulled and replaced, a device that never announced itself —
+driven against the quarantine's decision logic. It is **simulation**, and it is
+kept strictly apart from hardware evidence: it can show that the rule blocks
+what it is meant to block, and it can show nothing whatsoever about a laptop.
 
 The program gate needs a hardware-in-the-loop record of zero content writes
 across a full session (`docs/threat-model.md` section 3.3). Nothing here is that
 record, and no document may describe the no-host-write property as verified
 until that record exists.
+
+Several tests exist because an adversarial review defeated the first version:
+an approval survived the device being replaced; an approval could be armed for a
+device that had never appeared; the medium was allowed to run a firmware
+updater; and every check could be skipped through the generated constructor.
 """
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
 from azazel_boot.quarantine import (
+    NEVER_ALLOWED_ANYWHERE,
+    UNBLOCKABLE_BY_APPROVAL,
     WRITING_ACTIONS,
     Action,
+    AuditEntry,
     Device,
     DeviceClass,
     Disposition,
@@ -29,16 +39,33 @@ from azazel_boot.quarantine import (
     Verdict,
 )
 
-BOOT_MEDIUM = Device(identity="usb-boot-medium", device_class=DeviceClass.BOOT_MEDIUM)
-INTERNAL_NVME = Device(identity="internal-nvme", device_class=DeviceClass.HOST_STORAGE)
+MEDIUM_ID = "usb-boot-medium"
+BOOT_MEDIUM = Device(identity=MEDIUM_ID, device_class=DeviceClass.BOOT_MEDIUM)
+HOST_NVME = Device(identity="host-nvme-SN-1", device_class=DeviceClass.HOST_STORAGE)
 DOCKED_DISK = Device(identity="dock-sata", device_class=DeviceClass.HOST_STORAGE)
 UNCLASSIFIABLE = Device(identity="unknown-bridge", device_class=DeviceClass.UNKNOWN)
 
+WRITING = sorted(WRITING_ACTIONS, key=lambda action: action.value)
+
 
 def a_quarantine() -> Quarantine:
-    quarantine = Quarantine(session_id="s1", boot_medium_identity=BOOT_MEDIUM.identity)
+    quarantine = Quarantine(session_id="s1", boot_medium_identity=MEDIUM_ID)
     quarantine.observe(BOOT_MEDIUM)
     return quarantine
+
+
+def approval(target: str, **overrides) -> ExportApproval:
+    attributes = {
+        "session_id": "s1",
+        "target_identity": target,
+        "reason": "hand the incident record to the machine's owner",
+        "confirmed": True,
+    }
+    attributes.update(overrides)
+    return ExportApproval(**attributes)
+
+
+# --- classification --------------------------------------------------------
 
 
 def test_the_boot_medium_is_recognised_by_identity() -> None:
@@ -48,28 +75,32 @@ def test_the_boot_medium_is_recognised_by_identity() -> None:
 def test_a_device_claiming_to_be_the_boot_medium_is_quarantined() -> None:
     """Identity decides. A class an impostor sets on itself does not."""
 
-    quarantine = a_quarantine()
     impostor = Device(identity="another-usb", device_class=DeviceClass.BOOT_MEDIUM)
-    assert quarantine.observe(impostor) is Disposition.QUARANTINED
+    assert a_quarantine().observe(impostor) is Disposition.QUARANTINED
 
 
-def test_an_internal_disk_present_at_boot_is_quarantined() -> None:
+def test_a_second_claimant_to_the_medium_identity_is_quarantined() -> None:
+    """Once the medium is bound, another device asserting it is not it."""
+
     quarantine = a_quarantine()
-    assert quarantine.observe(INTERNAL_NVME) is Disposition.QUARANTINED
+    second = Device(identity=MEDIUM_ID, device_class=DeviceClass.BOOT_MEDIUM)
+    quarantine._dispositions.pop(MEDIUM_ID)  # noqa: SLF001 - a device that never appeared
+    assert quarantine.observe(second) is Disposition.QUARANTINED
 
 
-@pytest.mark.parametrize("action", sorted(WRITING_ACTIONS, key=lambda a: a.value))
-def test_every_writing_action_against_an_internal_disk_is_blocked(action: Action) -> None:
+def test_a_disposition_never_improves() -> None:
+    """Refusing the medium is recoverable; allowing a host write is not."""
+
     quarantine = a_quarantine()
-    quarantine.observe(INTERNAL_NVME)
-    assert quarantine.evaluate(INTERNAL_NVME, action) is Verdict.BLOCKED
+    demoted = Device(identity=MEDIUM_ID, device_class=DeviceClass.HOST_STORAGE)
+    assert quarantine.observe(demoted) is Disposition.QUARANTINED
+    assert quarantine.observe(BOOT_MEDIUM) is Disposition.QUARANTINED
+    assert quarantine.evaluate(BOOT_MEDIUM, Action.WRITABLE_MOUNT) is Verdict.BLOCKED
 
 
-@pytest.mark.parametrize("action", sorted(WRITING_ACTIONS, key=lambda a: a.value))
-def test_an_unobserved_device_is_blocked_rather_than_guessed_at(action: Action) -> None:
-    """An unobserved device is not a device with no rule."""
-
-    assert a_quarantine().evaluate(UNCLASSIFIABLE, action) is Verdict.BLOCKED
+def test_host_storage_present_at_boot_is_quarantined() -> None:
+    quarantine = a_quarantine()
+    assert quarantine.observe(HOST_NVME) is Disposition.QUARANTINED
 
 
 def test_a_device_that_appears_after_boot_is_quarantined_on_appearance() -> None:
@@ -80,50 +111,81 @@ def test_a_device_that_appears_after_boot_is_quarantined_on_appearance() -> None
     assert quarantine.evaluate(DOCKED_DISK, Action.AUTOMOUNT) is Verdict.BLOCKED
 
 
-def test_a_full_session_writes_nothing_to_anything_that_is_not_the_medium() -> None:
-    """The simulation the hardware record will later have to confirm."""
+# --- what is blocked -------------------------------------------------------
+
+
+@pytest.mark.parametrize("action", WRITING, ids=lambda action: action.value)
+def test_every_writing_action_against_host_storage_is_blocked(action: Action) -> None:
+    quarantine = a_quarantine()
+    quarantine.observe(HOST_NVME)
+    assert quarantine.evaluate(HOST_NVME, action) is Verdict.BLOCKED
+
+
+def test_reading_host_storage_is_blocked_too() -> None:
+    """The operator-initiated read the threat model permits has no implementation."""
 
     quarantine = a_quarantine()
-    allowed_writes: list[tuple[str, str]] = []
-
-    # Boot: the internal disk is there from the start.
-    quarantine.observe(INTERNAL_NVME)
-    # A dock arrives mid-session, then a bridge nobody can classify.
-    for device in (DOCKED_DISK, UNCLASSIFIABLE):
-        quarantine.observe(device)
-    # Resume from suspend: the same devices re-appear, plus one that never
-    # announced itself at all.
-    never_observed = Device(identity="late-arrival", device_class=DeviceClass.HOST_STORAGE)
-
-    for device in (INTERNAL_NVME, DOCKED_DISK, UNCLASSIFIABLE, never_observed):
-        for action in WRITING_ACTIONS:
-            if quarantine.evaluate(device, action) is Verdict.ALLOWED:
-                allowed_writes.append((device.identity, action.value))
-
-    assert allowed_writes == [], (
-        f"the quarantine allowed writes it must refuse: {allowed_writes}"
-    )
+    quarantine.observe(HOST_NVME)
+    quarantine.approve_export(approval(HOST_NVME.identity))
+    assert quarantine.evaluate(HOST_NVME, Action.READ) is Verdict.BLOCKED
 
 
-def test_the_medium_itself_is_writable() -> None:
+@pytest.mark.parametrize("action", WRITING, ids=lambda action: action.value)
+def test_an_unobserved_device_is_blocked_rather_than_guessed_at(action: Action) -> None:
+    """An unobserved device is not a device with no rule."""
+
+    assert a_quarantine().evaluate(UNCLASSIFIABLE, action) is Verdict.BLOCKED
+
+
+@pytest.mark.parametrize(
+    "action", sorted(NEVER_ALLOWED_ANYWHERE, key=lambda a: a.value), ids=lambda a: a.value
+)
+def test_some_actions_are_refused_on_the_medium_too(action: Action) -> None:
+    """A firmware updater is forbidden without qualification, ours or not."""
+
+    assert a_quarantine().evaluate(BOOT_MEDIUM, action) is Verdict.BLOCKED
+
+
+def test_the_medium_is_otherwise_writable() -> None:
     """A quarantine that blocked its own medium would be a broken product."""
 
     assert a_quarantine().evaluate(BOOT_MEDIUM, Action.WRITABLE_MOUNT) is Verdict.ALLOWED
 
 
+def test_a_full_session_writes_nothing_to_anything_that_is_not_the_medium() -> None:
+    """The simulation the hardware record will later have to confirm."""
+
+    quarantine = a_quarantine()
+    allowed: list[tuple[str, str]] = []
+
+    quarantine.observe(HOST_NVME)
+    quarantine.observe(DOCKED_DISK)
+    quarantine.observe(UNCLASSIFIABLE)
+    never_observed = Device(identity="late-arrival", device_class=DeviceClass.HOST_STORAGE)
+
+    # The dock is pulled and something else arrives reporting the same identity.
+    quarantine.observe(DOCKED_DISK)
+    # Resume from suspend: everything re-appears.
+    for device in (HOST_NVME, UNCLASSIFIABLE):
+        quarantine.observe(device)
+
+    for device in (HOST_NVME, DOCKED_DISK, UNCLASSIFIABLE, never_observed):
+        for action in Action:
+            if quarantine.evaluate(device, action) is Verdict.ALLOWED:
+                allowed.append((device.identity, action.value))
+
+    assert allowed == [], f"the quarantine allowed what it must refuse: {allowed}"
+
+
+# --- the export approval ---------------------------------------------------
+
+
 def test_an_approved_export_writes_to_its_target_and_nothing_else() -> None:
     quarantine = a_quarantine()
-    quarantine.observe(INTERNAL_NVME)
+    quarantine.observe(HOST_NVME)
     quarantine.observe(DOCKED_DISK)
-    quarantine.approve_export(
-        ExportApproval(
-            session_id="s1",
-            target_identity=INTERNAL_NVME.identity,
-            reason="hand the incident record to the machine's owner",
-            confirmed=True,
-        )
-    )
-    assert quarantine.evaluate(INTERNAL_NVME, Action.EXPORT_WRITE) is Verdict.ALLOWED
+    quarantine.approve_export(approval(HOST_NVME.identity))
+    assert quarantine.evaluate(HOST_NVME, Action.EXPORT_WRITE) is Verdict.ALLOWED
     assert quarantine.evaluate(DOCKED_DISK, Action.EXPORT_WRITE) is Verdict.BLOCKED
 
 
@@ -131,113 +193,183 @@ def test_an_approval_does_not_widen_to_other_actions() -> None:
     """Approving an export approves an export, not a mount."""
 
     quarantine = a_quarantine()
-    quarantine.observe(INTERNAL_NVME)
-    quarantine.approve_export(
-        ExportApproval(
-            session_id="s1",
-            target_identity=INTERNAL_NVME.identity,
-            reason="export",
-            confirmed=True,
-        )
-    )
-    assert quarantine.evaluate(INTERNAL_NVME, Action.WRITABLE_MOUNT) is Verdict.BLOCKED
-    assert quarantine.evaluate(INTERNAL_NVME, Action.FSCK) is Verdict.BLOCKED
+    quarantine.observe(HOST_NVME)
+    quarantine.approve_export(approval(HOST_NVME.identity))
+    for action in set(WRITING_ACTIONS) - set(UNBLOCKABLE_BY_APPROVAL):
+        assert quarantine.evaluate(HOST_NVME, action) is Verdict.BLOCKED
+
+
+def test_an_approval_does_not_survive_the_device_reappearing() -> None:
+    """A device pulled and replaced is not the device that was approved."""
+
+    quarantine = a_quarantine()
+    quarantine.observe(DOCKED_DISK)
+    quarantine.approve_export(approval(DOCKED_DISK.identity))
+    assert quarantine.evaluate(DOCKED_DISK, Action.EXPORT_WRITE) is Verdict.ALLOWED
+    quarantine.observe(DOCKED_DISK)
+    assert quarantine.evaluate(DOCKED_DISK, Action.EXPORT_WRITE) is Verdict.BLOCKED
+
+
+def test_an_approval_cannot_be_armed_for_a_device_that_never_appeared() -> None:
+    quarantine = a_quarantine()
+    with pytest.raises(ExportRefused) as refused:
+        quarantine.approve_export(approval(HOST_NVME.identity))
+    assert refused.value.refusal is Refusal.UNOBSERVED_DEVICE
+    quarantine.observe(HOST_NVME)
+    assert quarantine.evaluate(HOST_NVME, Action.EXPORT_WRITE) is Verdict.BLOCKED
+
+
+def test_an_approval_naming_a_device_with_no_disposition_still_blocks() -> None:
+    """Defence in depth for a state the public API can no longer reach.
+
+    `approve_export` refuses an unobserved target, so this cannot arise through
+    the API. The check in `evaluate` is the second line, and a second line that
+    no test exercises is a line someone deletes: an adversarial review's
+    mutation removed exactly this guard and the suite stayed green.
+    """
+
+    quarantine = a_quarantine()
+    quarantine.observe(HOST_NVME)
+    quarantine.approve_export(approval(HOST_NVME.identity))
+    quarantine._dispositions.pop(HOST_NVME.identity)  # noqa: SLF001 - forced state
+    assert quarantine.evaluate(HOST_NVME, Action.EXPORT_WRITE) is Verdict.BLOCKED
+
+
+def test_an_operator_can_withdraw_an_approval() -> None:
+    quarantine = a_quarantine()
+    quarantine.observe(HOST_NVME)
+    quarantine.approve_export(approval(HOST_NVME.identity))
+    quarantine.withdraw_export()
+    assert quarantine.evaluate(HOST_NVME, Action.EXPORT_WRITE) is Verdict.BLOCKED
 
 
 def test_an_approval_from_another_session_is_refused() -> None:
     """Never a persisted preference: it does not outlive the sitting."""
 
     quarantine = a_quarantine()
+    quarantine.observe(HOST_NVME)
     with pytest.raises(ExportRefused) as refused:
-        quarantine.approve_export(
-            ExportApproval(
-                session_id="s0",
-                target_identity=INTERNAL_NVME.identity,
-                reason="export",
-                confirmed=True,
-            )
-        )
+        quarantine.approve_export(approval(HOST_NVME.identity, session_id="s0"))
     assert refused.value.refusal is Refusal.NOT_THIS_SESSION
 
 
 def test_a_new_session_starts_with_no_approval() -> None:
     quarantine = a_quarantine()
-    quarantine.observe(INTERNAL_NVME)
-    quarantine.approve_export(
-        ExportApproval(
-            session_id="s1",
-            target_identity=INTERNAL_NVME.identity,
-            reason="export",
-            confirmed=True,
-        )
-    )
-    assert quarantine.evaluate(INTERNAL_NVME, Action.EXPORT_WRITE) is Verdict.ALLOWED
+    quarantine.observe(HOST_NVME)
+    quarantine.approve_export(approval(HOST_NVME.identity))
+    assert quarantine.evaluate(HOST_NVME, Action.EXPORT_WRITE) is Verdict.ALLOWED
 
-    next_session = Quarantine(session_id="s2", boot_medium_identity=BOOT_MEDIUM.identity)
+    next_session = Quarantine(session_id="s2", boot_medium_identity=MEDIUM_ID)
     next_session.observe(BOOT_MEDIUM)
-    next_session.observe(INTERNAL_NVME)
-    assert next_session.evaluate(INTERNAL_NVME, Action.EXPORT_WRITE) is Verdict.BLOCKED
+    next_session.observe(HOST_NVME)
+    assert next_session.evaluate(HOST_NVME, Action.EXPORT_WRITE) is Verdict.BLOCKED
 
 
 @pytest.mark.parametrize(
-    ("approval", "expected"),
+    ("overrides", "expected"),
     [
-        (
-            ExportApproval(
-                session_id="s1", target_identity="internal-nvme", reason="  ", confirmed=True
-            ),
-            Refusal.NO_REASON_GIVEN,
-        ),
-        (
-            ExportApproval(
-                session_id="s1",
-                target_identity="internal-nvme",
-                reason="export",
-                confirmed=False,
-            ),
-            Refusal.NOT_CONFIRMED,
-        ),
-        (
-            ExportApproval(
-                session_id="s1",
-                target_identity="usb-boot-medium",
-                reason="export",
-                confirmed=True,
-            ),
-            Refusal.BOOT_MEDIUM_IS_NOT_AN_EXPORT_TARGET,
-        ),
+        ({"reason": "  "}, Refusal.NO_REASON_GIVEN),
+        ({"confirmed": False}, Refusal.NOT_CONFIRMED),
     ],
 )
-def test_an_incomplete_approval_authorises_nothing(approval, expected) -> None:
+def test_an_incomplete_approval_authorises_nothing(overrides: dict, expected) -> None:
+    quarantine = a_quarantine()
+    quarantine.observe(HOST_NVME)
+    with pytest.raises(ExportRefused) as refused:
+        quarantine.approve_export(approval(HOST_NVME.identity, **overrides))
+    assert refused.value.refusal is expected
+
+
+def test_the_medium_is_not_an_export_target() -> None:
     quarantine = a_quarantine()
     with pytest.raises(ExportRefused) as refused:
-        quarantine.approve_export(approval)
-    assert refused.value.refusal is expected
+        quarantine.approve_export(approval(MEDIUM_ID))
+    assert refused.value.refusal is Refusal.BOOT_MEDIUM_IS_NOT_AN_EXPORT_TARGET
 
 
 def test_a_replacement_approval_does_not_accumulate() -> None:
     quarantine = a_quarantine()
-    quarantine.observe(INTERNAL_NVME)
+    quarantine.observe(HOST_NVME)
     quarantine.observe(DOCKED_DISK)
-    for target in (INTERNAL_NVME.identity, DOCKED_DISK.identity):
-        quarantine.approve_export(
-            ExportApproval(
-                session_id="s1", target_identity=target, reason="export", confirmed=True
-            )
-        )
+    for target in (HOST_NVME.identity, DOCKED_DISK.identity):
+        quarantine.approve_export(approval(target))
     assert quarantine.evaluate(DOCKED_DISK, Action.EXPORT_WRITE) is Verdict.ALLOWED
-    assert quarantine.evaluate(INTERNAL_NVME, Action.EXPORT_WRITE) is Verdict.BLOCKED
+    assert quarantine.evaluate(HOST_NVME, Action.EXPORT_WRITE) is Verdict.BLOCKED
 
 
-def test_the_audit_records_classifications_and_no_device_identity() -> None:
+# --- the state cannot be handed to the constructor -------------------------
+
+
+def test_the_running_state_is_not_a_constructor_argument() -> None:
+    """A ready-made approval through the generated `__init__` skipped every check."""
+
+    names = {f.name for f in dataclasses.fields(Quarantine) if f.init}
+    assert names == {"session_id", "boot_medium_identity"}
+    with pytest.raises(TypeError):
+        Quarantine(  # type: ignore[call-arg]
+            session_id="s1",
+            boot_medium_identity=MEDIUM_ID,
+            _approval=approval(HOST_NVME.identity),
+        )
+
+
+# --- the audit -------------------------------------------------------------
+
+
+def test_the_audit_records_the_quarantines_own_conclusion_not_the_device_claim() -> None:
+    """A host disk that misreports itself must not choose how it appears."""
+
+    quarantine = a_quarantine()
+    impostor = Device(identity="host-disk", device_class=DeviceClass.BOOT_MEDIUM)
+    quarantine.observe(impostor)
+    quarantine.evaluate(impostor, Action.FSCK)
+    assert quarantine.audit()[-1] == AuditEntry(
+        disposition="quarantined", action="fsck", verdict="blocked"
+    )
+
+
+def test_an_unobserved_device_is_audited_as_unobserved() -> None:
+    quarantine = a_quarantine()
+    quarantine.evaluate(UNCLASSIFIABLE, Action.AUTOMOUNT)
+    assert quarantine.audit()[-1].disposition == "unobserved"
+
+
+def test_an_approval_and_its_refusals_are_recorded() -> None:
+    """The threat model requires the approval to be in the audit record."""
+
+    quarantine = a_quarantine()
+    quarantine.observe(HOST_NVME)
+    with pytest.raises(ExportRefused):
+        quarantine.approve_export(approval(HOST_NVME.identity, confirmed=False))
+    quarantine.approve_export(approval(HOST_NVME.identity))
+    quarantine.withdraw_export()
+    verdicts = [entry.verdict for entry in quarantine.audit() if entry.action == "export_approval"]
+    assert verdicts == ["not_confirmed", "granted", "withdrawn"]
+
+
+def test_the_audit_keeps_no_device_identity() -> None:
     """Audit is for traceability; it is not a place to keep identifiers."""
 
     quarantine = a_quarantine()
-    quarantine.observe(INTERNAL_NVME)
-    quarantine.evaluate(INTERNAL_NVME, Action.AUTOMOUNT)
+    quarantine.observe(HOST_NVME)
+    quarantine.approve_export(approval(HOST_NVME.identity))
+    quarantine.evaluate(HOST_NVME, Action.EXPORT_WRITE)
     quarantine.evaluate(BOOT_MEDIUM, Action.READ)
-    entries = quarantine.audit()
-    assert [entry.verdict for entry in entries] == ["blocked", "allowed"]
-    rendered = repr(entries)
-    for identity in (INTERNAL_NVME.identity, BOOT_MEDIUM.identity):
+    rendered = repr(quarantine.audit())
+    for identity in (HOST_NVME.identity, MEDIUM_ID, DOCKED_DISK.identity):
         assert identity not in rendered
+
+
+def test_a_refusal_message_names_no_device() -> None:
+    """These strings reach a console and a log on media that travels."""
+
+    quarantine = a_quarantine()
+    quarantine.observe(HOST_NVME)
+    for overrides in ({"reason": " "}, {"confirmed": False}, {"session_id": "s0"}):
+        with pytest.raises(ExportRefused) as refused:
+            quarantine.approve_export(approval(HOST_NVME.identity, **overrides))
+        assert HOST_NVME.identity not in str(refused.value)
+        assert HOST_NVME.identity not in refused.value.detail
+    with pytest.raises(ExportRefused) as refused:
+        quarantine.approve_export(approval("never-seen-SN-DEADBEEF"))
+    assert "DEADBEEF" not in str(refused.value)
