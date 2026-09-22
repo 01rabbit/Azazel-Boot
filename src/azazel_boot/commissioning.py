@@ -116,6 +116,23 @@ class SessionBinding:
     session_id: str
 
 
+class UnidentifiedHost(ValueError):
+    """This host presents no identity to bind to, so it has no fingerprint.
+
+    Raised rather than returned, because the alternative was a **value**, and
+    the value was the same on every machine on earth. An adversarial review
+    derived it: with no commissionable interface the digest was taken over the
+    empty string, ``sha256:e3b0c442…``, so a binding made on one unidentifiable
+    laptop applied to every other unidentifiable laptop — and the hosts Boot
+    cannot identify are exactly the hosts it is lent.
+
+    A host with no identity is not a host that matches everything. There is now
+    no fingerprint for it at all, which is the same discipline
+    :class:`azazel_boot.persistence.PersistenceState.UNEXAMINED` applies to the
+    medium: the absence is its own answer, not a value standing in for one.
+    """
+
+
 def host_fingerprint(observations: tuple[InterfaceObservation, ...]) -> str:
     """A stable digest of the composite identities this host presents.
 
@@ -123,9 +140,21 @@ def host_fingerprint(observations: tuple[InterfaceObservation, ...]) -> str:
     move when an unidentifiable interface appears or an interface is renamed by
     the kernel. It changes when the machine's real ports change, which is
     exactly when a commissioning record should stop applying.
+
+    Raises :class:`UnidentifiedHost` when no interface carries a commissionable
+    identity. That is the same condition `assess` reports as
+    ``COMMISSIONING_REQUIRED``, and the consequence is a safe degradation: a
+    host Boot cannot identify gets no binding, so nothing that requires one runs
+    on it.
     """
 
     keys = sorted(o.interface_key for o in observations if o.is_commissionable)
+    if not keys:
+        raise UnidentifiedHost(
+            "no interface carries a commissionable identity; a host with no "
+            "identity has no fingerprint, and the digest of nothing is one "
+            "constant shared by every such machine"
+        )
     digest = hashlib.sha256("\n".join(keys).encode("utf-8")).hexdigest()
     return f"sha256:{digest}"
 
@@ -142,6 +171,9 @@ def bind_session(
 
     if not session_id.strip():
         raise ValueError("session_id is required; a record must bind to one session")
+    # `host_fingerprint` raises `UnidentifiedHost` here rather than returning a
+    # digest nobody can tell apart. A record that cannot say which machine it
+    # belongs to is not made at all.
     return SessionBinding(
         host_fingerprint=host_fingerprint(observations), session_id=session_id
     )
@@ -157,12 +189,18 @@ def binding_applies(
 
     A different laptop starts from nothing, and so does a later session on the
     same laptop. Both are refusals, not degradations.
+
+    A host that presents no commissionable identity is a third refusal: there is
+    nothing to compare, and "nothing" must not compare equal to a record. It
+    returns False rather than propagating, because a caller asking "does this
+    apply" is owed an answer, and the answer is no.
     """
 
-    return (
-        binding.host_fingerprint == host_fingerprint(observations)
-        and binding.session_id == session_id
-    )
+    try:
+        observed = host_fingerprint(observations)
+    except UnidentifiedHost:
+        return False
+    return binding.host_fingerprint == observed and binding.session_id == session_id
 
 
 def assess(observations: tuple[InterfaceObservation, ...]) -> Assessment:

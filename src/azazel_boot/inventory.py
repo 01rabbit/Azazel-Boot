@@ -91,6 +91,38 @@ class InterfaceObservation:
 
         return not self.incomplete_reasons
 
+    def __repr__(self) -> str:
+        """Redacted: this is the borrowed machine's hardware, in plain text.
+
+        Every field but the reason codes is an identifier of somebody else's
+        laptop -- the permanent MAC, the NIC serial, the PCI and USB ids, the
+        bus position, and `interface_key`, which is built from two of them.
+
+        A generated repr put all of them into every captured-locals traceback,
+        which is what `pytest --showlocals` and most crash reporters build. An
+        adversarial review found them there: `azazel_boot.persistence` takes the
+        live inventory as an argument of every act, so a refusal raised anywhere
+        in an act rendered the host's identities onto a console and into a log,
+        on media that travels through uncontrolled hands. Three sibling reprs
+        had already been redacted for this reason; this is the fourth, and it is
+        the one holding the pre-images the others' digests are taken over.
+
+        `incomplete_reasons` is kept because it is a fixed vocabulary this
+        module writes -- `bus_path_unavailable` and the like -- and an operator
+        facing a refusal needs to be told what was missing.
+
+        `azazel_boot.commissioning.describe_for_operator` is the deliberate
+        disclosure path, and it stays as it is: an operator confirming a port is
+        entitled to see the identity they are confirming. A traceback is not
+        that path.
+        """
+
+        return (
+            "InterfaceObservation(identity=<redacted>, "
+            f"commissionable={self.is_commissionable!r}, "
+            f"incomplete_reasons={self.incomplete_reasons!r})"
+        )
+
 
 def _read_text(path: Path) -> str | None:
     try:

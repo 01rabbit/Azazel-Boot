@@ -26,21 +26,59 @@ check.
 A target that is not the booted medium, or that has never been observed, is
 refused before anything else is considered.
 
-**The binding is re-derived, not re-compared.** Every act takes the live
-read-only inventory and calls `commissioning.binding_applies`, which recomputes
-the host fingerprint from what this machine presents. The previous version
-compared the binding against the session's own constructor arguments — both
-operands supplied by the same object — so a self-consistent session passed
-forever, on any laptop. Making a tautology run more often does not make it a
-check.
+**The binding is re-derived, not re-compared.** Every act takes the inventory
+and calls `commissioning.binding_applies`, which recomputes the host fingerprint
+from it. The previous version compared the binding against the session's own
+constructor arguments — both operands supplied by the same object — so a
+self-consistent session passed forever, on any laptop. Making a tautology run
+more often does not make it a check.
 
-**The session is not a value a caller can edit.** It is not a dataclass, its
-fields are private, reassigning the quarantine or the binding raises, the fence
-is one-way, and it refuses to be pickled. A review substituted a forged
-quarantine into a public field, cleared the fence with one assignment, and read
-the host fingerprint out of `dataclasses.asdict`. A session also refuses a
-quarantine minted for a different session: two sessions sharing one quarantine
-let a fenced medium be opened again by the other.
+The operand now comes from outside the session, and a different laptop's
+inventory refuses. It is still **the caller's report**: this module reads no
+sysfs and no machine, so a captured tuple replayed elsewhere passes. The
+strength of the check is the strength of whoever collected the inventory, and
+[`azazel_boot.inventory`](../src/azazel_boot/inventory.py) is where that reading
+happens. An earlier version of this page said "recomputes … from what this
+machine presents", which claimed a reading that does not occur here.
+
+**A host that presents no identity gets no binding at all.** The fingerprint is
+taken over commissionable identities only, so a host with none used to hash the
+empty string — `sha256:e3b0c442…`, one constant shared by every such machine —
+and a binding made on one unidentifiable laptop applied to every other
+unidentifiable laptop. Those are exactly the hosts Boot is lent. There is no
+fingerprint for such a host now: `host_fingerprint` raises `UnidentifiedHost`,
+`bind_session` refuses to mint a record, and `binding_applies` fails closed,
+including for a record carried in already holding the empty digest. The
+consequence is a safe degradation — no binding, so nothing that needs one runs,
+which is the state `assess` already calls `COMMISSIONING_REQUIRED`.
+
+**The session is hard to edit by accident, and is not sealed.** It is not a
+dataclass, its fields are private, plain assignment to the quarantine, the
+binding or the fence raises, and it refuses to be pickled. A review substituted
+a forged quarantine into a public field, cleared the fence with one assignment,
+and read the host fingerprint out of `dataclasses.asdict`. A session also
+refuses a quarantine minted for a different session.
+
+That guard is `__setattr__`, which is a hook rather than access control, and a
+later review went round it three ways: `object.__setattr__` writes the slot,
+`PersistenceSession.__new__` yields an instance that never ran `__init__` and is
+therefore never sealed — skipping the quarantine's session check with it — and a
+subclass can override the hook. The third route opened persistence on the host's
+internal disk. **Python has no way to close attribute assignment**, so the claim
+here is no stronger than the mechanism:
+[the quarantine policy](quarantine-policy.md) states the same limit for the same
+reason, and `tests/unit/test_persistence.py` records it as an assertion so a
+future seal that actually holds turns the test red rather than leaving a stale
+claim standing.
+
+**The fence does not rest on that guard.** It lives on the `Quarantine`, which
+is the object representing the medium that was removed, and it is one-way. A
+review fenced a session after a surprise removal and then built a second one
+from the same quarantine, binding and session id — three arguments the
+legitimate caller already holds, nothing forged — and the new session opened
+persistence on a medium that was no longer there and offered no reboot. Fencing
+now fences every session over that medium, and clearing the session's own flag
+with `object.__setattr__` does not restore it.
 
 Host storage is never created on, mounted, repaired, swapped to, or written back
 to. That is [the threat model](threat-model.md) §3 restated at the point where
@@ -76,8 +114,10 @@ GPT
 The filesystem **allowlist** is the real check; the member denylist behind it is
 defence in depth. A review listed a dozen ordinary `blkid` types the denylist
 missed — an allowlist of three roles' filesystems does not have that failure
-mode, and both constants are now pinned literally rather than parametrized over
-themselves.
+mode. The allowlist and both denylists are pinned literally rather than
+parametrized over themselves: mutation testing found `VOLUME_MANAGERS` still
+parametrized over itself, so a version keeping two of its nine entries passed
+every test, and this page claimed it was pinned when it was not.
 
 Both acts apply this check. A review deleted the call from `create` and `unlock`
 and every layout test stayed green, because they all called the checker
@@ -145,6 +185,16 @@ keeps saying what was true then, which is why `recovery_options()` is a method
 on the **session**: a caller holding `unlock`'s return value used to get an
 empty option list after a removal — no reboot instruction — through the recovery
 path itself.
+
+The flag lives on the **`Quarantine`**, not on the session. Removal happened to
+the medium, and the medium's rule is the thing that represents it, so
+`Quarantine.fence()` is what `fence_after_removal()` calls and
+`Quarantine.is_fenced` is what every session consults. Without that, the fence
+was per-object: a review rebuilt a session from the same three constructor
+arguments and got an unfenced one. It is deliberately **not** folded into
+`Quarantine.disposition()`, which answers "what is this device" — a question
+whose answer did not change when the medium was pulled. Any future consumer of a
+quarantine must consult `is_fenced` for itself; nothing enforces that for it.
 
 ## 6. Recovery never repairs the host
 

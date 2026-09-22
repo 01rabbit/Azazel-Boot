@@ -23,16 +23,25 @@ check.
 **The binding is re-derived, not re-compared.** The second version compared the
 binding against the session's own constructor arguments — both operands supplied
 by the same object, so a self-consistent session passed forever, on any laptop.
-Every act now takes the live read-only inventory and calls
-`commissioning.binding_applies`, which recomputes the host fingerprint from what
-this machine actually presents. That one can fail on a different laptop; the
-tautology could not.
+Every act now takes the inventory and calls `commissioning.binding_applies`,
+which recomputes the host fingerprint from it. The operand comes from outside
+the session, so a different laptop's inventory refuses where the tautology could
+not — but the inventory is **the caller's report**, like everything else here.
+This module reads no sysfs and no machine, and a captured tuple replayed
+elsewhere passes. The strength of the check is the strength of whoever collected
+it; `azazel_boot.inventory` is where that reading happens.
 
-**The session is not a value a caller can edit.** It is not a dataclass, its
-fields are private, reassigning the quarantine or the binding raises, the fence
-is one-way, and it refuses to be pickled. A review moved the round-one exploit
-up one level by substituting a forged quarantine into a public field and by
-clearing the fence flag with one assignment.
+**The session is hard to edit by accident, and not sealed.** It is not a
+dataclass, its fields are private, plain assignment to the quarantine, the
+binding or the fence raises, and it refuses to be pickled. That is defence
+against a careless caller. It is **not** defence against code already running in
+the process: `object.__setattr__` writes the slot regardless, `__new__` builds an
+instance that never ran `__init__` and is therefore never sealed, and a subclass
+can override the hook. An adversarial review used all three, and the third
+opened persistence on the host's internal disk. `azazel_boot.quarantine` states
+the same limit in the same words, and for the same reason — Python has no way to
+close attribute assignment. The fence in particular does not rest on the seal:
+it lives on the quarantine, which is the thing the removal happened to.
 
 **The layout is the simple one.** GPT, an ESP, the signed read-only root, and an
 optional LUKS2 partition with a filesystem formatted **directly** on it
@@ -61,6 +70,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, fields
 from enum import Enum
+from types import MappingProxyType
 
 from .commissioning import SessionBinding, binding_applies
 from .inventory import InterfaceObservation
@@ -126,11 +136,17 @@ VOLUME_MANAGER_MEMBERS = (
 #: What each role's filesystem may be. The medium carries exactly three
 #: partitions, so naming what is allowed is tractable and is the honest shape:
 #: a denylist of things that assemble is a list somebody has to keep complete.
-PERMITTED_FILESYSTEMS = {
-    "esp": ("vfat",),
-    "boot_root": ("squashfs", "erofs"),
-    "persistence": ("ext4", "xfs", "f2fs"),
-}
+#: Read-only, like `azazel_boot.artifact`'s field maps: the allowlist is the
+#: whole of this module's structural authority, and `dict` hands a caller the
+#: ability to widen it with one assignment. That is careless-caller defence, not
+#: a seal — see the class docstring of `PersistenceSession`.
+PERMITTED_FILESYSTEMS = MappingProxyType(
+    {
+        "esp": ("vfat",),
+        "boot_root": ("squashfs", "erofs"),
+        "persistence": ("ext4", "xfs", "f2fs"),
+    }
+)
 
 #: The one mapping permitted, and only to open persistence.
 PERMITTED_MAPPING = "dm-crypt"
@@ -366,17 +382,37 @@ def has_persistence(layout: MediumLayout) -> bool:
 class PersistenceSession:
     """One sitting on one host, and the only thing that answers "may I".
 
-    It is **not a dataclass and not a value**. Its fields are private, the
-    quarantine and the binding cannot be reassigned, the fence is one-way, and
-    it refuses to be pickled. A review took the previous version — a plain
-    mutable dataclass — and substituted a forged quarantine into a public field,
-    cleared the fence with one assignment, and read the host fingerprint out of
+    It is **not a dataclass and not a value**. Its fields are private, plain
+    assignment to the quarantine, the binding or the fence raises, and it
+    refuses to be pickled. A review took the previous version — a plain mutable
+    dataclass — and substituted a forged quarantine into a public field, cleared
+    the fence with one assignment, and read the host fingerprint out of
     `dataclasses.asdict`. `azazel_boot.quarantine.Quarantine` stopped being a
     dataclass for exactly these reasons, and says so; this follows it.
 
+    **The `__setattr__` guard is not a seal, and is not described as one.** It
+    is a hook, and code in this process goes round it three ways, all of which a
+    later review demonstrated: `object.__setattr__` writes the slot directly,
+    `PersistenceSession.__new__` produces an instance that never ran `__init__`
+    and so is never sealed at all — skipping the session check on the quarantine
+    with it — and a subclass can override the hook. The third route opened
+    persistence on the host's internal disk. Python has no way to close
+    attribute assignment; `azazel_boot.quarantine` says exactly this, and the
+    claim here is deliberately no stronger than the mechanism.
+    `tests/unit/test_persistence.py` records the limit as an assertion, so a
+    future seal that actually holds turns the test red and forces this paragraph
+    to be rewritten rather than left standing as folklore.
+
+    What does **not** rest on the guard is the fence. It lives on the
+    quarantine, which is the object representing the medium that was removed, so
+    rebuilding a session over that quarantine — no forgery, three ordinary
+    arguments — does not get an unfenced one.
+
     It holds the quarantine, so "is this the medium" is asked rather than
-    accepted, and it re-derives the binding from the **live inventory** on every
-    act rather than comparing its own constructor arguments with each other.
+    accepted, and it re-derives the binding on every act from the inventory the
+    caller supplies, rather than comparing its own constructor arguments with
+    each other. What it cannot do is read the machine itself; see the module
+    docstring.
     """
 
     __slots__ = ("_quarantine", "_binding", "_session_id", "_fenced", "_status", "_sealed")
@@ -436,10 +472,20 @@ class PersistenceSession:
     def session_id(self) -> str:
         return self._session_id
 
+    @property
+    def _is_fenced(self) -> bool:
+        """Fenced here, or fenced on the medium this session is about.
+
+        The second is what makes the fence survive a rebuilt session: the flag
+        on the quarantine is one-way and shared by every session over it.
+        """
+
+        return self._fenced or self._quarantine.is_fenced
+
     def status(self) -> PersistenceStatus:
         """What is true **now**. A status handed out earlier is a snapshot."""
 
-        if self._fenced:
+        if self._is_fenced:
             return _fenced_status()
         return self._status if self._status is not None else _unexamined()
 
@@ -554,10 +600,18 @@ class PersistenceSession:
         the removed device. This takes no argument for that reason — and it
         **revokes**, one way: every later act is refused, `status()` reports the
         fence, and nothing can clear it.
+
+        It fences the **quarantine** as well as this object. A review fenced one
+        session and then built a second from the same quarantine, binding and
+        session id — all three of which the legitimate caller already holds —
+        and the new session opened persistence on the removed medium and offered
+        no reboot. The removal happened to the medium, so the record of it
+        belongs to the medium's rule.
         """
 
         self._fenced = True
         self._status = None
+        self._quarantine.fence()
         return _fenced_status()
 
     # -- internals ---------------------------------------------------------
@@ -565,10 +619,10 @@ class PersistenceSession:
     def _require_open_session(
         self, observations: tuple[InterfaceObservation, ...]
     ) -> None:
-        if self._fenced:
+        if self._is_fenced:
             raise PersistenceRefused(
                 Refusal.SESSION_FENCED,
-                "the medium was removed; this session cannot act again",
+                "the medium was removed; no session over it acts again",
             )
         applies = binding_applies(
             self._binding, observations, session_id=self._session_id
@@ -615,7 +669,7 @@ class PersistenceSession:
 #: repair of somebody else's laptop. The tuples are asserted exactly, because a
 #: review added "mount it read-write to salvage the session" and a denylist of
 #: four nouns did not notice.
-RECOVERY_OPTIONS: dict[PersistenceState, tuple[str, ...]] = {
+RECOVERY_OPTIONS = MappingProxyType({
     PersistenceState.UNEXAMINED: (
         "continue without persistence, at CORE",
         "examine the medium: no act has run in this session yet",
@@ -635,7 +689,7 @@ RECOVERY_OPTIONS: dict[PersistenceState, tuple[str, ...]] = {
         "rewrite the medium from a verified image on another machine",
     ),
     PersistenceState.FENCED: ("reboot; the session cannot continue",),
-}
+})
 
 
 def status_field_names() -> tuple[str, ...]:

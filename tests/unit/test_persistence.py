@@ -769,3 +769,238 @@ def test_a_status_is_immutable(observations) -> None:
     with pytest.raises(dataclasses.FrozenInstanceError):
         status.state = PersistenceState.OPEN  # type: ignore[misc]
     assert isinstance(status, PersistenceStatus)
+
+
+# --------------------------------------------------------------------------
+# Round three: four holes the 555 tests above did not see
+#
+# Every test below was written after an adversarial review reproduced the
+# defect, and every one of them is red against the module as it stood at
+# `d36834c` — which passed all 555.
+# --------------------------------------------------------------------------
+
+
+def test_a_host_that_presents_no_identity_gets_no_binding_at_all(
+    sysfs_mac_only,
+) -> None:
+    """The empty digest was one constant, shared by every such machine.
+
+    `host_fingerprint` hashed only commissionable identities, so a laptop with
+    none hashed the empty string: `sha256:e3b0c442…`, the same value everywhere.
+    A binding made on one unidentifiable host therefore applied to every other
+    unidentifiable host — and those are precisely the hosts Boot is lent.
+
+    There is no fingerprint for such a host now, so there is no binding and
+    nothing that needs one runs. That is the safe degradation: `assess` already
+    calls this state `COMMISSIONING_REQUIRED`.
+    """
+
+    from azazel_boot.commissioning import UnidentifiedHost, bind_session
+
+    unidentifiable = collect_interfaces(
+        sysfs_mac_only, permanent_mac_reader=mac_reader({"eth0": "de:ad:be:ef:00:01"})
+    )
+    assert not any(o.is_commissionable for o in unidentifiable)
+
+    with pytest.raises(UnidentifiedHost):
+        host_fingerprint(unidentifiable)
+    with pytest.raises(UnidentifiedHost):
+        bind_session(unidentifiable, session_id=SESSION)
+
+
+#: The SHA-256 of the empty string, which is what the fingerprint used to be on
+#: a host with no commissionable interface. Written out because it is the whole
+#: of the defect: one literal constant, identical on every machine on earth.
+EMPTY_DIGEST = (
+    "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+)
+
+
+def test_a_record_carrying_the_empty_digest_applies_to_nothing(
+    observations, sysfs_mac_only, sysfs_single_nic
+) -> None:
+    """The record still exists on a USB SSD carried from a previous session.
+
+    Refusing to *make* one is only half the fix. A binding holding the empty
+    digest — written by an earlier build, or by anyone who can put a constant in
+    a file — matched every host that could not identify itself, which is the
+    condition the product meets whenever it is lent a machine whose NICs it
+    cannot read. `binding_applies` now fails closed there rather than comparing
+    two absences and finding them equal.
+    """
+
+    from azazel_boot.commissioning import binding_applies
+
+    unidentifiable = collect_interfaces(
+        sysfs_mac_only, permanent_mac_reader=mac_reader({"eth0": "de:ad:be:ef:00:01"})
+    )
+    other_unidentifiable = collect_interfaces(
+        sysfs_single_nic, permanent_mac_reader=mac_reader({"wlp2s0": None})
+    )
+    for inventory in (unidentifiable, other_unidentifiable, ()):
+        assert not any(o.is_commissionable for o in inventory)
+
+    carried = SessionBinding(host_fingerprint=EMPTY_DIGEST, session_id=SESSION)
+    for inventory in (unidentifiable, other_unidentifiable, ()):
+        assert not binding_applies(carried, inventory, session_id=SESSION)
+
+    live = session(observations, host_fingerprint=EMPTY_DIGEST)
+    with pytest.raises(PersistenceRefused) as refused:
+        live.create(MEDIUM, layout(), unidentifiable)
+    assert refused.value.refusal is Refusal.NOT_THIS_HOST_OR_SESSION
+
+
+def test_no_traceback_carries_the_host_identities_the_fingerprint_is_taken_over(
+    observations,
+) -> None:
+    """The fix for the self-comparison put the pre-images into every frame.
+
+    Making the binding a real check meant passing the live inventory into every
+    act. `InterfaceObservation` had a generated repr, so the borrowed machine's
+    permanent MACs, NIC serials, PCI ids and kernel names appeared in the
+    captured locals of every refusal — the values the fingerprint is a hash of.
+    Three sibling reprs had been redacted; the fourth, holding the pre-images,
+    had not.
+    """
+
+    live = session(observations, session_id="s-secret-99")
+    try:
+        live.create(MEDIUM, layout(), observations)
+    except PersistenceRefused as error:
+        captured = "".join(
+            traceback.TracebackException.from_exception(
+                error, capture_locals=True
+            ).format()
+        )
+
+    for observation in observations:
+        assert observation.permanent_mac
+        assert observation.permanent_mac not in captured
+        assert observation.interface_key not in captured
+        assert observation.kernel_name_observed not in captured
+        for value in (observation.bus_path, observation.pci_id, observation.serial):
+            if value:
+                assert value not in captured
+
+
+def test_rebuilding_a_session_over_a_fenced_medium_does_not_unfence_it(
+    observations,
+) -> None:
+    """The fence was per-object, and the object could simply be rebuilt.
+
+    No forgery: the same quarantine, the same binding and the same session id
+    are three arguments the legitimate caller already holds. The second session
+    opened persistence on a medium that was no longer there and offered no
+    reboot. Threat-model §4's deliberate removal is served by whichever object
+    was not the one that got fenced, so the flag moved to the quarantine.
+    """
+
+    quarantine = Quarantine(session_id=SESSION, boot_medium_identity=MEDIUM_ID)
+    binding = SessionBinding(
+        host_fingerprint=host_fingerprint(observations), session_id=SESSION
+    )
+    first = session(observations, quarantine=quarantine)
+    first.unlock(MEDIUM, layout(), observations, **unlock_arguments())
+    first.fence_after_removal()
+
+    second = PersistenceSession(
+        quarantine=quarantine, binding=binding, session_id=SESSION
+    )
+    with pytest.raises(PersistenceRefused) as refused:
+        second.unlock(MEDIUM, layout(), observations, **unlock_arguments())
+    assert refused.value.refusal is Refusal.SESSION_FENCED
+    assert second.status().state is PersistenceState.FENCED
+    assert second.recovery_options() == ("reboot; the session cannot continue",)
+    assert quarantine.is_fenced
+
+
+def test_the_fence_survives_the_seal_being_bypassed(observations) -> None:
+    """`object.__setattr__` clears the slot; the fence must not depend on it."""
+
+    live = session(observations)
+    live.unlock(MEDIUM, layout(), observations, **unlock_arguments())
+    live.fence_after_removal()
+
+    object.__setattr__(live, "_fenced", False)
+    assert live.status().state is PersistenceState.FENCED
+    with pytest.raises(PersistenceRefused) as refused:
+        live.create(MEDIUM, layout(), observations)
+    assert refused.value.refusal is Refusal.SESSION_FENCED
+
+
+def test_the_seal_is_defence_against_a_careless_caller_and_says_no_more(
+    observations,
+) -> None:
+    """The limit is asserted, so the claim cannot outlive the mechanism.
+
+    `__setattr__` is a hook, not access control. `object.__setattr__` writes the
+    slot, `__new__` yields an instance that never ran `__init__` and is
+    therefore never sealed — skipping the quarantine's session check with it —
+    and a subclass can override the hook outright. An adversarial review used
+    all three; the third opened persistence on the host's internal disk.
+
+    Python cannot close attribute assignment, and `azazel_boot.quarantine` says
+    so in the same words. The two modules now make the same claim, which is the
+    true one. This test records the limit **as an assertion**: a future seal
+    that actually holds turns it red, and whoever writes that seal must then
+    correct the docstrings rather than leave a stale claim standing.
+    """
+
+    live = session(observations)
+    with pytest.raises(AttributeError):
+        live._binding = None  # noqa: SLF001 - the guard that does work
+
+    object.__setattr__(live, "_session_id", "s-other")
+    assert live.session_id == "s-other"
+
+    raw = PersistenceSession.__new__(PersistenceSession)
+    assert not getattr(raw, "_sealed", False)
+
+    from pathlib import Path
+
+    from azazel_boot import persistence, quarantine
+
+    for module in (persistence, quarantine):
+        # Whitespace-normalised: the sentence wraps differently in the two
+        # files, and a test that a reflow can break is a test nobody keeps.
+        source = " ".join(Path(module.__file__).read_text(encoding="utf-8").split())
+        assert "code already running in the process" in source
+
+
+def test_the_volume_manager_denylist_is_pinned_literally() -> None:
+    """The sole mutation survivor of 53: shrinking the constant stayed green.
+
+    `test_a_volume_manager_on_the_medium_is_refused` parametrizes over
+    `VOLUME_MANAGERS`, so a version keeping only `("lvm", "md")` passed every
+    test. Its sibling `VOLUME_MANAGER_MEMBERS` was pinned; this one was not, and
+    `docs/persistence.md` claimed both were.
+    """
+
+    assert {
+        "lvm",
+        "lvm2",
+        "mdraid",
+        "md",
+        "zfs",
+        "bcache",
+        "dm-raid",
+        "dm-thin",
+        "stratis",
+    } <= set(VOLUME_MANAGERS)
+
+
+def test_the_two_constant_tables_cannot_be_widened_by_assignment() -> None:
+    """Read-only for the reason `azazel_boot.artifact`'s field maps are.
+
+    The allowlist is the whole of `check_layout`'s structural authority, and the
+    recovery table is what an operator is offered after a failure. A `dict`
+    hands a caller both with one assignment. Careless-caller defence, on the
+    terms stated above — not a seal.
+    """
+
+    from azazel_boot.persistence import PERMITTED_FILESYSTEMS
+
+    with pytest.raises(TypeError):
+        PERMITTED_FILESYSTEMS["persistence"] = ("btrfs",)  # type: ignore[index]
+    with pytest.raises(TypeError):
+        RECOVERY_OPTIONS[PersistenceState.FENCED] = ()  # type: ignore[index]

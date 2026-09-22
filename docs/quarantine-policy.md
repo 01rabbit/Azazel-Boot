@@ -70,6 +70,17 @@ identity is not the booted medium's is quarantined.
 **An unobserved device is blocked.** A device with no disposition is not a
 device with no rule.
 
+**The `Quarantine` is not a value, and is not sealed.** It stopped being a
+dataclass because a review built one with a ready-made export approval through
+the generated `__init__`, and `boot_medium_identity` is read through a property
+because assigning to it promotes any device. Neither closes attribute
+assignment, and **Python has no way to**: `object.__setattr__` writes the
+attribute regardless, and an instance built with `__new__` never ran `__init__`.
+This is defence against a careless caller, not against code already running in
+the process, and it is stated that way in both this module and
+[persistence](persistence.md) §1 so that neither page claims a seal that the
+mechanism does not provide.
+
 **What a device says about itself decides nothing.** Classification is identity
 against identity. When a device carrying the medium's identity says it is *not*
 the medium — **or a device on another identity claims that it is** — the
@@ -160,6 +171,23 @@ claimed, which an impostor sets freely — with the action and the verdict, and 
 records approvals, their refusals and their withdrawals. It does not keep a
 device identity, and neither does any refusal message: those strings reach a
 console and a log on media that travels through uncontrolled hands.
+
+### The fence
+
+`fence()` records that the medium was removed, and `is_fenced` is what a
+consumer asks. It belongs here rather than on whoever noticed the removal:
+[persistence](persistence.md) §5 held the flag per session, and a review rebuilt
+a session from the same quarantine, binding and session id — three arguments the
+legitimate caller already holds — to get an unfenced one. It is one-way, and a
+re-appearance does not clear it: `_withdraw_on_reappearance` already treats a
+returning device as a fresh, untrusted arrival, and the session that survived
+the gap is the thing being refused. The audit gets `medium_fenced`, once as
+`fenced` and thereafter as `already_fenced`.
+
+It does **not** change `disposition()`, which answers "what is this device" — a
+question whose answer did not change when the medium was pulled. So the fence is
+advisory to anything that does not ask: `azazel_boot.persistence` asks, and any
+future consumer must, because nothing enforces it for them.
 
 ### What refusing assembly everywhere costs
 

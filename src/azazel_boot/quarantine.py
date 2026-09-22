@@ -330,6 +330,7 @@ class Quarantine:
         self._dispositions: dict[str, Disposition] = {}
         self._approval: ExportApproval | None = None
         self._audit: list[AuditEntry] = []
+        self._fenced = False
 
     @property
     def session_id(self) -> str:
@@ -385,7 +386,10 @@ class Quarantine:
         decision.
         """
 
-        return f"Quarantine(session=<redacted>, observed={len(self._dispositions)})"
+        return (
+            f"Quarantine(session=<redacted>, observed={len(self._dispositions)}, "
+            f"fenced={self._fenced})"
+        )
 
     def medium_is_bound(self) -> bool:
         """Whether the medium has been seen this session.
@@ -402,6 +406,45 @@ class Quarantine:
 
     def disposition(self, device: Device) -> Disposition | None:
         return self._dispositions.get(device.identity)
+
+    def fence(self) -> None:
+        """The medium was removed. Record it here, where the medium's rule lives.
+
+        The fence belongs to the **medium**, not to whoever noticed it go. An
+        adversarial review fenced an `azazel_boot.persistence.PersistenceSession`
+        after a surprise removal and then built a second one from the same three
+        constructor arguments the legitimate caller already held -- same
+        quarantine, same binding, same session id -- and the new object opened
+        persistence on a device that was no longer there and offered no reboot.
+        Nothing was forged; the fence was simply per-object, and the object that
+        held it was not the one asked next.
+
+        So it is one flag on the one thing that represents the removed medium,
+        and it is one-way: a fence that can be lifted is a fence that an
+        attacker who benefits from the removal can lift. Reappearance does not
+        clear it either -- `_withdraw_on_reappearance` already treats a device
+        coming back as a fresh, untrusted arrival, and a session that survived
+        the gap is the thing being refused.
+
+        Every consumer must consult :attr:`is_fenced` before acting;
+        `azazel_boot.persistence` does. It is deliberately not folded into
+        :meth:`disposition`, which answers "what is this device" -- a question
+        whose answer did not change when the medium was pulled.
+        """
+
+        already = self._fenced
+        self._fenced = True
+        self._record(
+            self._dispositions.get(self._boot_medium_identity),
+            "medium_fenced",
+            "already_fenced" if already else "fenced",
+        )
+
+    @property
+    def is_fenced(self) -> bool:
+        """Whether the medium has been fenced this session. Never clears."""
+
+        return self._fenced
 
     def approve_export(self, approval: ExportApproval) -> None:
         """Record one approval, and audit the attempt either way.
