@@ -2867,6 +2867,8 @@ def test_no_input_to_this_module_changes_anything_about_the_quarantine(
         by_operator,
         confirmed,
         outcome,
+        room,
+        reports_hold,
     ) in product(
         (1, 2, 3),
         (1, 2),
@@ -2876,6 +2878,8 @@ def test_no_input_to_this_module_changes_anything_about_the_quarantine(
         (True, False),
         (True, False),
         tuple(AttemptOutcome),
+        (True, False),
+        (True, False),
     ):
         rule = a_quarantine(fenced=fenced, quarantined=quarantined)
         before = _whole_quarantine_state(rule)
@@ -2886,40 +2890,53 @@ def test_no_input_to_this_module_changes_anything_about_the_quarantine(
             fingerprint=f"snapshot-fingerprint-{schema_version}{container_version}",
         )
 
-        try:
-            preflight(
+        # The arguments this guard used to hold fixed. Round four's lesson was
+        # not a new AST shape — it was that a guard which enumerates the call
+        # surface and pins its inputs is a guard over one row of the input
+        # space, so a payload gated on `schema_version > 1` walked past it.
+        # These are the rest of the rows: with and without room, with and
+        # without a snapshot, and with the three caller-supplied reports
+        # holding and not holding.
+        for snapshot_argument in (snap, None):
+            _swallow(
+                preflight,
                 rule,
-                snapshot=snap,
-                capacity=capacity(),
-                current_schema=1,
+                snapshot=snapshot_argument,
+                capacity=capacity() if room else capacity(required=1000, available=1),
+                current_schema=1 if reports_hold else 2,
                 target_schema=schema_version,
-                binding_holds=True,
-                generation_holds=True,
-                image_digest_holds=True,
+                binding_holds=reports_hold,
+                generation_holds=reports_hold,
+                image_digest_holds=reports_hold,
             )
-        except (RecoveryRefused, TypeError):  # pragma: no cover - refusals are the point
-            pass
 
-        flow = RecoveryWorkflow(rule, binding, session_id=SESSION)
-        _swallow(flow.start, snap, observations, session_id=SESSION,
-                 started_by_operator=by_operator)
-        _swallow(flow.open_trial, snap, observations, session_id=SESSION)
-        _swallow(flow.commit, snap, observations, session_id=SESSION,
-                 acquisition=Opens(outcome), confirmed=confirmed)
-        _swallow(flow.audit)
-        _swallow(flow.holds, RecoveryCandidate(schema_version, "x"))
-        _swallow(repr, flow)
-        _swallow(candidate_applies_to, flow, RecoveryCandidate(schema_version, "x"))
-        _swallow(flow.interrupt, session_id=SESSION)
+        # And twice over one medium, because "a second workflow over the same
+        # quarantine" is an input dimension too: a payload firing only on the
+        # second would see a guard that always builds the first.
+        for _sitting in (1, 2):
+            flow = RecoveryWorkflow(rule, binding, session_id=SESSION)
+            _swallow(flow.start, snap, observations, session_id=SESSION,
+                     started_by_operator=by_operator)
+            _swallow(flow.open_trial, snap, observations, session_id=SESSION)
+            _swallow(flow.commit, snap, observations, session_id=SESSION,
+                     acquisition=Opens(outcome), confirmed=confirmed)
+            _swallow(flow.commit, snap, observations, session_id=SESSION,
+                     acquisition=Opens(outcome), confirmed=confirmed)
+            _swallow(flow.audit)
+            _swallow(flow.holds, RecoveryCandidate(schema_version, "x"))
+            _swallow(repr, flow)
+            _swallow(candidate_applies_to, flow, RecoveryCandidate(schema_version, "x"))
+            _swallow(flow.interrupt, session_id=SESSION)
 
         drives += 1
         assert _whole_quarantine_state(rule) == before, (
             f"the quarantine moved on schema={schema_version} "
-            f"container={container_version} integrity={integrity.value}"
+            f"container={container_version} integrity={integrity.value} "
+            f"room={room} reports_hold={reports_hold}"
         )
         assert _quarantine_defences_intact(rule) == (True, True, True)
 
-    assert drives == 3 * 2 * 3 * 2 * 2 * 2 * 2 * len(AttemptOutcome)
+    assert drives == 3 * 2 * 3 * 2 * 2 * 2 * 2 * 2 * 2 * len(AttemptOutcome)
 
 
 def test_this_module_performs_no_io_when_it_actually_runs() -> None:
