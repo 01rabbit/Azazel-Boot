@@ -7,8 +7,8 @@ permitted and what the session may claim afterwards. That is a weaker statement
 than "the acts are injected ports", and it is the true one — an adversarial
 review caught the earlier wording claiming an isolation this module does not
 have. It trusts the caller's reports completely; every input below named
-`unlocked`, `integrity_verified` or `reverified_after_repair` is a conclusion
-somebody else reached.
+`unlocked`, `integrity_verified` or `dirty` is a conclusion somebody else
+reached.
 
 Four properties shape it, and each comes from a rule written down elsewhere.
 
@@ -75,6 +75,7 @@ from enum import Enum
 from types import MappingProxyType
 
 from .commissioning import SessionBinding, binding_applies
+from .dirty_write import DirtySignal, WriteObservation, classify
 from .inventory import InterfaceObservation
 from .quarantine import Device, Disposition, Quarantine
 
@@ -198,24 +199,71 @@ class Refusal(Enum):
     MEDIA_BINDING_KEY_UNAVAILABLE = "media_binding_key_unavailable"
     MEDIA_BINDING_INCOMPLETE = "media_binding_incomplete"
     MEDIA_BINDING_MISMATCH = "media_binding_mismatch"
+    VOLUME_QUARANTINED = "volume_quarantined"
 
 
 class UnlockOutcome(Enum):
     """Why persistence is, or is not, open.
 
-    `OPENED_AFTER_REPAIR` exists because the first version returned
-    plain `OPENED` for a repaired volume, identical to a clean open in
-    everything but a free-text reason. A consumer reading `outcome` could not
-    tell them apart, which is the distinction `docs/threat-model.md` §5 is about.
+    **There is no `OPENED_AFTER_REPAIR`, and there was.** An earlier version
+    opened a dirty volume that the caller reported as repaired and re-verified,
+    under a distinct outcome so a consumer could tell it from a clean open.
+    [ADR-0010](../../docs/adr/0010-persistence-key-and-migration.md) D4 then
+    decided that Boot **does not repair** — so the member is gone, along with
+    the `repairable` and `reverified_after_repair` parameters that fed it.
+
+    Naming the repaired case honestly was the right fix for the problem as it
+    then stood. It is not a substitute for not having the path: a caller that
+    can report "repaired and re-verified" is a caller that can open a torn
+    volume by saying so twice, and D4 removes the sentence it would say it in.
     """
 
     OPENED = "opened"
-    OPENED_AFTER_REPAIR = "opened_after_repair"
     UNLOCK_FAILED = "unlock_failed"
     INTEGRITY_UNVERIFIED = "integrity_unverified"
     ROLLBACK_DETECTED = "rollback_detected"
-    UNRECOVERABLE_DIRTY_VOLUME = "unrecoverable_dirty_volume"
-    REPAIR_NOT_REVERIFIED = "repair_not_reverified"
+    DIRTY_VOLUME = "dirty_volume"
+
+
+class OrdinaryAct(Enum):
+    """The three things ordinary operation does with an open volume.
+
+    "Ordinary" is the load-bearing word.
+    [Quarantine policy](../../docs/quarantine-policy.md) §4 offers an export of
+    a quarantined volume **unmodified** for offline examination, under an
+    operator approval that names one target, and ADR-0010 D5 leaves that path
+    untouched. `EXPORT` here is the *ordinary* export — the one a session does
+    because it is running normally — and refusing it does not close the
+    examination path, which lives on the quarantine and is not reached through
+    this module at all.
+    """
+
+    READ = "read"
+    WRITE = "write"
+    EXPORT = "export"
+
+
+class VolumeAuditEvent(Enum):
+    """What a quarantined volume may put in an audit. Three classifications."""
+
+    DIRTY_WRITE_DETECTED = "dirty_write_detected"
+    VOLUME_QUARANTINED = "volume_quarantined"
+    ORDINARY_ACT_REFUSED = "ordinary_act_refused"
+
+
+@dataclass(frozen=True)
+class VolumeAuditEntry:
+    """A classification, and at most which signal or which act it concerns.
+
+    There is no field for what was being written, which record was in flight,
+    an offset, a size, a record count, a timestamp, a device identity, key
+    material or an operator identifier. ADR-0010 D4 says the classification is
+    the whole of the payload, and a field is how the rest arrives.
+    """
+
+    event: VolumeAuditEvent
+    signal: DirtySignal | None = None
+    act: OrdinaryAct | None = None
 
 
 class PersistenceRefused(Exception):
@@ -892,7 +940,16 @@ class PersistenceSession:
     docstring.
     """
 
-    __slots__ = ("_quarantine", "_binding", "_session_id", "_fenced", "_status", "_sealed")
+    __slots__ = (
+        "_quarantine",
+        "_binding",
+        "_session_id",
+        "_fenced",
+        "_status",
+        "_sealed",
+        "_volume_quarantined",
+        "_audit",
+    )
 
     def __init__(
         self, quarantine: Quarantine, binding: SessionBinding, *, session_id: str
@@ -903,6 +960,8 @@ class PersistenceSession:
         self._session_id = session_id
         self._fenced = False
         self._status: PersistenceStatus | None = None
+        self._volume_quarantined = False
+        self._audit: list[VolumeAuditEntry] = []
         if quarantine.session_id != session_id:
             raise PersistenceRefused(
                 Refusal.QUARANTINE_FROM_ANOTHER_SESSION,
@@ -923,6 +982,11 @@ class PersistenceSession:
                 object.__setattr__(self, name, value)
                 return
             if name == "_fenced" and value is True:
+                object.__setattr__(self, name, True)
+                return
+            if name == "_volume_quarantined" and value is True:
+                # One-way, for the same reason the fence is: a quarantine a
+                # caller can clear with one assignment is not a quarantine.
                 object.__setattr__(self, name, True)
                 return
             raise AttributeError(
@@ -1020,15 +1084,13 @@ class PersistenceSession:
         stored_generation: int,
         last_seen_generation: int,
         dirty: bool,
-        repairable: bool,
-        reverified_after_repair: bool = False,
     ) -> PersistenceStatus:
         """Open persistence, or say why not — and never repair into use.
 
         The order is load-bearing and is tested with several faults present at
         once: a volume that did not unlock cannot have its integrity judged, one
-        that failed integrity is not asked about its generation, and a repaired
-        volume is opened only when the repair was re-verified afterwards.
+        that failed integrity is not asked about its generation, and a volume
+        suspected of an interrupted write is not asked anything further at all.
         """
 
         self._require_open_session(observations)
@@ -1058,28 +1120,89 @@ class PersistenceSession:
                 "an older generation is detected, never silently accepted",
             )
         if dirty:
-            if not repairable:
-                return self._quarantine_volume(
-                    UnlockOutcome.UNRECOVERABLE_DIRTY_VOLUME,
-                    "a volume that cannot be repaired to a verified state is quarantined",
-                )
-            if not reverified_after_repair:
-                return self._quarantine_volume(
-                    UnlockOutcome.REPAIR_NOT_REVERIFIED,
-                    "a repair that was not verified afterwards is not an open volume",
-                )
+            # No second question. There is no `repairable`, no
+            # `reverified_after_repair`, and no branch that reaches `OPEN` from
+            # here: ADR-0010 D4 says Boot does not repair, and a path that
+            # merely asks for two attestations first is a path.
+            return self._quarantine_volume(
+                UnlockOutcome.DIRTY_VOLUME,
+                "a volume suspected of an interrupted write is not repaired into use",
+            )
 
         return self._settle(
             PersistenceState.OPEN,
-            UnlockOutcome.OPENED_AFTER_REPAIR if dirty else UnlockOutcome.OPENED,
-            (
-                "the volume was repaired and re-verified; the bound on the repair "
-                "is the caller's to enforce, not this module's"
-                if dirty
-                else "the volume unlocked and verified"
-            ),
+            UnlockOutcome.OPENED,
+            "the volume unlocked and verified",
             Capability.LITE,
         )
+
+    def audit(self) -> tuple[VolumeAuditEntry, ...]:
+        """The classifications, in order. A copy, so a caller cannot append."""
+
+        return tuple(self._audit)
+
+    @property
+    def volume_is_quarantined(self) -> bool:
+        """One-way within this boot. There is no call that clears it.
+
+        Not `set_quarantined(False)`, not `clear()`, not `reopen()`. ADR-0010
+        D4 puts leaving quarantine behind the explicit recovery workflow of D8,
+        which is [#42](https://github.com/01rabbit/Azazel-Boot/issues/42) and
+        does not exist. A method here that ended the state would be that
+        workflow, minus its four gates.
+        """
+
+        return self._volume_quarantined
+
+    def report_write(
+        self, observation: WriteObservation, observations: tuple[InterfaceObservation, ...]
+    ) -> PersistenceStatus:
+        """Judge a write the caller performed. Quarantine the volume, or don't.
+
+        The fence is consulted **first**, through `_require_open_session`: a
+        medium that was pulled is refused before its write is classified,
+        because classifying it would mean reasoning about a device that is not
+        there. That is the precedence ADR-0010 D9 and the
+        [quarantine policy](../../docs/quarantine-policy.md) fence require, and
+        it is why this raises rather than returning a quarantined status.
+
+        A clean write changes nothing and records nothing. A session that
+        audited every successful write would grow an entry per write, and the
+        audit exists to record the exceptional thing.
+        """
+
+        self._require_open_session(observations)
+
+        signal = classify(observation)
+        if signal is None:
+            return self.status()
+
+        return self._enter_volume_quarantine(signal)
+
+    def require_ordinary(self, act: OrdinaryAct) -> None:
+        """Refuse an ordinary read, write or export on a quarantined volume.
+
+        All three, and the same refusal for each: ADR-0010 D5 has no
+        per-record salvage, no "the earlier ones are fine" and no partial
+        mount, so there is no act that is still ordinary here.
+
+        **This does not close the offline-examination export** of
+        [quarantine policy](../../docs/quarantine-policy.md) §4. That export is
+        an approved, unmodified copy taken *because* the volume is not
+        trustworthy, it is granted on the quarantine rather than here, and this
+        module cannot reach it.
+        """
+
+        if self._is_fenced:
+            raise PersistenceRefused(
+                Refusal.SESSION_FENCED,
+                "the medium was removed; no session over it acts again",
+            )
+        if not self._volume_quarantined:
+            return
+
+        self._record(VolumeAuditEvent.ORDINARY_ACT_REFUSED, act=act)
+        _refuse_quarantined_volume()
 
     def fence_after_removal(self) -> PersistenceStatus:
         """The medium was pulled. Fence new actions without reading the medium.
@@ -1182,6 +1305,40 @@ class PersistenceSession:
         )
         return self._status
 
+    def _enter_volume_quarantine(self, signal: DirtySignal) -> PersistenceStatus:
+        """The whole volume, one way, with two entries and no content.
+
+        `QUARANTINED` is the same state a surprise removal reaches and the same
+        state a torn write reaches, with the same `DEGRADED_CAPABILITY`. They
+        are **not distinguished by capability** — ADR-0010 D4 treats them as one
+        condition, and a consumer that could tell them apart would eventually
+        treat one as the milder of the two.
+        """
+
+        self._record(VolumeAuditEvent.DIRTY_WRITE_DETECTED, signal=signal)
+        self._volume_quarantined = True
+        self._record(VolumeAuditEvent.VOLUME_QUARANTINED, signal=signal)
+        return self._settle(
+            PersistenceState.QUARANTINED,
+            None,
+            # "will not use", never "erased". The data is on the medium; what
+            # changed is that Boot refuses it in ordinary operation, and
+            # `tests/unit/test_dirty_write.py` scans for the six words that
+            # would claim otherwise.
+            "an interrupted write is suspected; Boot will not use this volume "
+            "in ordinary operation, and does not repair it",
+            DEGRADED_CAPABILITY,
+        )
+
+    def _record(
+        self,
+        event: VolumeAuditEvent,
+        *,
+        signal: DirtySignal | None = None,
+        act: OrdinaryAct | None = None,
+    ) -> None:
+        self._audit.append(VolumeAuditEntry(event=event, signal=signal, act=act))
+
     def _quarantine_volume(
         self, outcome: UnlockOutcome, reason: str
     ) -> PersistenceStatus:
@@ -1244,6 +1401,21 @@ def _fenced_status() -> PersistenceStatus:
             "requires a reboot rather than continuing ambiguously",
         ),
         capability=DEGRADED_CAPABILITY,
+    )
+
+
+def _refuse_quarantined_volume() -> None:
+    """Raised from a frame holding no act, no signal and no session.
+
+    The message names the rule. It does not name which act was refused, which
+    signal put the volume here, or anything about the medium — those reach a
+    console and a log on hardware that travels through uncontrolled hands.
+    """
+
+    raise PersistenceRefused(
+        Refusal.VOLUME_QUARANTINED,
+        "an interrupted write is suspected on this volume; ordinary read, "
+        "write and export are refused, and it is not repaired",
     )
 
 

@@ -208,7 +208,7 @@ carry it, and that is a configuration rather than a failure.
 | `unexamined` | no act has run; nothing about the medium is known | `CORE` |
 | `absent` | the medium carries no persistence partition | `CORE` |
 | `locked` | present, not opened; the session runs from RAM | `CORE` |
-| `open` | unlocked and verified, or repaired within bounds and re-verified | `LITE` |
+| `open` | unlocked and verified. **Nothing else reaches this state** | `LITE` |
 | `quarantined` | present and not trustworthy | `CORE` |
 | `fenced` | the medium went away mid-session | `CORE` |
 
@@ -220,29 +220,102 @@ exactly where a "temporary" exception would be argued for.
 ## 4. What unlocking refuses, and what it never does
 
 The order is deliberate: a volume that did not unlock cannot have its integrity
-judged, one that failed integrity is not asked about its generation, and a dirty
-volume is repaired only within bounds.
+judged, one that failed integrity is not asked about its generation, and a
+volume suspected of an interrupted write is not asked anything further at all.
 
 | Outcome | Meaning |
 | --- | --- |
 | `unlock_failed` | the volume did not unlock |
 | `integrity_unverified` | a modification that is not authenticated — **detected, not repaired** |
 | `rollback_detected` | an older generation, detected and never silently accepted |
-| `unrecoverable_dirty_volume` | a volume that cannot be repaired to a verified state is quarantined |
-| `repair_not_reverified` | a repair nobody verified afterwards is not an open volume |
-| `opened_after_repair` | opened, and **distinguishable from a clean open** |
+| `dirty_volume` | an interrupted write is suspected; the volume is quarantined |
 
-The outcome is `opened_after_repair`, not `..._after_bounded_repair`: **nothing
-in this module bounds the repair.** No extent, byte budget or transaction count
-is expressed here, and `repairable` is a boolean the caller supplies. The bound
-[the threat model](threat-model.md) §5 asks for is the caller's to enforce, and
-saying otherwise was the last piece of an earlier claim doing work no code did.
+There is no `opened_with_warnings`, and — since
+[ADR-0010](adr/0010-persistence-key-and-migration.md) D4 — **no
+`opened_after_repair` either.**
 
-There is no `opened_with_warnings`. A repaired volume gets its own outcome
-rather than the clean one: the first version returned plain `opened`, identical
-to a verified open in everything but a free-text string, so a consumer reading
-`outcome` could not tell them apart — which is the distinction
-[the threat model](threat-model.md) §5 is about.
+That member was real, and removing it is worth recording rather than quietly
+dropping. An earlier version opened a dirty volume the caller reported as
+repaired and re-verified, under a distinct outcome so a consumer could tell it
+from a clean open. That was the right fix for the problem as it then stood: the
+version before *it* returned plain `opened`, identical to a verified open in
+everything but a free-text string.
+
+**Naming the repaired case honestly is not a substitute for not having it.** A
+caller who can report "repairable" and "re-verified" can open a torn volume by
+saying so twice, and this module bounded neither claim — it had no extent, byte
+budget or transaction count, and said as much. D4 removes the sentence rather
+than improving its wording: there is no `repairable` parameter, no
+`reverified_after_repair` parameter, and no branch from `dirty` to `open`. A
+test asserts the absence on the **signature**, which is stronger than every
+combination of arguments being refused.
+
+## 4.1 A suspected torn write costs the whole volume
+
+[ADR-0010](adr/0010-persistence-key-and-migration.md) D4 and D5, implemented in
+[`azazel_boot.dirty_write`](../src/azazel_boot/dirty_write.py) and the session's
+`report_write` / `require_ordinary`.
+
+The caller performs the write and reports what it saw in three closed
+vocabularies — the receipt, the medium's continuity, the verify step — and
+**each is three-valued, not a boolean.** A `bool` has no room for "nobody
+established this", so a caller facing an unknown would have to pick one of the
+two answers it does have, and under time pressure that is the convenient one.
+
+Of the twenty-seven possible observations, **one is a clean write.** The other
+twenty-six quarantine the volume, and the test enumerates all of them rather
+than sampling, so a widened condition is a red test.
+
+The classification order is fixed and is part of the contract, because faults
+arrive together and the audit records one word: continuity first, then whether
+the verify step reached an answer, then the receipt. A pulled medium *causes* a
+missing receipt, so recording `receipt_missing` there would name the symptom
+instead of the event.
+
+**Why the whole volume.** [Threat model](threat-model.md) §4 fixes the write
+order — *prepare-and-sync, apply, verify, persist receipt* — so a missing
+receipt is the signal. What it does not say is *how much* is affected, and
+there is no way to find out from this side: the records already there are the
+same bytes whether the interrupted write touched them or not, and the only
+thing that could say otherwise is the volume being judged. Per-record salvage
+would be a guess presented as a finding.
+
+Ordinary `read`, `write` and `export` are then all refused, with the same
+refusal. **The fence wins over all of it**: a medium that was pulled is refused
+before its write is even classified, because classifying it would mean
+reasoning about a device that is not there.
+
+The quarantine is **one-way within the boot**. There is no clearing call — not
+`clear`, not `reopen`, not `reset` — and a test asserts the absence over the
+public surface rather than trying the obvious spellings one at a time. Leaving
+quarantine is D8's explicit recovery workflow, which is
+[#42](https://github.com/01rabbit/Azazel-Boot/issues/42) and does not exist; a
+method here that ended the state would be that workflow with its four gates
+removed.
+
+### Nothing is called erased
+
+The data is on the medium. Boot **will not use it in ordinary operation**, and
+that is a different sentence from "the volume was wiped". No message, field,
+reason code or docstring says wiped, cleared, erased, destroyed, shredded or
+deleted — scanned over the rendered status, the refusal, the audit and the
+module's own code. What an operator may later truthfully tell someone about the
+evidence depends on the distinction.
+
+The offline-examination export of [quarantine
+policy](quarantine-policy.md) §4 is **unchanged**: an approved, unmodified copy
+taken *because* the volume is not trustworthy. It is granted on the quarantine,
+not here, and a test drives it on a quarantined volume rather than asserting
+that it is a different path — "it is a different path" being the kind of claim
+that stops being true quietly.
+
+### What the audit may hold
+
+Three classifications: the detection, the transition into quarantine, and the
+refusal of each refused act. `VolumeAuditEntry` has three fields — `event`,
+`signal`, `act` — and no field for content, an offset, a size, a record count,
+a timestamp, a device identity, key material or an operator identifier. A test
+asserts the rendered audit carries no digit at all, because a count is digits.
 
 A generation is a **non-negative integer**. `float("nan")` compares false
 against everything, and a review used it to walk past the rollback check.

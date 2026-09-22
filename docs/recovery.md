@@ -27,7 +27,7 @@ third thing that belongs to neither.
 | --- | --- | --- |
 | **The host laptop** | by not having been changed. Recovery is verification and reporting, not repair | the clinic, the city office, the volunteer |
 | **The medium** (image) | immutable A/B slots: fall back to the prior verified generation ([ADR-0003](adr/0003-immutable-ab-update.md)) | the responder |
-| **The medium** (persistence, audit, evidence) | bounded, conservative boot-time repair, or quarantine — never repair-into-use ([threat model](threat-model.md) §5) | the responder |
+| **The medium** (persistence, audit, evidence) | **quarantine, never repair** — [ADR-0010](adr/0010-persistence-key-and-migration.md) D4 removed the bounded-repair path that used to sit here | the responder |
 
 The order matters. A recovery step that restored a session at the cost of
 writing to the host would be a failure, not a recovery.
@@ -195,7 +195,7 @@ recoverable thing that is not the image.
 
 | Situation | Intended outcome |
 | --- | --- |
-| Unclean shutdown leaves a dirty volume | boot-time repair is **bounded and conservative**; a volume that cannot be repaired to a verified state is **quarantined rather than repaired into use**, and the failure is visible rather than silent ([threat model](threat-model.md) §5) |
+| Unclean shutdown leaves a dirty volume | **the whole volume is quarantined and never repaired** ([ADR-0010](adr/0010-persistence-key-and-migration.md) D4). There is no bounded repair, no per-record salvage and no partial mount; the failure is visible rather than silent, and nothing is described as erased (D5) |
 | Offline modification of persistence contents | detected at boot through integrity-protected encryption; the volume is quarantined, not repaired into use |
 | An older persistence generation is presented | generation counters bound into the signed checkpoint chain detect it; it is not silently accepted |
 | The audit chain is truncated or spliced | two-copy signed checkpoints, with an operator-carried or remote anchor when one is available |

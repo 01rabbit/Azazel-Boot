@@ -185,8 +185,6 @@ def unlock_arguments(**overrides) -> dict:
         "stored_generation": 7,
         "last_seen_generation": 7,
         "dirty": False,
-        "repairable": True,
-        "reverified_after_repair": False,
     }
     arguments.update(overrides)
     return arguments
@@ -449,11 +447,7 @@ def test_a_verified_volume_opens(observations) -> None:
         ({"unlocked": False}, UnlockOutcome.UNLOCK_FAILED),
         ({"integrity_verified": False}, UnlockOutcome.INTEGRITY_UNVERIFIED),
         ({"stored_generation": 6, "last_seen_generation": 7}, UnlockOutcome.ROLLBACK_DETECTED),
-        ({"dirty": True, "repairable": False}, UnlockOutcome.UNRECOVERABLE_DIRTY_VOLUME),
-        (
-            {"dirty": True, "repairable": True, "reverified_after_repair": False},
-            UnlockOutcome.REPAIR_NOT_REVERIFIED,
-        ),
+        ({"dirty": True}, UnlockOutcome.DIRTY_VOLUME),
     ],
 )
 def test_every_failure_quarantines_rather_than_repairs_into_use(
@@ -479,8 +473,7 @@ def test_every_failure_quarantines_rather_than_repairs_into_use(
             UnlockOutcome.UNLOCK_FAILED,
         ),
         (
-            {"integrity_verified": False, "dirty": True, "repairable": True,
-             "reverified_after_repair": True},
+            {"integrity_verified": False, "dirty": True},
             UnlockOutcome.INTEGRITY_UNVERIFIED,
         ),
         (
@@ -488,8 +481,7 @@ def test_every_failure_quarantines_rather_than_repairs_into_use(
             UnlockOutcome.INTEGRITY_UNVERIFIED,
         ),
         (
-            {"stored_generation": 1, "last_seen_generation": 9, "dirty": True,
-             "repairable": True, "reverified_after_repair": True},
+            {"stored_generation": 1, "last_seen_generation": 9, "dirty": True},
             UnlockOutcome.ROLLBACK_DETECTED,
         ),
     ],
@@ -503,19 +495,33 @@ def test_the_first_fault_in_the_fixed_order_is_the_one_reported(
     assert status.outcome is expected
 
 
-def test_a_repaired_volume_is_distinguishable_from_a_verified_one(observations) -> None:
-    """The earlier version returned plain `opened`, identical but for a string."""
+def test_there_is_no_way_to_open_a_dirty_volume(observations) -> None:
+    """The repair path is gone, not merely refused — ADR-0010 D4.
+
+    This test replaces `test_a_repaired_volume_is_distinguishable_from_a_verified_one`,
+    which asserted that a repaired open was *labelled* differently from a clean
+    one. That was the right fix for the problem as it then stood, and it is not
+    a substitute for not having the path: a caller who can report "repaired and
+    re-verified" can open a torn volume by saying so twice.
+
+    So the check is on the signature as well as the behaviour. `unlock` has no
+    parameter a caller could set to reach `OPEN` with `dirty=True`, which is
+    stronger than every combination of parameters being refused.
+    """
+
+    import inspect
+
+    parameters = set(inspect.signature(PersistenceSession.unlock).parameters)
+    assert not parameters & {"repairable", "reverified_after_repair", "repair"}
+    assert not any("repair" in name for name in parameters)
 
     status = session(observations).unlock(
-        MEDIUM,
-        layout(),
-        observations,
-        **MEDIA_ARGS,
-        **unlock_arguments(dirty=True, reverified_after_repair=True),
+        MEDIUM, layout(), observations, **MEDIA_ARGS, **unlock_arguments(dirty=True)
     )
-    assert status.state is PersistenceState.OPEN
-    assert status.outcome is UnlockOutcome.OPENED_AFTER_REPAIR
-    assert status.outcome is not UnlockOutcome.OPENED
+    assert status.state is PersistenceState.QUARANTINED
+    assert status.outcome is UnlockOutcome.DIRTY_VOLUME
+    assert status.writable is False
+    assert status.capability is DEGRADED_CAPABILITY
 
 
 @pytest.mark.parametrize(
@@ -538,13 +544,13 @@ def test_a_generation_that_is_not_a_count_is_refused(value, observations) -> Non
 def test_there_is_no_outcome_meaning_opened_with_warnings() -> None:
     assert {member.value for member in UnlockOutcome} == {
         "opened",
-        "opened_after_repair",
         "unlock_failed",
         "integrity_unverified",
         "rollback_detected",
-        "unrecoverable_dirty_volume",
-        "repair_not_reverified",
+        "dirty_volume",
     }
+    # And no member whose name suggests one: `opened_after_repair` was real.
+    assert not any("repair" in member.value for member in UnlockOutcome)
 
 
 # --- a fence revokes, rather than announcing -------------------------------
