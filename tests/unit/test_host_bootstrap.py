@@ -209,8 +209,27 @@ def test_the_evidence_cannot_hold_a_release_or_support_claim() -> None:
 
 
 def test_every_required_evidence_field_exists_on_the_model() -> None:
-    """Image source, digest, creation time, architecture, Debian version, tool."""
+    """Image source, digest, both checks, creation time, architecture, version,
+    tool, backend, execution — pinned as an exact tuple.
 
+    The parametrized test below iterates this constant, so shrinking it would
+    leave that test with fewer cases and the suite green.
+    `test_denylist_shape.py` found this file doing exactly that, which is the
+    fourth instance of the shape in this repository.
+    """
+
+    assert REQUIRED_VM_EVIDENCE_FIELDS == (
+        "image_source",
+        "image_digest",
+        "signature_verification",
+        "digest_verification",
+        "created_at",
+        "cpu_architecture",
+        "debian_version_id",
+        "builder_tool_version",
+        "backend",
+        "execution",
+    )
     names = {f.name for f in dataclasses.fields(VmEvidence)}
     assert set(REQUIRED_VM_EVIDENCE_FIELDS) <= names
     require_vm_evidence(evidence())
