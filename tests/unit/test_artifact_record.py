@@ -231,7 +231,7 @@ def test_a_verification_is_about_the_whole_record_not_just_the_payload() -> None
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
-        (False, Refusal.EMPTY_FIELD),
+        (False, Refusal.NOT_A_SCALAR),
         (0, Refusal.EMPTY_FIELD),
         (1, Refusal.EMPTY_FIELD),
         ([], Refusal.NOT_A_SCALAR),
@@ -244,6 +244,15 @@ def test_a_signature_that_is_not_a_string_is_refused(value, expected) -> None:
     with pytest.raises(RecordRefused) as refused:
         parse(a_record(signature=value, signed_artifact_digest="sha256:" + "8" * 64))
     assert refused.value.refusal is expected
+
+
+def test_a_boolean_is_not_an_integer_here() -> None:
+    """`bool` subclasses `int`, so a record saying `source_date_epoch: true`
+    would otherwise parse as a number."""
+
+    with pytest.raises(RecordRefused) as refused:
+        parse(a_record(source_date_epoch=True))
+    assert refused.value.refusal is Refusal.NOT_A_SCALAR
 
 
 def test_a_field_that_is_not_a_scalar_is_refused() -> None:

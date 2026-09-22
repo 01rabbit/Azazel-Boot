@@ -42,6 +42,23 @@ write whose bytes were honest. The record is what a later reader has.
 A signature is a **non-empty string**. `""`, `false`, `0`, `[]` and `{}` are
 refused rather than read as signed.
 
+**Every record field is a JSON scalar** — a string, an integer, or absent. A
+boolean is refused too, because `bool` subclasses `int` and
+`source_date_epoch: true` would otherwise parse as a number. This keeps the
+fingerprint total and canonical: a fingerprint over arbitrary nested JSON is a
+canonicalisation hazard, and floating-point `repr` differences are a classic way
+for one to break.
+
+It also decides something the contract left open, so it is stated here rather
+than absorbed silently. [The contract](builder-writer-contract.md) section 3
+describes `package_manifest`, `firmware_manifest` and `sbom` in words that read
+like collections ("every package…", "every firmware blob…"). Under this
+constraint those fields carry a **digest or a reference**, not an inline
+document. That reading is a narrowing of section 3 and belongs in a revision of
+[ADR-0009](adr/0009-builder-and-writer-contract.md) D2 rather than only here;
+it is recorded so a builder that emits an inline manifest meets a stated
+constraint instead of an unexplained refusal.
+
 **Verification is injected and the default verifies nothing.** Boot has no
 signing key, no signer role and no signed artifact
 ([release policy](release-policy.md) section 1), and Ed25519 is outside the
@@ -121,11 +138,25 @@ could wrap a genuine plan and write with **neither the target code nor the
 destructive phrase ever typed**. Securing the token was never the point;
 securing the sequence is.
 
-**Any refusal during the write ends the authorisation.** A device that
-disappeared, a substitution, a device that became ineligible, an unmount that
-failed — each means re-running `list-media`, re-typing the code and re-typing
-the phrase. That is deliberate: a substitution is "refused, not a warning and
-not a prompt", and an authorisation that survives its own refusal is a prompt.
+**A refusal at the device ends the authorisation; a typo does not.** A device
+that disappeared, a substitution, a device that became ineligible, an unmount
+that failed, a port that misbehaved — each of those means re-running
+`list-media`, re-typing the code and re-typing the phrase, because a
+substitution is "refused, not a warning and not a prompt" and an authorisation
+that survives its own refusal is a prompt.
+
+A mistyped target code or a mistyped phrase costs the retype and nothing else.
+An earlier version retired the plan before comparing, so one fat-fingered
+character spent the plan *and* the target code and sent the operator back
+through device selection — the step this design exists to protect, and the one
+where an operator under time pressure is most likely to pick the wrong object.
+There was no security in it: the code is a field of the plan the caller already
+holds.
+
+**A port that raises is a refusal**, not a stray exception. Every injected port
+is called through a guard that turns anything it raises into
+`port_misbehaved`, so a caller can still express "do not write unless
+everything is in order" in one `except`.
 
 **The record binding is re-asserted before the write**, not only at plan time.
 The record's fingerprint is stored on the plan and recomputed in `execute`: a
@@ -167,6 +198,19 @@ Persistence is not part of this. Creating encrypted persistence is a separate
 explicit operation on the USB medium only
 ([contract](builder-writer-contract.md) section 7.5), and nothing in these
 modules can start it.
+
+## 3.1 The audit record, and what it can say
+
+Contract section 7.4 requires the write service to record an audit
+classification. `WriteResult` carries the outcome, the target code, the expected
+and measured digests and the byte counts — and, by section 7.6, **no device
+identity**. So an audit entry can name the medium only by a target code that is
+scoped to one enumeration in one session and means nothing afterwards.
+
+That is a consequence of the confidentiality rule, not an oversight, and it is
+written here rather than discovered when someone reads an audit trail. Making an
+entry that survives its session would need a per-session salted handle, which is
+a design decision nobody has taken.
 
 ## 4. How this is tested, and what that does not prove
 

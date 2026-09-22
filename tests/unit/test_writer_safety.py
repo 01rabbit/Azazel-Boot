@@ -618,26 +618,104 @@ def test_a_plan_whose_record_changed_after_verification_is_refused(
     authorisation = authority.confirm_destruction(
         authority.confirm_target(planned, code), DESTRUCTIVE_CONFIRMATION
     )
-    forged = dataclasses.replace(
-        planned, record_fingerprint="sha256:" + "0" * 64
+    # Reach the check itself: `dataclasses.replace` would make a new object and
+    # the identity check would fire first, leaving this branch untested.
+    impostor = parse(
+        {
+            **rec.fields,
+            "signature": None,
+            "signed_artifact_digest": None,
+            "compatibility_claim": "hardware_verified",
+        }
     )
-    # The plan object inside the authorisation is the issued one; this asserts
-    # the check itself rather than the record's immutability.
+    object.__setattr__(planned, "record", impostor)
+
     device = Device(tmp_path / "device")
     with pytest.raises(WriteRefused) as refused:
         authority.execute(
-            Authorised(confirmed=TargetConfirmed(plan=forged)),
+            authorisation,
             probe=Probe(),
             unmounter=Unmounter(),
             raw_writer=device,
             reader=device,
         )
-    assert refused.value.refusal is Refusal.AUTHORISATION_NOT_ISSUED
+    assert refused.value.refusal is Refusal.RECORD_CHANGED_AFTER_VERIFICATION
     assert device.written == b""
-    # And the genuine one still works, so the check is not simply refusing all.
-    assert authority.execute(
-        authorisation, probe=Probe(), unmounter=Unmounter(), raw_writer=device, reader=device
-    ).medium_is_valid is True
+
+
+def test_a_mistyped_code_costs_the_retype_and_nothing_else(artifact: Path) -> None:
+    """Retiring the plan on a typo sent the operator back through `list-media`.
+
+    That is the step the whole design exists to protect — re-identifying a
+    physical device under time pressure — and there was no security in it: the
+    code is a field of the plan the caller already holds.
+    """
+
+    authority, code = an_authority()
+    rec = record()
+    planned = authority.plan(
+        target_code=code,
+        record=rec,
+        verification=verified_for(rec, artifact),
+        artifact_path=str(artifact),
+    )
+    with pytest.raises(WriteRefused) as refused:
+        authority.confirm_target(planned, "m1-1-99")
+    assert refused.value.refusal is Refusal.TARGET_CODE_MISMATCH
+    confirmed = authority.confirm_target(planned, code)
+
+    with pytest.raises(WriteRefused) as phrase:
+        authority.confirm_destruction(confirmed, "yes")
+    assert phrase.value.refusal is Refusal.DESTRUCTION_NOT_CONFIRMED
+    assert authority.confirm_destruction(confirmed, DESTRUCTIVE_CONFIRMATION) is not None
+
+
+def test_an_earlier_step_passed_to_execute_is_refused(tmp_path: Path, artifact: Path) -> None:
+    """A `Planned` or a `TargetConfirmed` used to die on an `AttributeError`."""
+
+    authority, code = an_authority()
+    rec = record()
+    planned = authority.plan(
+        target_code=code,
+        record=rec,
+        verification=verified_for(rec, artifact),
+        artifact_path=str(artifact),
+    )
+    device = Device(tmp_path / "device")
+    for step in (planned, authority.confirm_target(planned, code)):
+        with pytest.raises(WriteRefused) as refused:
+            authority.execute(
+                step,  # type: ignore[arg-type]
+                probe=Probe(),
+                unmounter=Unmounter(),
+                raw_writer=device,
+                reader=device,
+            )
+        assert refused.value.refusal is Refusal.AUTHORISATION_NOT_ISSUED
+    assert device.written == b""
+
+
+def test_a_port_that_raises_is_a_refusal_not_a_stray_exception(
+    tmp_path: Path, artifact: Path
+) -> None:
+    """`refusals.Refused` is what a caller catches; a port must not escape it."""
+
+    class BrokenProbe:
+        def reread(self, identity):
+            raise RuntimeError("the bus went away")
+
+    authority, code = an_authority()
+    device = Device(tmp_path / "device")
+    with pytest.raises(WriteRefused) as refused:
+        authority.execute(
+            authorised_write(artifact, authority, code),
+            probe=BrokenProbe(),
+            unmounter=Unmounter(),
+            raw_writer=device,
+            reader=device,
+        )
+    assert refused.value.refusal is Refusal.PORT_MISBEHAVED
+    assert device.written == b""
 
 
 def test_a_port_cannot_change_the_write_target_it_was_handed(
@@ -652,7 +730,7 @@ def test_a_port_cannot_change_the_write_target_it_was_handed(
 
     authority, code = an_authority()
     device = Device(tmp_path / "device")
-    with pytest.raises(AttributeError):
+    with pytest.raises(WriteRefused) as refused:
         authority.execute(
             authorised_write(artifact, authority, code),
             probe=Probe(),
@@ -660,6 +738,7 @@ def test_a_port_cannot_change_the_write_target_it_was_handed(
             raw_writer=device,
             reader=device,
         )
+    assert refused.value.refusal is Refusal.PORT_MISBEHAVED
     assert device.written == b""
 
 

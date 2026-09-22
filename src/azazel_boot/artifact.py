@@ -74,7 +74,7 @@ COMPATIBILITY_CLAIMS = ("candidate", "hardware_verified")
 #: `fingerprint()` total (an unserialisable value used to escape as a bare
 #: `TypeError`, past the one `except` this package's refusals exist for) and
 #: what stops a list and a tuple canonicalising to the same bytes.
-SCALAR_TYPES = (str, int, bool, type(None))
+SCALAR_TYPES = (str, int, type(None))
 
 
 class Refusal(Enum):
@@ -213,7 +213,9 @@ def parse(document: object) -> ArtifactRecord:
         raise RecordRefused(Refusal.UNKNOWN_FIELD, _bounded(str(unknown)))
 
     for name, value in document.items():
-        if not isinstance(value, SCALAR_TYPES):
+        # `bool` is a subclass of `int`, so it has to be excluded by name or a
+        # record carrying `source_date_epoch: true` parses as an integer.
+        if isinstance(value, bool) or not isinstance(value, SCALAR_TYPES):
             raise RecordRefused(Refusal.NOT_A_SCALAR, f"{name}: {type(value).__name__}")
 
     for name in RECORD_FIELDS:

@@ -86,6 +86,7 @@ class Refusal(Enum):
     TARGET_SUBSTITUTED = "target_substituted"
     NOW_INELIGIBLE = "now_ineligible"
     UNMOUNT_FAILED = "unmount_failed"
+    PORT_MISBEHAVED = "port_misbehaved"
 
 
 class WriteRefused(Refused):
@@ -244,8 +245,18 @@ class WriteAuthority:
         #: controls equality.
         self._issued: list[object] = []
 
+    def _holds(self, state: object) -> bool:
+        """Whether this authority issued that exact object and still holds it."""
+
+        return any(issued is state for issued in self._issued)
+
     def _retire(self, state: object) -> bool:
-        """Remove a state this authority issued, or report that it did not."""
+        """Remove a state this authority issued, or report that it did not.
+
+        Retirement happens when a step *succeeds*, and on entry to `execute`.
+        Never on a refusal before the write: a mistyped confirmation is a typo,
+        not a substitution.
+        """
 
         for index, issued in enumerate(self._issued):
             if issued is state:
@@ -300,9 +311,18 @@ class WriteAuthority:
         return planned
 
     def confirm_target(self, planned: Planned, typed_code: str) -> TargetConfirmed:
-        """The operator retypes the code. Compared exactly; nothing is normalised."""
+        """The operator retypes the code. Compared exactly; nothing is normalised.
 
-        if not self._retire(planned):
+        A typo costs the operator the retype and nothing else. An earlier
+        version retired the plan before comparing, so one fat-fingered character
+        spent both the plan and the target code and sent the operator back
+        through `list-media` — re-identifying a physical device under time
+        pressure, which is the step this whole design exists to protect. There
+        was no security in it either: the code is a field of the plan the caller
+        already holds, so a retry reveals nothing and grants nothing.
+        """
+
+        if not self._holds(planned):
             raise WriteRefused(
                 Refusal.AUTHORISATION_NOT_ISSUED,
                 "this plan was not issued by this authority, or has already been "
@@ -312,6 +332,7 @@ class WriteAuthority:
             raise WriteRefused(
                 Refusal.TARGET_CODE_MISMATCH, "the code typed back did not match"
             )
+        self._retire(planned)
         confirmed = TargetConfirmed(plan=planned)
         self._issued.append(confirmed)
         return confirmed
@@ -321,7 +342,7 @@ class WriteAuthority:
     ) -> Authorised:
         """A second, separate confirmation of the destructive act itself."""
 
-        if not self._retire(confirmed):
+        if not self._holds(confirmed):
             raise WriteRefused(
                 Refusal.AUTHORISATION_NOT_ISSUED,
                 "this confirmation was not issued by this authority, or has "
@@ -332,6 +353,7 @@ class WriteAuthority:
                 Refusal.DESTRUCTION_NOT_CONFIRMED,
                 "the destruction was not confirmed in the required words",
             )
+        self._retire(confirmed)
         authorised = Authorised(confirmed=confirmed)
         self._issued.append(authorised)
         return authorised
@@ -347,10 +369,16 @@ class WriteAuthority:
     ) -> WriteResult:
         """Re-verify, unmount, write, read back. Refuses before writing, never after."""
 
+        if not isinstance(authorised, Authorised):
+            raise WriteRefused(
+                Refusal.AUTHORISATION_NOT_ISSUED,
+                "execute takes a completed authorisation, not an earlier step",
+            )
         # Retired on entry: a refusal below must not leave an authorisation that
         # succeeds on a retry. A substitution is "refused, not a warning and not
         # a prompt" (contract 7.2), and an authorisation that survives its own
-        # refusal is a prompt.
+        # refusal is a prompt. A mistyped confirmation is not in this class and
+        # does not retire anything.
         if not self._retire(authorised):
             raise WriteRefused(
                 Refusal.AUTHORISATION_NOT_ISSUED,
@@ -365,7 +393,7 @@ class WriteAuthority:
                 "the record is not the one the verification was about",
             )
 
-        current = probe.reread(planned.enumerated.identity)
+        current = _port(probe.reread, planned.enumerated.identity)
         if current is None:
             raise WriteRefused(
                 Refusal.TARGET_DISAPPEARED,
@@ -384,17 +412,17 @@ class WriteAuthority:
         if eligibility is not Eligibility.ELIGIBLE:
             raise WriteRefused(Refusal.NOW_INELIGIBLE, eligibility.value)
 
-        if not unmounter.unmount(current.identity):
+        if not _port(unmounter.unmount, current.identity):
             raise WriteRefused(
                 Refusal.UNMOUNT_FAILED,
                 "the device could not be released; writing under a live mount "
                 "corrupts whatever is using it",
             )
 
-        written = raw_writer.write(current.identity, planned.artifact_path)
+        written = _port(raw_writer.write, current.identity, planned.artifact_path)
         # The extent verified is the artifact's own length, measured here, not
         # the number the writer reports about its own work.
-        measured = reader.digest(current.identity, planned.artifact_bytes)
+        measured = _port(reader.digest, current.identity, planned.artifact_bytes)
         expected = planned.record.unsigned_payload_digest
         verified = measured == expected and written == planned.artifact_bytes
         return WriteResult(
@@ -407,6 +435,26 @@ class WriteAuthority:
             expected_bytes=planned.artifact_bytes,
             written_bytes=written,
         )
+
+
+def _port(call, *arguments):
+    """Call an injected port, and turn its misbehaviour into a refusal.
+
+    A port that raises — including one that tries to mutate the immutable
+    identity it was handed — must not leave `execute` by an exception that says
+    nothing about writing. `refusals.Refused` exists so a caller can express
+    "do not write unless everything is in order" in one `except`, and an
+    `AttributeError` out of the write path defeats that.
+    """
+
+    try:
+        return call(*arguments)
+    except WriteRefused:
+        raise
+    except Exception as error:  # noqa: BLE001 - a port may raise anything
+        raise WriteRefused(
+            Refusal.PORT_MISBEHAVED, f"{call.__qualname__}: {type(error).__name__}"
+        ) from None
 
 
 def inspect(

@@ -8,7 +8,12 @@ the disk they cannot afford to lose. A target code exists so that the identity
 the operator confirmed and the device the writer opens are the same object,
 checked, rather than the same string, trusted.
 
-Three properties carry the safety here:
+Three properties carry the safety here. They are enforced as far as Python
+enforces anything — an immutable value object, a read-only mapping, a code that
+resolves once — which puts every accidental misuse out of reach and leaves
+`object.__setattr__` and `gc.get_referents` where they always are. The boundary
+is the process, and the write service is the component that boundary is drawn
+around (contract section 8).
 
 *A candidate carries no model and no serial.* The dataclass has no field for
 them, so a rendering cannot leak what the model cannot hold. The stable
