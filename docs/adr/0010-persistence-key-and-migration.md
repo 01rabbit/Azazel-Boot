@@ -1,16 +1,15 @@
 # ADR-0010: Persistence key handling, dirty-write detection, and migration
 
-Status: **proposed — decisions required, nothing implemented.** This record
-exists to put four open questions in front of the owner with the options
-narrowed and the consequences stated. Nothing in
-[#7](https://github.com/01rabbit/Azazel-Boot/issues/7) is implemented against
-it, and #7 stays open.
+Status: **accepted (2026-09-22) — nothing implemented.** The owner decided
+D1–D10 below. Implementation has **not** started;
+[#7](https://github.com/01rabbit/Azazel-Boot/issues/7) stays open and is
+decomposed into the three children this record names.
 
 Related: [ADR-0008 D4.1 / D4.1.1](0008-debian-13-live-baseline.md) ·
 [ADR-0003 D4](0003-immutable-ab-update.md) ·
 [Threat model](../threat-model.md) §4–§5 ·
 [Quarantine policy](../quarantine-policy.md) §4 ·
-[Persistence](../persistence.md)
+[Persistence](../persistence.md) · [Recovery](../recovery.md)
 
 ## Context
 
@@ -19,173 +18,231 @@ Related: [ADR-0008 D4.1 / D4.1.1](0008-debian-13-live-baseline.md) ·
 LUKS2 volume UUID, the signed image digest and the commissioning generation,
 under a key-protected HMAC. It did not decide what opens the volume, what
 happens when nothing can, how a write interrupted by a removal is detected, or
-how a persistence format change is migrated.
+how a format change is migrated.
 
-Those four are what #7's acceptance criteria still lack, and three of them
-interact, so deciding one at a time would be deciding the others by accident.
+Those four are what #7's acceptance criteria still lack, and they interact, so
+deciding one at a time would decide the others by accident.
 
-**No key material, passphrase, endpoint or device identity appears in this
-record, in any issue, in any fixture or in any log.** The decisions below are
-about shapes and failure modes; the values are not this document's business.
+**No key material, passphrase, endpoint, device identity or snapshot content
+appears in this record, in any issue, in any pull request, in any fixture, on a
+terminal, in a journal or in an audit** (D10). The decisions are about shapes
+and failure modes; the values are not this document's business.
 
-## D1 — What opens the LUKS2 volume
+## D1 — No key, no persistence. No emergency exception.
 
-### D1.1 (proposed) — Three sources, in a fixed order, and none is required
+When no key or passphrase can be obtained safely, Boot **never opens
+persistence**, never creates one, and continues in an **ephemeral** session:
+RAM only, `CORE` capability, nothing retained across a reboot.
+
+**There is no emergency exception for an unprotected volume.** An operator
+cannot accept one, a policy cannot name one, and no state permits one. This was
+considered — [threat model](../threat-model.md) §5 already contemplates an
+explicit operator acceptance for *audit assurance* (`LOCAL_CONTINUITY_ONLY`) —
+and it is refused for encryption at rest, because the medium travels through
+uncontrolled hands and §2.1's mitigation for theft is that it "must not yield
+plaintext evidence". A fallback volume breaks exactly that, under exactly the
+time pressure that makes it tempting.
+
+Three sources may supply a key, in a fixed order, and **none is required**:
 
 | Source | When it is available |
 | --- | --- |
-| Platform-sealed key material | Only in `VERIFIED_FIRMWARE`. It is sealed to a platform Boot does not own, so on a borrowed laptop it is **absent by definition**. |
-| An operator-carried passphrase | Whenever the operator has it. This is the ordinary case and the program plan already requires a *documented, portable* one. |
-| A recovery credential | Held separately from the field passphrase, used when the passphrase is lost. |
+| Platform-sealed key material | Only in `VERIFIED_FIRMWARE`. Sealed to a platform Boot does not own, so on a borrowed laptop it is **absent by definition**. |
+| An operator-carried passphrase | The ordinary case. The program plan requires a documented, portable one. |
+| A recovery credential | Held separately from the field passphrase, for when that is lost. |
 
-The order is fixed so that "which one opened it" is recorded rather than
-inferred, and so that a platform-sealed open on one laptop does not become an
-expectation on the next.
+The order is fixed so that *which one opened it* is recorded rather than
+inferred, and so a platform-sealed open on one laptop does not become an
+expectation on the next. The recovery credential **may not sign ordinary field
+checkpoints and may not hide a discontinuity** — [threat
+model](../threat-model.md) §5 already requires this.
 
-**The recovery credential may not sign ordinary field checkpoints and may not
-hide a discontinuity** — [threat model](../threat-model.md) §5 already requires
-this, and it is restated here because a recovery path that could sign normally
-would make the split pointless.
+**The cost, stated rather than discovered:** a responder who cannot supply the
+passphrase loses everything gathered in that session at reboot. The mitigation
+is the documented portable passphrase, not a softer failure mode.
 
-### D1.2 (proposed, and the one to argue about) — No key means no persistence, and the session runs ephemeral
+## D2 — Five attempts per boot, then sealed for that boot
 
-**The base proposal the owner asked to be evaluated.** When none of the three
-sources yields a key, Boot does **not** open persistence, does **not** create
-one, and continues in an **ephemeral** session: RAM only, `CORE` capability, no
-evidence retained across a reboot.
+A passphrase may be attempted at most **five times in the current boot**. After
+the fifth failure persistence is **sealed for that boot** and the session is
+**fixed in ephemeral mode**. There is no sixth attempt, no unlock later in the
+same boot, and no operator override.
 
-Why this is the right default:
+**The attempt count, the passphrase and any user identifier never reach a
+journal, an audit entry or a screen.** The screen says persistence is sealed
+for this boot; it does not say how many attempts were made or remain, because a
+counter on a screen is a counter in a photograph of a screen.
 
-- It is the same shape as every other refusal in this codebase.
-  `UnidentifiedHost` removed the empty fingerprint rather than letting it match
-  everything; the media binding refuses rather than opening on an unknown
-  medium. "Could not establish X, so proceed without X's protection" is the
-  failure mode all of them exist to prevent.
-- The alternative — creating a fresh unencrypted or weakly-keyed volume so the
-  responder has *somewhere* to write — puts evidence on a USB SSD that travels
-  through uncontrolled hands with nothing protecting it. [Threat
-  model](../threat-model.md) §2.1 names media theft as a threat whose mitigation
-  is that theft "must not yield plaintext evidence". A fallback volume breaks
-  exactly that.
-- Ephemeral is a real degradation and not a disabled product: Edge's arbiter is
-  unaffected, observation still works, and the operator is told what they lose.
+**Rebooting permits a fresh five attempts, and this is not claimed as
+brute-force resistance.** It is not one: an attacker with the medium and time
+reboots as often as they like. What the limit buys is that a *running* session
+cannot be ground down in place while an operator is elsewhere, and that a
+mistyped passphrase degrades to ephemeral rather than quarantining the volume —
+a mistyped passphrase and an attack are indistinguishable here, and treating
+them the same way is the point. Resistance to offline attack is a property of
+the key derivation, which this record does not decide.
 
-What it costs, stated rather than discovered: **a responder who forgets the
-passphrase loses everything gathered in that session at reboot.** That is a
-real operational loss in a civil emergency, and the mitigation is the
-documented portable passphrase, not a softer failure mode.
+## D3 — The session mode is decided once, at commissioning
 
-**The screen must say this before the session starts**, in the vocabulary
-[`confirmation.py`](../../src/azazel_boot/confirmation.py) already enforces —
-no "safe", no "protected", and no implication that ephemeral is equivalent.
+A session that starts **ephemeral stays ephemeral**. It cannot open persistence
+later, even if the operator finds the passphrase five minutes afterwards. The
+mode is decided **once, during commissioning**, and changing it requires a
+reboot.
 
-### What is open for D1
+Why: opening mid-session means checking a binding against a machine whose state
+has already moved — the medium's identity, the commissioning generation and the
+session's own record of what it has done are no longer the ones the decision
+was made against. It also removes a whole class of question ("is this session
+persistent right now?") that every later decision would otherwise have to ask.
 
-1. **Is D1.2 accepted as written?** The alternative is a named emergency policy
-   under which an operator explicitly accepts an unprotected volume, which
-   [threat model](../threat-model.md) §5 already contemplates for audit
-   assurance (`LOCAL_CONTINUITY_ONLY`) but not for encryption at rest.
-2. **Is a passphrase attempt limit wanted, and what does exhausting it do?**
-   Ephemeral, or refuse to continue at all. A limit that quarantines the volume
-   would make a mistyped passphrase indistinguishable from an attack.
-3. **May a session that started ephemeral later open persistence** if the
-   operator finds the passphrase? Opening mid-session means the volume's binding
-   is checked against a machine whose state has already moved.
+The operator is told at commissioning which mode this sitting is in, in the
+vocabulary [`confirmation.py`](../../src/azazel_boot/confirmation.py) enforces
+— no "safe", no "protected", and no implication that ephemeral is equivalent.
 
-## D2 — Detecting a write interrupted by removal
+## D4 — A suspected dirty write quarantines the whole volume, fail-closed
 
-Today's fence refuses **new** actions
-([quarantine policy](../quarantine-policy.md) §4). It says nothing about a
-write that was in flight, which is the half of #7's criterion that is unmet.
+On surprise removal, or on any suspicion of a torn write, Boot **does not
+repair**. The **entire volume** enters a fail-closed quarantine: ordinary read,
+write and export are refused.
 
-### D2.1 (proposed) — The receipt is the evidence, and its absence is the detection
+Detection **records a classification and nothing else** — which condition was
+observed, from a fixed vocabulary. It does not record what was being written,
+which record was in flight, or any content. The classification is the whole of
+the audit payload.
 
-[Threat model](../threat-model.md) §4 already fixes the operation order:
+[Threat model](../threat-model.md) §4 already fixes the write order —
 *prepare-and-sync, apply, verify, persist receipt*, with a prepare or sync
-failure producing zero changes. The proposal is to make the **receipt** the
-thing that is read on the next open:
+failure producing zero changes — so a missing receipt is the signal. What this
+decides is what happens next: quarantine, not repair, not partial use.
 
-- every write records a receipt as its last step;
-- on open, a record whose receipt is missing is a write that did not complete;
-- an incomplete write is **reported and not repaired** — the same rule
-  `UNRECOVERABLE_DIRTY_VOLUME` and `REPAIR_NOT_REVERIFIED` already follow.
+Leaving quarantine is possible **only** through the explicit recovery workflow
+in D8.
 
-This detects; it does not recover. Recovery of a partial write is a filesystem
-and journalling question that hardware evidence has to inform, and claiming it
-here would be claiming something untested.
+## D5 — No record-level continuation, and nothing is called erased
 
-### What is open for D2
+Records written before the suspected fault are **not used in ordinary
+operation**. There is no per-record salvage, no "the earlier ones are fine",
+and no partial mount.
 
-1. **Is "detected and reported, never repaired" sufficient for #7's criterion**,
-   or is recovery of the last record required?
-2. **Does an incomplete write quarantine the whole volume, or only that
-   record?** Quarantining everything on one torn write costs a responder every
-   earlier record; quarantining one record leaves a volume whose contents are
-   partly unverified.
+**This is not a claim that anything was erased.** The data is on the medium.
+Boot refuses to use it in ordinary operation and says so in those words; it
+does not say the volume was wiped, cleared or destroyed, because it was not.
+The distinction matters for what an operator may later tell someone about what
+happened to the evidence.
 
-## D3 — Migration snapshot format and restore path
+Whether a quarantined volume can be examined offline elsewhere is outside this
+record: [quarantine policy](../quarantine-policy.md) already offers export of a
+quarantined volume **unmodified** for offline examination, and that path is
+unchanged.
 
-[ADR-0003](0003-immutable-ab-update.md) D4 lists this as open, waiting on "the
-persistence design, which does not exist". Part of it exists now.
+## D6 — The migration snapshot lives inside the existing partition
 
-### D3.1 (proposed) — The snapshot is a second encrypted volume on the same medium, and nowhere else
+**No second partition.** The snapshot is a **side-by-side snapshot inside the
+single existing encrypted persistence partition**: encrypted with the volume,
+versioned, and integrity-verifiable on its own.
 
-- **Format**: the same LUKS2 shape [ADR-0008](0008-debian-13-live-baseline.md)
-  D4.1 fixes — a filesystem formatted directly on an encrypted partition, no
-  volume manager. A snapshot in a different shape would be a second storage
-  format to review.
-- **Location**: the **same removable medium**. Not the host's disk, not a
-  network target, not a second medium.
-- **Authority to restore**: the same gates a normal open passes — the media
-  binding, the quarantine's disposition, the fence, and the session binding. A
-  restore is an open, not an exception to one.
-- **What a restore may not do**: raise a capability, clear a fence, or
-  re-open a session that required a reboot.
+This replaces the proposal's earlier second-volume shape, and the reason is
+that a second partition would require revising
+[ADR-0008](0008-debian-13-live-baseline.md) D4.1's fixed three-partition layout
+— which exists so that "what can assemble something on this medium" stays
+enumerable. Keeping the snapshot inside the partition leaves D4.1 untouched.
 
-**Why not the host disk.** [Quarantine policy](../quarantine-policy.md) §4
-refuses an export approval after a fence, and the owner's decision was that
-host-disk exports are not spared. A migration path that wrote a snapshot to the
-host's storage would reintroduce exactly the write that decision closed — with
-the operator's attention on a version upgrade rather than on a host write. So
-this record proposes no such path, and none should be proposed later without
-overturning that decision explicitly.
+"Versioned" and "integrity-verifiable on its own" are both load-bearing: a
+snapshot that cannot be told apart from the live data, or whose integrity can
+only be judged by the thing it exists to restore, is not a snapshot.
 
-### What is open for D3
+## D7 — Preflight, and no migration without a snapshot
 
-1. **Does a snapshot fit?** A second encrypted partition of comparable size
-   roughly doubles the persistence footprint on the medium, and
-   [ADR-0008](0008-debian-13-live-baseline.md) D4.1's layout has exactly one
-   persistence partition. Adding a second is a D4.1 revision.
-2. **What happens when it does not fit?** Refuse the migration and keep the old
-   format, or migrate without a snapshot under an explicit operator acceptance.
-   The first is consistent with everything else here.
-3. **Is a failed trial's restore automatic or operator-initiated?** Automatic
-   restore is what [ADR-0003](0003-immutable-ab-update.md) does for the image;
-   for persistence it means writing during a failure, which is when the state is
-   least understood.
+Before a migration runs, a preflight checks:
 
-## D4 — What this record does not decide
+1. the space the snapshot requires,
+2. the space actually available inside the partition,
+3. the integrity of what is being snapshotted,
+4. schema compatibility between the current and target formats.
+
+Any of the four failing **refuses the migration and keeps the old schema**. The
+old schema continuing to work is the safe outcome, not a degraded one.
+
+**Migration without a snapshot is not permitted**, under any acceptance, by any
+operator, in any state. An operator cannot consent to it, because the thing
+they would be consenting to is the loss of the only path back.
+
+## D8 — Recovery is explicit, never automatic
+
+A failed trial is **never** restored automatically. Restoring happens only
+through a recovery workflow the operator starts explicitly, and that workflow
+passes, in order:
+
+1. **target binding** — the media binding of
+   [ADR-0008 D4.1.1](0008-debian-13-live-baseline.md), unchanged;
+2. **key acquisition** — D1's sources, in D1's order, under D2's limit;
+3. **integrity verification** of the snapshot being restored;
+4. **operator confirmation** of what is being restored and over what.
+
+Automatic restore was rejected because it means writing during a failure —
+the moment the state is least understood — and because
+[ADR-0003](0003-immutable-ab-update.md)'s automatic fallback is about the
+*image*, which is signed, reproducible and replaceable. Persistence is none of
+those: it is the only copy of what a responder gathered.
+
+A recovery **may not** raise a capability, clear a fence, or re-open a session
+that required a reboot.
+
+## D9 — Nothing goes to the host's disk, and no version upgrade is a way round the fence
+
+**No migration, export or snapshot targets host storage.** Not a temporary
+file, not a staging directory, not a "just while the migration runs" copy.
+
+And explicitly: **the fence that follows a medium's removal is not bypassed
+under the name of a version upgrade.** [Quarantine policy](../quarantine-policy.md)
+§4 refuses an export approval after a fence and does not spare host-disk
+exports; a migration path that wrote to the host would reintroduce exactly that
+write, with the operator's attention on an upgrade rather than on a host write.
+Overturning this needs a new ADR that says so in those words.
+
+## D10 — What never appears anywhere
+
+Raw keys, passphrases, raw device identities and snapshot contents do not
+appear in this ADR, an issue, a pull request, a fixture, a terminal, a journal
+or an audit entry.
+
+The audit may hold the classification of what happened and nothing more: which
+condition was detected, which transition occurred, which refusal fired. An
+audit is a place for traceability, not a guarantee of confidentiality, and
+these values are not traceability.
+
+## Consequences
+
+- A responder with no passphrase gets an ephemeral session and is told so;
+  evidence from it does not survive a reboot. There is no way to accept an
+  unprotected volume instead.
+- A fifth failed passphrase seals persistence for that boot. Rebooting gives
+  five more, and that is not a brute-force defence.
+- "Am I persistent?" is answered once per boot and never changes.
+- A suspected torn write costs the whole volume in ordinary operation, and
+  nothing is described as erased.
+- [ADR-0008](0008-debian-13-live-baseline.md) D4.1 is **not** revised: the
+  snapshot lives inside the existing partition.
+- A medium too small for a snapshot refuses the migration and keeps working on
+  the old schema.
+- Restoring is something an operator does deliberately, through four gates.
+
+## What this record does not decide
 
 - Any concrete key-derivation function, parameter set, slot layout or
-  credential format. Those follow the decisions above, not the other way round.
-- Anything about `azazel_boot.persistence`'s code. **Nothing is implemented
-  against this record**, and #7 stays open until D1–D3 are decided and built.
-- Anything requiring hardware. D2 in particular cannot be called demonstrated
+  credential format. Those follow these decisions rather than the reverse, and
+  offline-attack resistance is a property of that choice, not of D2.
+- The snapshot's on-disk container format, versioning scheme or integrity
+  construction. D6 fixes the requirements; the construction is the third
+  child's design work.
+- Anything requiring hardware. D4 in particular cannot be called demonstrated
   without the hardware-in-the-loop record [threat model](../threat-model.md)
   §3.3 requires, which does not exist.
 
-## Consequences if accepted as proposed
-
-- A responder with no passphrase gets an ephemeral session and is told so.
-  Evidence from that session does not survive a reboot.
-- A torn write is visible at the next open and is never repaired into use.
-- A migration keeps its snapshot on the medium it came from, and a medium too
-  small to hold one refuses the migration rather than proceeding without it.
-- [ADR-0008](0008-debian-13-live-baseline.md) D4.1 needs a revision for the
-  snapshot partition, and that revision is part of accepting D3.
-
 ## What this record does not establish
 
-Nothing here has been implemented, and nothing has run on hardware. No volume
-has been created, opened, torn or migrated on any device. The proposals are
-shapes and failure modes; a decision on them is what turns them into work.
+**Nothing here is implemented.** No volume has been created, opened, sealed,
+torn, quarantined, snapshotted, migrated or restored on any device. No
+passphrase has been attempted. These are decisions; the work that follows them
+is #7 and its three children, and every one of those carries
+`hardware-unverified` until a real USB SSD and a real laptop say otherwise.
