@@ -5111,7 +5111,15 @@ def test_a_stage_is_asked_for_before_the_operator_flag_is_read(observations) -> 
 
 
 @pytest.mark.parametrize(
-    "near_miss", ["SESSION-0001", " session-0001", "session-0001 ", "session-0001\n"]
+    "near_miss",
+    [
+        SESSION.upper(),
+        SESSION.capitalize(),
+        f" {SESSION}",
+        f"{SESSION} ",
+        f"{SESSION}\n",
+        f"\t{SESSION}\t",
+    ],
 )
 def test_a_sitting_that_merely_resembles_this_one_is_not_this_one(
     near_miss, observations
@@ -5170,9 +5178,13 @@ def test_every_edge_the_stage_may_not_travel(was, asked, observations) -> None:
         flow.open_trial(snap, observations, media_binding_holds=True, session_id=SESSION)
     assert flow.stage is was
 
-    with pytest.raises(AttributeError) as refused:
+    # `match=` on **the graph's own message**, not on any refusal. Asserting
+    # "either message" was this repository's own incidental-refusal antipattern
+    # committed in the test written to close it: with the edge added to
+    # `_STAGE_EDGES`, the gate-clearance rule answered instead and the loose
+    # assertion stayed green. Every edge below is one the graph refuses.
+    with pytest.raises(AttributeError, match="travels its own graph"):
         flow._sealed_assign("_stage", asked)
-    assert "graph" in str(refused.value) or "passing the gates" in str(refused.value)
     assert flow.stage is was
 
 
