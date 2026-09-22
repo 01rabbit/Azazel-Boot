@@ -3,8 +3,11 @@
 Status: **decision logic only.** `azazel_boot.persistence` decides whether
 persistence may be created, opened or refused, and what the session may claim
 afterwards. It **creates no partition, opens no volume, derives no key and
-touches no device**. No persistence volume has been created, unlocked, repaired
-or quarantined on any hardware.
+touches no device** — the caller performs those acts and reports what happened,
+and this module trusts those reports completely. (An earlier version of this
+page said "injected ports"; there are none, and the honest statement is the one
+above.) No persistence volume has been created, unlocked, repaired or
+quarantined on any hardware.
 
 Related: [ADR-0008 D4.1](adr/0008-debian-13-live-baseline.md) ·
 [Threat model](threat-model.md) §4–§5 · [Quarantine policy](quarantine-policy.md) ·
@@ -12,10 +15,17 @@ Related: [ADR-0008 D4.1](adr/0008-debian-13-live-baseline.md) ·
 
 ## 1. Where persistence may exist
 
-On the **removable Boot medium**, and nowhere else. The target is checked
-against the quarantine's own disposition, not against a device name, and a
-target that is not the booted medium — or that has never been observed — is
-refused before anything else is considered.
+On the **removable Boot medium**, and nowhere else. A `PersistenceSession`
+holds the quarantine and **asks it** what a device is, by device. It does not
+accept a disposition as an argument: an adversarial review showed that
+`Disposition.BOOT_MEDIUM` is a process-global constant, so a disposition
+obtained for the internal disk — or typed by hand with no quarantine in
+existence — opened persistence on anything. A value a caller can name is not a
+check.
+
+A target that is not the booted medium, or that has never been observed, is
+refused before anything else is considered. The binding to this host and this
+session is re-checked on **every** act, not at creation only.
 
 Host storage is never created on, mounted, repaired, swapped to, or written back
 to. That is [the threat model](threat-model.md) §3 restated at the point where
@@ -36,12 +46,20 @@ GPT
 
 | Refusal | Cause |
 | --- | --- |
-| `unknown_partition_role` | a fourth partition, or a table that is not GPT — an extra partition is refused, not ignored |
+| `not_gpt` | the medium is not GPT |
+| `unknown_partition_role` | a partition outside the fixed layout — refused, not ignored |
+| `duplicate_partition_role` | two partitions claiming one role |
+| `partition_order_changed` | the roles are not in the fixed order |
 | `missing_partition_role` | no ESP, or no boot root |
 | `root_not_read_only` | the boot root is writable |
+| `mapping_on_a_plain_partition` | anything mapped under the ESP or the root |
 | `not_luks2` | a persistence partition that is not opened through `dm-crypt` |
 | `persistence_not_directly_formatted` | anything between the encrypted partition and its filesystem |
-| `volume_manager_present` | LVM, mdraid, ZFS, bcache or dm-raid, **on the medium as well as on the host** |
+| `volume_manager_present` | a mapping that assembles, **or a partition that is a member of one** — a partition that *is* an LVM physical volume assembles something with nothing stacked on it |
+
+Both acts apply this check. A review deleted the call from `create` and `unlock`
+and every layout test stayed green, because they all called the checker
+directly; two tests now assert the acts apply it.
 
 Persistence is **optional**: a medium handed out in an emergency may simply not
 carry it, and that is a configuration rather than a failure.
@@ -52,7 +70,7 @@ carry it, and that is a configuration rather than a failure.
 | --- | --- | --- |
 | `absent` | the medium carries no persistence partition | `CORE` |
 | `locked` | present, not opened; the session runs from RAM | `CORE` |
-| `open` | unlocked and verified | `LITE` |
+| `open` | unlocked and verified, or repaired within bounds and re-verified | `LITE` |
 | `quarantined` | present and not trustworthy | `CORE` |
 | `fenced` | the medium went away mid-session | `CORE` |
 
@@ -73,20 +91,31 @@ volume is repaired only within bounds.
 | `integrity_unverified` | a modification that is not authenticated — **detected, not repaired** |
 | `rollback_detected` | an older generation, detected and never silently accepted |
 | `unrecoverable_dirty_volume` | a volume that cannot be repaired to a verified state is quarantined |
+| `repair_not_reverified` | a repair nobody verified afterwards is not an open volume |
+| `opened_after_bounded_repair` | opened, and **distinguishable from a clean open** |
 
-There is no `opened_with_warnings` and no `repaired`. The space between "usable"
-and "quarantined" is where [the threat model](threat-model.md) §5's "repaired
-into a state an attacker chose" lives, so the vocabulary does not have a word
-for it.
+There is no `opened_with_warnings`. A repaired volume gets its own outcome
+rather than the clean one: the first version returned plain `opened`, identical
+to a verified open in everything but a free-text string, so a consumer reading
+`outcome` could not tell them apart — which is the distinction
+[the threat model](threat-model.md) §5 is about.
+
+A generation is a **non-negative integer**. `float("nan")` compares false
+against everything, and a review used it to walk past the rollback check.
 
 ## 5. Surprise removal
 
 `fence_after_removal()` **takes no argument**. [The threat model](threat-model.md)
 §4 requires the release supervisor to be RAM-resident and to withdraw what it
 owns without reading anything from the removed device; a fence that needed to
-consult the medium could not fire when the medium is the thing that left. After
-a removal the session displays a reboot requirement rather than continuing in an
-ambiguous state.
+consult the medium could not fire when the medium is the thing that left.
+
+It **revokes**. Every later act on the session is refused, and `status()`
+reports the fence. A status handed out earlier is a snapshot and keeps saying
+what was true then — that is why a caller consults the session rather than a
+value it is holding. The first version returned a new value and left any holder
+of the previous one reading `open`, which made fencing an announcement rather
+than a fence.
 
 ## 6. Recovery never repairs the host
 
@@ -104,11 +133,27 @@ it is recovered by not having been changed ([recovery](recovery.md) §1).
 
 `PersistenceStatus` has no `passphrase`, `key`, `recovery_key`, `key_material`,
 `operator`, `identity`, `serial` or `device_path` field, and a test asserts their
-absence. No refusal message names a device, a host fingerprint or a session.
-A value the model cannot carry is a value no rendering, log, audit line or
-external report can leak.
+absence.
 
-## 8. What this does not establish
+Two leaks a review found are closed. A refusal detail names the **rule**, never
+the value — a partition table is attacker-supplied input on borrowed hardware,
+and the earlier version interpolated a partition's role, so a crafted role put a
+device path, a serial and a terminal escape on the console. And the session
+redacts its own `repr` and raises binding refusals from a frame holding
+booleans, because `pytest --showlocals` and most crash reporters capture frame
+locals; the earlier version put the host fingerprint and the session id in every
+such traceback.
+
+## 8. What this does not model
+
+[The threat model](threat-model.md) §5 has seven rows; this module decides three
+of them (offline modification, rollback, dirty-volume repair). Audit-chain
+truncation, the `LOCAL_CONTINUITY_ONLY` anchor state, persistence migration and
+passphrase loss are **not** represented here, and `unlock` grants `LITE` on
+success without consulting an anchor. That is a scope statement, not a claim
+that those rows are handled elsewhere.
+
+## 9. What this does not establish
 
 No medium has been written, no volume has been created or unlocked, no laptop
 has booted anything, and **no-host-write is not verified**. The tests use

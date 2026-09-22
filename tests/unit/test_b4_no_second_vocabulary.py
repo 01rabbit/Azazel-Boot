@@ -13,11 +13,12 @@ does not import, and does not decide.
 from __future__ import annotations
 
 import ast
+import dataclasses
 from pathlib import Path
 
 import pytest
 
-from azazel_boot import commissioning, persistence, quarantine
+from azazel_boot import commissioning, persistence
 
 MODULE = Path(persistence.__file__)
 
@@ -44,9 +45,25 @@ def test_the_session_binding_is_the_commissioning_one() -> None:
 
 
 def test_the_medium_is_decided_by_the_quarantine_not_re_decided_here() -> None:
-    from azazel_boot.persistence import Disposition
+    """Sharing an enum type is not sharing a decision.
 
-    assert Disposition is quarantine.Disposition
+    The first version took a `Disposition` as an argument and this test asserted
+    only that the type was shared. A review pointed out that
+    `Disposition.BOOT_MEDIUM` is a process-global constant, so the "check" was a
+    value the caller chose. The session now holds the quarantine and asks it.
+    """
+
+    import inspect
+
+    from azazel_boot.persistence import PersistenceSession
+
+    assert "quarantine" in {f.name for f in dataclasses.fields(PersistenceSession)}
+    source = inspect.getsource(PersistenceSession._require_the_medium)
+    assert "self.quarantine.disposition(device)" in source
+    for name in ("create", "unlock"):
+        assert "disposition" not in inspect.signature(
+            getattr(PersistenceSession, name)
+        ).parameters
 
 
 @pytest.mark.parametrize(
@@ -58,6 +75,8 @@ def test_the_medium_is_decided_by_the_quarantine_not_re_decided_here() -> None:
         "InterfaceObservation",
         "Device",
         "DeviceClass",
+        "Quarantine",
+        "Disposition",
         "host_fingerprint",
         "bind_session",
         "assess",
@@ -68,17 +87,25 @@ def test_persistence_defines_no_second_version_of_an_existing_concept(name: str)
 
 
 def test_persistence_holds_no_interface_role_vocabulary() -> None:
-    """Roles belong to commissioning, and an operator confirms them per host."""
+    """Roles belong to commissioning, and an operator confirms them per host.
 
-    source = MODULE.read_text(encoding="utf-8")
-    tree = ast.parse(source)
+    The partition roles are checked against the interface roles explicitly: a
+    review noted the earlier assertion would have fired on the coincidence of a
+    partition role named `management`, and would have missed anything else.
+    """
+
+    from azazel_boot.persistence import PARTITION_ROLES
+
+    assert not set(PARTITION_ROLES) & set(commissioning.INTERFACE_ROLES)
+
+    tree = ast.parse(MODULE.read_text(encoding="utf-8"))
     for node in ast.walk(tree):
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            assert node.value not in commissioning.INTERFACE_ROLES, (
-                f"persistence names the interface role {node.value!r}; storage "
-                "decisions do not assign or infer network roles"
-            )
-    assert "role" not in {name.lower() for name in _names_defined(MODULE)}
+            if node.value in commissioning.INTERFACE_ROLES:
+                assert node.value in PARTITION_ROLES, (
+                    f"persistence names the interface role {node.value!r}; storage "
+                    "decisions do not assign or infer network roles"
+                )
 
 
 def test_persistence_infers_nothing_about_interfaces() -> None:
