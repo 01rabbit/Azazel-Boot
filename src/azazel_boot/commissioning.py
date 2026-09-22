@@ -102,6 +102,28 @@ class Assessment:
     #: here; `OBSERVE_ONLY` narrows the offer to observation alone.
     offerable_roles: tuple[str, ...] = ()
 
+    def __repr__(self) -> str:
+        """Redacted: `commissionable_keys` and `reasons` carry raw NIC identity.
+
+        An `interface_key` is ``bus_path|permanent_mac``, which is why
+        `InterfaceObservation` redacts its own repr. An `Assessment` holds those
+        keys and interpolates them into `reasons`, and its generated repr put
+        the borrowed machine's permanent MACs into any traceback captured while
+        one was in scope. That is the same disclosure, one object along.
+
+        The values stay readable as **data** — an operator flow needs them, and
+        `describe_for_operator` is the deliberate path that shows them. What is
+        withheld is the incidental rendering: a traceback, a log line, a
+        debugger frame, a crash report.
+        """
+
+        return (
+            f"Assessment(state={self.state.value}, reasons=<redacted:"
+            f"{len(self.reasons)}>, commissionable_keys=<redacted:"
+            f"{len(self.commissionable_keys)}>, "
+            f"offerable_roles={self.offerable_roles!r})"
+        )
+
 
 @dataclass(frozen=True)
 class SessionBinding:
@@ -130,6 +152,22 @@ class UnidentifiedHost(ValueError):
     no fingerprint for it at all, which is the same discipline
     :class:`azazel_boot.persistence.PersistenceState.UNEXAMINED` applies to the
     medium: the absence is its own answer, not a value standing in for one.
+
+    **This closes the zero-identity case and not the partial-identity one, and
+    that limit is stated rather than left implied.** The fingerprint is taken
+    over commissionable identities only, so a host whose onboard NICs cannot be
+    identified but which carries one identifiable removable NIC has a
+    fingerprint belonging to **the dongle**, not to the machine. A later review
+    demonstrated it: three different laptops sharing one USB NIC produced one
+    identical fingerprint, and a binding made on the first applied to the other
+    two. An adversary who supplies the interface supplies the host identity.
+
+    Closing it means deciding what "host identity" is — something non-removable
+    in the digest, such as a board or chassis identifier, or a refusal when
+    every commissionable interface is hot-pluggable, which needs a field
+    `InterfaceObservation` does not have. Both change a public contract, so
+    neither is decided here. Until one is, "a different laptop refuses" holds
+    only where the difference lies in a commissionable interface.
     """
 
 
@@ -167,6 +205,10 @@ def bind_session(
     The session id is an input rather than something generated here: this
     module reads no clock and no randomness, so the same inventory and session
     id always produce the same binding and a record is reproducible.
+
+    Raises :class:`UnidentifiedHost` when the inventory carries no
+    commissionable identity. A record that cannot say which machine it belongs
+    to is not made at all; see that class for what it does and does not cover.
     """
 
     if not session_id.strip():

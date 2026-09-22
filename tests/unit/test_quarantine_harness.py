@@ -473,3 +473,113 @@ def test_a_refusal_message_names_no_device() -> None:
     with pytest.raises(ExportRefused) as refused:
         quarantine.approve_export(approval("never-seen-SN-DEADBEEF"))
     assert "DEADBEEF" not in str(refused.value)
+
+
+# --------------------------------------------------------------------------
+# The fence: removal, and what the rule does afterwards
+#
+# `fence()` and `is_fenced` arrived with `azazel_boot.persistence` and were
+# tested only from the persistence side. A review pointed out the asymmetry and
+# then used it: the class's own primary consumer, `evaluate`, never consulted
+# the flag, so every action on a fenced medium was still allowed.
+# --------------------------------------------------------------------------
+
+
+def test_a_fenced_medium_allows_nothing() -> None:
+    """The fence decides; it is not a note attached to the decision.
+
+    `_decide` short-circuited on `disposition is BOOT_MEDIUM` and returned
+    ALLOWED without looking at the fence, so a writable mount, an fsck, a
+    journal replay and a swap activation against a medium that had been pulled
+    were all permitted — and the audit recorded them as permitted, on
+    `boot_medium`. That is the threat model's "new actions taken after removal"
+    with an audit path that says they were fine.
+    """
+
+    quarantine = a_quarantine()
+    quarantine.observe(BOOT_MEDIUM)
+    assert quarantine.evaluate(BOOT_MEDIUM, Action.WRITABLE_MOUNT) is Verdict.ALLOWED
+
+    quarantine.fence()
+    for action in Action:
+        assert quarantine.evaluate(BOOT_MEDIUM, action) is Verdict.BLOCKED
+        assert quarantine.evaluate(HOST_NVME, action) is Verdict.BLOCKED
+
+
+def test_a_device_arriving_after_the_fence_on_the_mediums_identity_is_blocked() -> None:
+    """The sharp case, and the one the fence exists for.
+
+    A device presenting the medium's identity after the removal is the
+    transient-physical-access adversary this module states it cannot tell apart.
+    Classification is unchanged — identity decides, and that is deliberate — but
+    the verdict is not: it used to be a writable mount.
+    """
+
+    quarantine = a_quarantine()
+    quarantine.observe(BOOT_MEDIUM)
+    quarantine.fence()
+
+    impostor = Device(identity=MEDIUM_ID, device_class=DeviceClass.HOST_STORAGE)
+    assert quarantine.observe(impostor) is Disposition.BOOT_MEDIUM
+    assert quarantine.evaluate(impostor, Action.WRITABLE_MOUNT) is Verdict.BLOCKED
+    assert quarantine.evaluate(impostor, Action.SWAP_ACTIVATION) is Verdict.BLOCKED
+    assert quarantine.medium_is_bound() is False
+
+
+def test_the_fence_is_one_way_and_idempotent() -> None:
+    """Nothing tested the quarantine's own flag, so making it two-way was green.
+
+    `fence()` twice is still fenced; a re-appearance of the medium does not
+    clear it; and plain assignment raises, which is the guard the session had
+    from the start and the quarantine did not have when the flag moved here.
+    """
+
+    quarantine = a_quarantine()
+    quarantine.observe(BOOT_MEDIUM)
+    assert quarantine.is_fenced is False
+
+    quarantine.fence()
+    quarantine.fence()
+    assert quarantine.is_fenced is True
+
+    quarantine.observe(BOOT_MEDIUM)
+    assert quarantine.is_fenced is True
+
+    with pytest.raises(AttributeError):
+        quarantine._fenced = False  # noqa: SLF001 - the attack
+    assert quarantine.is_fenced is True
+
+
+def test_the_fence_is_audited_once_and_then_as_a_repeat() -> None:
+    """`docs/quarantine-policy.md` documents these entries; nothing asserted them."""
+
+    quarantine = a_quarantine()
+    quarantine.observe(BOOT_MEDIUM)
+    quarantine.fence()
+    quarantine.fence()
+
+    fences = [entry for entry in quarantine.audit() if entry.action == "medium_fenced"]
+    assert [entry.verdict for entry in fences] == ["fenced", "already_fenced"]
+    assert all(entry.disposition == "boot_medium" for entry in fences)
+
+
+def test_a_sealed_quarantine_refuses_the_assignment_that_promotes_any_device() -> None:
+    """Reading through a property stopped a generated setter, not an assignment.
+
+    Identity-only classification makes `_boot_medium_identity` the whole of this
+    module's authority, which the class docstring has said since a second review
+    said it. Careless-caller defence, on the terms stated there: it is not a
+    seal, and nothing here claims one.
+    """
+
+    quarantine = a_quarantine()
+    quarantine.observe(HOST_NVME)
+    for name, value in (
+        ("_boot_medium_identity", "host-nvme-SN-1"),
+        ("_session_id", "s-other"),
+        ("_dispositions", {}),
+        ("_audit", []),
+    ):
+        with pytest.raises(AttributeError):
+            setattr(quarantine, name, value)
+    assert quarantine.evaluate(HOST_NVME, Action.WRITABLE_MOUNT) is Verdict.BLOCKED

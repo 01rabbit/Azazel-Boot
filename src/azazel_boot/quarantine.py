@@ -324,13 +324,55 @@ class Quarantine:
     against a careless caller, not against code already running in the process.
     """
 
+    #: Attributes an operation legitimately reassigns after construction.
+    #: `_approval` is replaced by `approve_export` and cleared by
+    #: `withdraw_export`; `_fenced` is one-way and handled separately. Every
+    #: other attribute is written once, in `__init__`.
+    _REASSIGNABLE = frozenset({"_approval"})
+
     def __init__(self, session_id: str, boot_medium_identity: str) -> None:
+        object.__setattr__(self, "_sealed", False)
         self._session_id = session_id
         self._boot_medium_identity = boot_medium_identity
         self._dispositions: dict[str, Disposition] = {}
         self._approval: ExportApproval | None = None
         self._audit: list[AuditEntry] = []
         self._fenced = False
+        object.__setattr__(self, "_sealed", True)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        """Sealed after construction, and the fence is one-way.
+
+        `azazel_boot.persistence.PersistenceSession` refused `_fenced = False`
+        from the day the fence existed. Moving the fence here — the right home,
+        because the removal happened to the medium — moved it from the one
+        object in this design that resisted casual assignment to the one that
+        did not, and a review cleared it with `q._fenced = False` and reopened
+        persistence. The two fixes pointed opposite ways on the same flag.
+
+        `_boot_medium_identity` is covered for the reason the class docstring
+        already gives: assigning to it promotes any device, which is the whole
+        of this module's authority. Reading it through a property stopped a
+        dataclass from generating a setter; it never stopped an assignment.
+
+        This is the same **careless-caller** defence stated above, on the same
+        terms. `object.__setattr__` writes the attribute regardless and Python
+        offers no way to prevent it.
+        """
+
+        if getattr(self, "_sealed", False):
+            if name in self._REASSIGNABLE:
+                object.__setattr__(self, name, value)
+                return
+            if name == "_fenced" and value is True:
+                object.__setattr__(self, name, True)
+                return
+            raise AttributeError(
+                "a Quarantine is sealed after construction; the fence is "
+                "one-way and the session, the medium's identity, the "
+                "dispositions and the audit cannot be replaced"
+            )
+        object.__setattr__(self, name, value)
 
     @property
     def session_id(self) -> str:
@@ -397,8 +439,15 @@ class Quarantine:
         A caller — a trial boot, a status screen — must be able to ask. Without
         it, "the medium is not available" is indistinguishable from "a host disk
         was refused", which is what the audit shows either way.
+
+        A fence answers it False. The question a caller asks through this is
+        whether the medium is available, and a medium that was pulled is not —
+        a device arriving afterwards on the same identity is the case the fence
+        exists for, not evidence that the medium came back.
         """
 
+        if self._fenced:
+            return False
         # Identity equality decides classification, so "present in the map" and
         # "holds BOOT_MEDIUM" are the same question today. The stricter form is
         # written out so a future change to `observe` cannot quietly widen it.
@@ -565,6 +614,22 @@ class Quarantine:
 
     def _decide(self, device: Device, action: Action) -> Verdict:
         if action in NEVER_ALLOWED_ANYWHERE:
+            return Verdict.BLOCKED
+        if self._fenced:
+            # Ahead of the `BOOT_MEDIUM` short-circuit, which is what made this
+            # necessary. A review fenced the medium and then evaluated a
+            # writable mount, an fsck, a journal replay and a swap activation
+            # against it: all four were allowed, and the audit recorded them as
+            # permitted on `boot_medium`. The sharp case is a device presenting
+            # the medium's identity **after** the removal — the
+            # transient-physical-access adversary this module states it cannot
+            # tell apart — which was classified as the medium and then allowed
+            # to be mounted writable.
+            #
+            # `disposition()` deliberately does not consult the fence: "what is
+            # this device" did not change when the medium was pulled. This
+            # question is "may this happen **now**", and now is after the
+            # removal.
             return Verdict.BLOCKED
         disposition = self._dispositions.get(device.identity)
         if disposition is None:

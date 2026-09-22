@@ -114,10 +114,14 @@ GPT
 The filesystem **allowlist** is the real check; the member denylist behind it is
 defence in depth. A review listed a dozen ordinary `blkid` types the denylist
 missed — an allowlist of three roles' filesystems does not have that failure
-mode. The allowlist and both denylists are pinned literally rather than
-parametrized over themselves: mutation testing found `VOLUME_MANAGERS` still
+mode. The allowlist and both denylists are asserted as **exact tuples**, not as
+subsets and not by parametrizing over themselves. Two rounds of mutation testing
+were needed for that sentence to become true: the first found `VOLUME_MANAGERS`
 parametrized over itself, so a version keeping two of its nine entries passed
-every test, and this page claimed it was pinned when it was not.
+every test; the second found the members list asserted as a five-element subset
+of fifteen, so ten entries — including every one added to close the earlier
+finding — could be dropped unnoticed. This page claimed the pin both times
+before it existed.
 
 Both acts apply this check. A review deleted the call from `create` and `unlock`
 and every layout test stayed green, because they all called the checker
@@ -179,8 +183,14 @@ against everything, and a review used it to walk past the rollback check.
 owns without reading anything from the removed device; a fence that needed to
 consult the medium could not fire when the medium is the thing that left.
 
-It **revokes, one way**. Every later act is refused, `status()` reports the
-fence, and nothing can clear it. A status handed out earlier is a snapshot and
+It **revokes, one way through the API**. Every later act is refused, `status()`
+reports the fence, and no call clears it: `fence()` is idempotent, plain
+assignment to the flag raises on the session *and* on the quarantine, and the
+medium re-appearing does not lift it. It is not a seal, on the same terms as §1
+— an earlier version of this sentence read "nothing can clear it", which
+contradicted §1 of this page and was false in the plainest way: the flag had
+moved to an object with no guard on it at all, and `q._fenced = False` reopened
+persistence. A status handed out earlier is a snapshot and
 keeps saying what was true then, which is why `recovery_options()` is a method
 on the **session**: a caller holding `unlock`'s return value used to get an
 empty option list after a removal — no reboot instruction — through the recovery
@@ -191,10 +201,15 @@ the medium, and the medium's rule is the thing that represents it, so
 `Quarantine.fence()` is what `fence_after_removal()` calls and
 `Quarantine.is_fenced` is what every session consults. Without that, the fence
 was per-object: a review rebuilt a session from the same three constructor
-arguments and got an unfenced one. It is deliberately **not** folded into
-`Quarantine.disposition()`, which answers "what is this device" — a question
-whose answer did not change when the medium was pulled. Any future consumer of a
-quarantine must consult `is_fenced` for itself; nothing enforces that for it.
+arguments and got an unfenced one.
+
+Moving it there was not enough on its own. `Quarantine.evaluate` — the call that
+decides whether a write happens — did not consult the flag, so a fenced medium
+still allowed a writable mount, an fsck, a journal replay and a swap activation,
+and the audit recorded them as permitted. It does consult it now, ahead of
+everything else, and `medium_is_bound()` answers False after a fence.
+`disposition()` still does not: "what is this device" did not change when the
+medium was pulled, and "may this happen now" did.
 
 ## 6. Recovery never repairs the host
 

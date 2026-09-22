@@ -184,10 +184,21 @@ returning device as a fresh, untrusted arrival, and the session that survived
 the gap is the thing being refused. The audit gets `medium_fenced`, once as
 `fenced` and thereafter as `already_fenced`.
 
+**`evaluate()` consults it, ahead of everything else.** That was not true when
+the fence arrived: `_decide` short-circuited on `disposition is BOOT_MEDIUM` and
+returned ALLOWED, so a fenced medium still permitted a writable mount, an fsck,
+a journal replay and a swap activation — and the audit recorded them as
+permitted, on `boot_medium`. The sharp case is a device presenting the medium's
+identity *after* the removal, which is the transient-physical-access adversary
+this policy says it cannot tell apart: it was classified as the medium and
+allowed to be mounted writable. `medium_is_bound()` also answers False after a
+fence, because the question a caller asks through it is availability.
+
 It does **not** change `disposition()`, which answers "what is this device" — a
-question whose answer did not change when the medium was pulled. So the fence is
-advisory to anything that does not ask: `azazel_boot.persistence` asks, and any
-future consumer must, because nothing enforces it for them.
+question whose answer did not change when the medium was pulled. So the fence
+remains advisory to a consumer that asks neither `evaluate()` nor `is_fenced`:
+`azazel_boot.persistence` asks, and any future consumer must, because nothing
+enforces it for them.
 
 ### What refusing assembly everywhere costs
 

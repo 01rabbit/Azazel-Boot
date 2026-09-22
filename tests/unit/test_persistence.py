@@ -741,13 +741,35 @@ def test_a_partitions_mappings_cannot_be_appended_to_after_it_is_built() -> None
     assert partition.mappings == ("dm-crypt",)
 
 
-@pytest.mark.parametrize("member", VOLUME_MANAGER_MEMBERS)
-def test_the_member_denylist_is_pinned_literally(member: str) -> None:
-    """Parametrizing over the constant shrinks with it; this does not."""
+def test_the_member_denylist_is_pinned_literally() -> None:
+    """A five-element subset of fifteen is not a pin.
 
-    assert member in VOLUME_MANAGER_MEMBERS
-    assert {"lvm2_member", "zfs_member", "linux_raid_member", "vdo", "drbd"} <= set(
-        VOLUME_MANAGER_MEMBERS
+    The first version asserted `{lvm2_member, zfs_member, linux_raid_member,
+    vdo, drbd} <= set(...)`, so ten entries — `lvm1_member`, the whole
+    firmware-RAID family, `bcache`, `stratis` — could be dropped with the suite
+    green. Mutation testing replaced `lvm1_member` with an unused string and
+    nothing noticed. Those ten are precisely the ones added to close an earlier
+    finding, and `docs/persistence.md` claimed the list was pinned.
+
+    The exact tuple, in order, as `PERMITTED_FILESYSTEMS` already is.
+    """
+
+    assert VOLUME_MANAGER_MEMBERS == (
+        "lvm1_member",
+        "lvm2_member",
+        "zfs_member",
+        "linux_raid_member",
+        "ddf_raid_member",
+        "isw_raid_member",
+        "promise_fasttrack_raid_member",
+        "via_raid_member",
+        "silicon_medley_raid_member",
+        "adaptec_raid_member",
+        "jmicron_raid_member",
+        "bcache",
+        "stratis",
+        "vdo",
+        "drbd",
     )
 
 
@@ -976,7 +998,7 @@ def test_the_volume_manager_denylist_is_pinned_literally() -> None:
     `docs/persistence.md` claimed both were.
     """
 
-    assert {
+    assert VOLUME_MANAGERS == (
         "lvm",
         "lvm2",
         "mdraid",
@@ -986,7 +1008,7 @@ def test_the_volume_manager_denylist_is_pinned_literally() -> None:
         "dm-raid",
         "dm-thin",
         "stratis",
-    } <= set(VOLUME_MANAGERS)
+    )
 
 
 def test_the_two_constant_tables_cannot_be_widened_by_assignment() -> None:
