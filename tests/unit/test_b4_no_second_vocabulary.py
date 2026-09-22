@@ -57,9 +57,9 @@ def test_the_medium_is_decided_by_the_quarantine_not_re_decided_here() -> None:
 
     from azazel_boot.persistence import PersistenceSession
 
-    assert "quarantine" in {f.name for f in dataclasses.fields(PersistenceSession)}
+    assert not dataclasses.is_dataclass(PersistenceSession)
     source = inspect.getsource(PersistenceSession._require_the_medium)
-    assert "self.quarantine.disposition(device)" in source
+    assert "self._quarantine.disposition(device)" in source
     for name in ("create", "unlock"):
         assert "disposition" not in inspect.signature(
             getattr(PersistenceSession, name)
@@ -108,17 +108,32 @@ def test_persistence_holds_no_interface_role_vocabulary() -> None:
                 )
 
 
-def test_persistence_infers_nothing_about_interfaces() -> None:
-    """It imports the inventory nowhere: a storage decision is not a NIC decision."""
+def test_persistence_uses_the_inventory_only_to_re_derive_the_binding() -> None:
+    """The rule changed, and the reason is recorded rather than quietly dropped.
+
+    The first version imported the inventory nowhere, on the ground that a
+    storage decision is not a NIC decision. A review then showed the binding
+    check was a comparison of the session with itself — it could not fail on a
+    different laptop. Re-deriving the host fingerprint needs the live
+    observations, so the import exists now; what must stay absent is any use of
+    an observation to decide a **role** or an interface's fate.
+    """
 
     tree = ast.parse(MODULE.read_text(encoding="utf-8"))
-    imported = {
-        node.module
+    imported_names = {
+        alias.name
         for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom) and node.module
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
     }
-    assert "azazel_boot.inventory" not in imported
-    assert ".inventory" not in imported
+    assert imported_names & {"InterfaceObservation"}
+    assert not imported_names & {
+        "collect_interfaces",
+        "assess",
+        "Assessment",
+        "CommissioningState",
+        "duplicate_identity_keys",
+    }
 
 
 def test_a_commissioning_refusal_does_not_block_persistence_and_the_reverse() -> None:
@@ -135,6 +150,7 @@ def test_a_commissioning_refusal_does_not_block_persistence_and_the_reverse() ->
     } | {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
     assert "CommissioningState" not in referenced
     assert "Assessment" not in referenced
+    assert "assess" not in referenced
 
 
 def test_persistence_opens_nothing_itself() -> None:

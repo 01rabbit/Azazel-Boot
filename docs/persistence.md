@@ -24,8 +24,23 @@ existence — opened persistence on anything. A value a caller can name is not a
 check.
 
 A target that is not the booted medium, or that has never been observed, is
-refused before anything else is considered. The binding to this host and this
-session is re-checked on **every** act, not at creation only.
+refused before anything else is considered.
+
+**The binding is re-derived, not re-compared.** Every act takes the live
+read-only inventory and calls `commissioning.binding_applies`, which recomputes
+the host fingerprint from what this machine presents. The previous version
+compared the binding against the session's own constructor arguments — both
+operands supplied by the same object — so a self-consistent session passed
+forever, on any laptop. Making a tautology run more often does not make it a
+check.
+
+**The session is not a value a caller can edit.** It is not a dataclass, its
+fields are private, reassigning the quarantine or the binding raises, the fence
+is one-way, and it refuses to be pickled. A review substituted a forged
+quarantine into a public field, cleared the fence with one assignment, and read
+the host fingerprint out of `dataclasses.asdict`. A session also refuses a
+quarantine minted for a different session: two sessions sharing one quarantine
+let a fenced medium be opened again by the other.
 
 Host storage is never created on, mounted, repaired, swapped to, or written back
 to. That is [the threat model](threat-model.md) §3 restated at the point where
@@ -56,6 +71,13 @@ GPT
 | `not_luks2` | a persistence partition that is not opened through `dm-crypt` |
 | `persistence_not_directly_formatted` | anything between the encrypted partition and its filesystem |
 | `volume_manager_present` | a mapping that assembles, **or a partition that is a member of one** — a partition that *is* an LVM physical volume assembles something with nothing stacked on it |
+| `filesystem_not_permitted` | each role carries one of a named set: `vfat` for the ESP, `squashfs`/`erofs` for the root, `ext4`/`xfs`/`f2fs` for persistence |
+
+The filesystem **allowlist** is the real check; the member denylist behind it is
+defence in depth. A review listed a dozen ordinary `blkid` types the denylist
+missed — an allowlist of three roles' filesystems does not have that failure
+mode, and both constants are now pinned literally rather than parametrized over
+themselves.
 
 Both acts apply this check. A review deleted the call from `create` and `unlock`
 and every layout test stayed green, because they all called the checker
@@ -68,6 +90,7 @@ carry it, and that is a configuration rather than a failure.
 
 | State | What it means | Capability |
 | --- | --- | --- |
+| `unexamined` | no act has run; nothing about the medium is known | `CORE` |
 | `absent` | the medium carries no persistence partition | `CORE` |
 | `locked` | present, not opened; the session runs from RAM | `CORE` |
 | `open` | unlocked and verified, or repaired within bounds and re-verified | `LITE` |
@@ -92,7 +115,13 @@ volume is repaired only within bounds.
 | `rollback_detected` | an older generation, detected and never silently accepted |
 | `unrecoverable_dirty_volume` | a volume that cannot be repaired to a verified state is quarantined |
 | `repair_not_reverified` | a repair nobody verified afterwards is not an open volume |
-| `opened_after_bounded_repair` | opened, and **distinguishable from a clean open** |
+| `opened_after_repair` | opened, and **distinguishable from a clean open** |
+
+The outcome is `opened_after_repair`, not `..._after_bounded_repair`: **nothing
+in this module bounds the repair.** No extent, byte budget or transaction count
+is expressed here, and `repairable` is a boolean the caller supplies. The bound
+[the threat model](threat-model.md) §5 asks for is the caller's to enforce, and
+saying otherwise was the last piece of an earlier claim doing work no code did.
 
 There is no `opened_with_warnings`. A repaired volume gets its own outcome
 rather than the clean one: the first version returned plain `opened`, identical
@@ -110,21 +139,25 @@ against everything, and a review used it to walk past the rollback check.
 owns without reading anything from the removed device; a fence that needed to
 consult the medium could not fire when the medium is the thing that left.
 
-It **revokes**. Every later act on the session is refused, and `status()`
-reports the fence. A status handed out earlier is a snapshot and keeps saying
-what was true then — that is why a caller consults the session rather than a
-value it is holding. The first version returned a new value and left any holder
-of the previous one reading `open`, which made fencing an announcement rather
-than a fence.
+It **revokes, one way**. Every later act is refused, `status()` reports the
+fence, and nothing can clear it. A status handed out earlier is a snapshot and
+keeps saying what was true then, which is why `recovery_options()` is a method
+on the **session**: a caller holding `unlock`'s return value used to get an
+empty option list after a removal — no reboot instruction — through the recovery
+path itself.
 
 ## 6. Recovery never repairs the host
 
 Every option offered from every state acts on the medium or on the session:
-continue at `CORE`, attempt an unlock with the documented portable passphrase or
-recovery path, export a quarantined volume **unmodified** for offline
-examination, rewrite the medium from a verified image on another machine, or
-reboot. A test walks all five states and asserts that no option mentions the
-host, an internal disk, a laptop or an `fsck`.
+continue at `CORE`, examine a medium nothing has looked at, attempt an unlock
+with the documented portable passphrase or recovery path, export a quarantined
+volume **unmodified** for offline examination, rewrite the medium from a
+verified image on another machine, or reboot.
+
+The test asserts the **exact tuple** for each state. It used to be a denylist of
+four nouns, and a review added "mount it read-write to salvage the session" and
+"copy the session to the machine's own storage first" — both offered to the
+operator, both past the test that existed to prevent exactly that.
 
 The first thing to recover on borrowed hardware is somebody else's laptop, and
 it is recovered by not having been changed ([recovery](recovery.md) §1).
@@ -135,14 +168,18 @@ it is recovered by not having been changed ([recovery](recovery.md) §1).
 `operator`, `identity`, `serial` or `device_path` field, and a test asserts their
 absence.
 
-Two leaks a review found are closed. A refusal detail names the **rule**, never
-the value — a partition table is attacker-supplied input on borrowed hardware,
-and the earlier version interpolated a partition's role, so a crafted role put a
-device path, a serial and a terminal escape on the console. And the session
-redacts its own `repr` and raises binding refusals from a frame holding
-booleans, because `pytest --showlocals` and most crash reporters capture frame
-locals; the earlier version put the host fingerprint and the session id in every
-such traceback.
+A refusal detail names the **rule**, never the value: a partition table is
+attacker-supplied input on borrowed hardware, and an earlier version
+interpolated a partition's role, so a crafted role put a device path, a serial
+and a terminal escape on the console.
+
+The same care is applied to **captured-locals tracebacks**, which is what
+`pytest --showlocals` and most crash reporters build. The session redacts its
+`repr` and refuses to be pickled; `Device`, `Partition` and `MediumLayout`
+redact theirs; binding refusals are raised from a frame holding one boolean; and
+`check_layout` sanitises an unrecognised role rather than binding it to a local.
+An earlier version put the host fingerprint, the session id, the device identity
+and the whole partition table into every such traceback.
 
 ## 8. What this does not model
 

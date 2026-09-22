@@ -269,6 +269,17 @@ class Device:
     identity: str
     device_class: DeviceClass
 
+    def __repr__(self) -> str:
+        """Redacted, for the reason `Quarantine.__repr__` is.
+
+        A `Device` is an argument of nearly every call here and in
+        `azazel_boot.persistence`, so a captured-locals traceback — which is
+        what `pytest --showlocals` and most crash reporters build — carried the
+        identity out of every refusal raised anywhere downstream.
+        """
+
+        return f"Device(identity=<redacted>, device_class={self.device_class})"
+
 
 @dataclass(frozen=True)
 class ExportApproval:

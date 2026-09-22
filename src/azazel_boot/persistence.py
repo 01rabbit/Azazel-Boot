@@ -20,6 +20,20 @@ obtained for the internal disk — or typed by hand, with no quarantine in
 existence — opened persistence on anything. A value a caller can name is not a
 check.
 
+**The binding is re-derived, not re-compared.** The second version compared the
+binding against the session's own constructor arguments — both operands supplied
+by the same object, so a self-consistent session passed forever, on any laptop.
+Every act now takes the live read-only inventory and calls
+`commissioning.binding_applies`, which recomputes the host fingerprint from what
+this machine actually presents. That one can fail on a different laptop; the
+tautology could not.
+
+**The session is not a value a caller can edit.** It is not a dataclass, its
+fields are private, reassigning the quarantine or the binding raises, the fence
+is one-way, and it refuses to be pickled. A review moved the round-one exploit
+up one level by substituting a forged quarantine into a public field and by
+clearing the fence flag with one assignment.
+
 **The layout is the simple one.** GPT, an ESP, the signed read-only root, and an
 optional LUKS2 partition with a filesystem formatted **directly** on it
 ([ADR-0008](../../docs/adr/0008-debian-13-live-baseline.md) D4.1). No volume
@@ -45,10 +59,11 @@ or quarantined on any hardware.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, fields
 from enum import Enum
 
-from .commissioning import SessionBinding
+from .commissioning import SessionBinding, binding_applies
+from .inventory import InterfaceObservation
 from .quarantine import Device, Disposition, Quarantine
 
 
@@ -84,13 +99,38 @@ VOLUME_MANAGERS = ("lvm", "lvm2", "mdraid", "md", "zfs", "bcache", "dm-raid", "d
 #: Filesystem identifiers that *make a partition a member of* such a stack. A
 #: partition that is an LVM physical volume assembles something even with no
 #: mapping stacked on it, so the filesystem is checked too.
+#:
+#: This is defence in depth behind `PERMITTED_FILESYSTEMS`, which is the real
+#: check. A review pointed out that a denylist here was the only thing standing
+#: between the layout and an assembling partition, and listed a dozen ordinary
+#: `blkid` types it missed; an allowlist of three roles' filesystems does not
+#: have that failure mode.
 VOLUME_MANAGER_MEMBERS = (
+    "lvm1_member",
     "lvm2_member",
     "zfs_member",
     "linux_raid_member",
+    "ddf_raid_member",
+    "isw_raid_member",
+    "promise_fasttrack_raid_member",
+    "via_raid_member",
+    "silicon_medley_raid_member",
+    "adaptec_raid_member",
+    "jmicron_raid_member",
     "bcache",
     "stratis",
+    "vdo",
+    "drbd",
 )
+
+#: What each role's filesystem may be. The medium carries exactly three
+#: partitions, so naming what is allowed is tractable and is the honest shape:
+#: a denylist of things that assemble is a list somebody has to keep complete.
+PERMITTED_FILESYSTEMS = {
+    "esp": ("vfat",),
+    "boot_root": ("squashfs", "erofs"),
+    "persistence": ("ext4", "xfs", "f2fs"),
+}
 
 #: The one mapping permitted, and only to open persistence.
 PERMITTED_MAPPING = "dm-crypt"
@@ -99,6 +139,10 @@ PERMITTED_MAPPING = "dm-crypt"
 class PersistenceState(Enum):
     """What persistence is right now. Every value is a capability statement."""
 
+    #: No act has run, so nothing is known. Saying `absent` here would be a
+    #: positive claim about hardware nobody has looked at — the same mistake
+    #: `UNOBSERVED_TARGET` exists to prevent one layer down.
+    UNEXAMINED = "unexamined"
     #: The medium carries no persistence partition. A normal configuration for
     #: media handed out in an emergency, not a failure to report as one.
     ABSENT = "absent"
@@ -126,23 +170,24 @@ class Refusal(Enum):
     PERSISTENCE_NOT_DIRECTLY_FORMATTED = "persistence_not_directly_formatted"
     NOT_LUKS2 = "not_luks2"
     NO_PERSISTENCE_PARTITION = "no_persistence_partition"
+    FILESYSTEM_NOT_PERMITTED = "filesystem_not_permitted"
     GENERATION_NOT_A_COUNT = "generation_not_a_count"
-    NOT_THIS_SESSION = "not_this_session"
-    NOT_THIS_HOST = "not_this_host"
+    QUARANTINE_FROM_ANOTHER_SESSION = "quarantine_from_another_session"
+    NOT_THIS_HOST_OR_SESSION = "not_this_host_or_session"
     SESSION_FENCED = "session_fenced"
 
 
 class UnlockOutcome(Enum):
     """Why persistence is, or is not, open.
 
-    `OPENED_AFTER_BOUNDED_REPAIR` exists because the first version returned
+    `OPENED_AFTER_REPAIR` exists because the first version returned
     plain `OPENED` for a repaired volume, identical to a clean open in
     everything but a free-text reason. A consumer reading `outcome` could not
     tell them apart, which is the distinction `docs/threat-model.md` §5 is about.
     """
 
     OPENED = "opened"
-    OPENED_AFTER_BOUNDED_REPAIR = "opened_after_bounded_repair"
+    OPENED_AFTER_REPAIR = "opened_after_repair"
     UNLOCK_FAILED = "unlock_failed"
     INTEGRITY_UNVERIFIED = "integrity_unverified"
     ROLLBACK_DETECTED = "rollback_detected"
@@ -181,6 +226,17 @@ class Partition:
         # acted-on layout were different objects' contents.
         object.__setattr__(self, "mappings", tuple(self.mappings))
 
+    def __repr__(self) -> str:
+        """Redacted: a partition table is attacker-supplied on borrowed hardware.
+
+        A crafted role carried a device path, a serial and a terminal escape
+        into every captured-locals traceback of every refusal raised downstream.
+        Only recognised values are shown.
+        """
+
+        role = self.role if self.role in PARTITION_ROLES else "<unrecognised>"
+        return f"Partition(role={role!r}, filesystem=<redacted>, mappings=<redacted>)"
+
 
 @dataclass(frozen=True)
 class MediumLayout:
@@ -191,6 +247,12 @@ class MediumLayout:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "partitions", tuple(self.partitions))
+
+    def __repr__(self) -> str:
+        return (
+            f"MediumLayout(partition_table=<redacted>, "
+            f"partitions={self.partitions!r})"
+        )
 
 
 @dataclass(frozen=True)
@@ -228,13 +290,18 @@ def check_layout(layout: MediumLayout) -> None:
     if layout.partition_table.lower() != "gpt":
         raise PersistenceRefused(Refusal.NOT_GPT, "the medium is not GPT")
 
-    roles = [partition.role for partition in layout.partitions]
-    for role in roles:
-        if role not in PARTITION_ROLES:
-            raise PersistenceRefused(
-                Refusal.UNKNOWN_PARTITION_ROLE,
-                "a partition outside the fixed layout is refused, not ignored",
-            )
+    # Sanitised on the way in: an unrecognised role becomes `None` rather than
+    # being bound to a local. A captured-locals traceback renders every frame,
+    # and a crafted role carried a device path and a serial into all of them.
+    roles = [
+        partition.role if partition.role in PARTITION_ROLES else None
+        for partition in layout.partitions
+    ]
+    if None in roles:
+        raise PersistenceRefused(
+            Refusal.UNKNOWN_PARTITION_ROLE,
+            "a partition outside the fixed layout is refused, not ignored",
+        )
     if len(set(roles)) != len(roles):
         raise PersistenceRefused(
             Refusal.DUPLICATE_PARTITION_ROLE,
@@ -263,6 +330,12 @@ def check_layout(layout: MediumLayout) -> None:
                 "a partition that is a member of a volume manager assembles "
                 "something even with nothing stacked on it",
             )
+        if partition.filesystem.lower() not in PERMITTED_FILESYSTEMS[partition.role]:
+            raise PersistenceRefused(
+                Refusal.FILESYSTEM_NOT_PERMITTED,
+                "this role carries one of a named set of filesystems; a denylist "
+                "of things that assemble is a list somebody has to keep complete",
+            )
         if partition.role in PLAIN_ROLES:
             if mappings:
                 raise PersistenceRefused(
@@ -290,62 +363,123 @@ def has_persistence(layout: MediumLayout) -> bool:
     return any(partition.role == "persistence" for partition in layout.partitions)
 
 
-@dataclass
 class PersistenceSession:
     """One sitting on one host, and the only thing that answers "may I".
 
-    It holds the quarantine — so "is this the medium" is asked, not accepted —
-    and the binding, so the host and session are re-checked on **every** act
-    rather than at creation only. A review found the first version binding at
-    create time and never again, which left the act the threat model actually
-    cares about, opening the volume on somebody else's machine, unbound.
+    It is **not a dataclass and not a value**. Its fields are private, the
+    quarantine and the binding cannot be reassigned, the fence is one-way, and
+    it refuses to be pickled. A review took the previous version — a plain
+    mutable dataclass — and substituted a forged quarantine into a public field,
+    cleared the fence with one assignment, and read the host fingerprint out of
+    `dataclasses.asdict`. `azazel_boot.quarantine.Quarantine` stopped being a
+    dataclass for exactly these reasons, and says so; this follows it.
+
+    It holds the quarantine, so "is this the medium" is asked rather than
+    accepted, and it re-derives the binding from the **live inventory** on every
+    act rather than comparing its own constructor arguments with each other.
     """
 
-    quarantine: Quarantine
-    binding: SessionBinding
-    session_id: str
-    host_fingerprint: str
-    _fenced: bool = field(default=False, init=False)
-    _status: PersistenceStatus | None = field(default=None, init=False)
+    __slots__ = ("_quarantine", "_binding", "_session_id", "_fenced", "_status", "_sealed")
 
-    def __repr__(self) -> str:
-        """Redacted: a generated repr would print the binding into any traceback.
+    def __init__(
+        self, quarantine: Quarantine, binding: SessionBinding, *, session_id: str
+    ) -> None:
+        object.__setattr__(self, "_sealed", False)
+        self._quarantine = quarantine
+        self._binding = binding
+        self._session_id = session_id
+        self._fenced = False
+        self._status: PersistenceStatus | None = None
+        if quarantine.session_id != session_id:
+            raise PersistenceRefused(
+                Refusal.QUARANTINE_FROM_ANOTHER_SESSION,
+                "a quarantine belongs to one session, and so does this",
+            )
+        object.__setattr__(self, "_sealed", True)
 
-        `pytest --showlocals` and most crash reporters capture frame locals, and
-        this object is in the frame of every refusal it raises.
+    def __setattr__(self, name: str, value: object) -> None:
+        """Sealed after construction, and the fence is one-way.
+
+        `_fenced` may be set and never cleared: a fence an attacker can clear
+        with one assignment is not the security property
+        `docs/threat-model.md` §4 asks for.
         """
 
+        if getattr(self, "_sealed", False):
+            if name == "_status":
+                object.__setattr__(self, name, value)
+                return
+            if name == "_fenced" and value is True:
+                object.__setattr__(self, name, True)
+                return
+            raise AttributeError(
+                "a PersistenceSession is sealed after construction; the fence "
+                "is one-way and the quarantine and binding cannot be replaced"
+            )
+        object.__setattr__(self, name, value)
+
+    def __reduce__(self):
+        """Refuse to pickle rather than writing the binding into a file or queue."""
+
+        raise TypeError("a PersistenceSession is not serialisable")
+
+    def __repr__(self) -> str:
+        """Redacted: a generated repr would print the binding into any traceback."""
+
         return f"PersistenceSession(fenced={self._fenced})"
+
+    @property
+    def quarantine(self) -> Quarantine:
+        return self._quarantine
+
+    @property
+    def session_id(self) -> str:
+        return self._session_id
 
     def status(self) -> PersistenceStatus:
         """What is true **now**. A status handed out earlier is a snapshot."""
 
         if self._fenced:
             return _fenced_status()
-        return self._status if self._status is not None else _absent()
+        return self._status if self._status is not None else _unexamined()
 
-    def create(self, device: Device, layout: MediumLayout) -> PersistenceStatus:
+    def recovery_options(self) -> tuple[str, ...]:
+        """What is offered next, read from the **current** state.
+
+        A review held the status returned by `unlock`, pulled the medium, and
+        got an empty option list — no reboot instruction — because the snapshot
+        still said `open`. The safe call is now the only call.
+        """
+
+        return RECOVERY_OPTIONS[self.status().state]
+
+    def create(
+        self,
+        device: Device,
+        layout: MediumLayout,
+        observations: tuple[InterfaceObservation, ...],
+    ) -> PersistenceStatus:
         """Decide whether persistence may be created here, now, on this medium.
 
         Creation is a separate explicit act. Nothing implies it: not a boot, not
         a successful write, not an operator confirming a NIC role.
         """
 
-        self._require_open_session()
+        self._require_open_session(observations)
         self._require_the_medium(device)
         check_layout(layout)
-        self._status = PersistenceStatus(
-            state=PersistenceState.LOCKED,
-            outcome=None,
-            reasons=("persistence may be created on this medium; it is not open yet",),
-            capability=DEGRADED_CAPABILITY,
+        return self._settle(
+            PersistenceState.LOCKED,
+            None,
+            "persistence may be created on this medium; it is not open yet",
+            DEGRADED_CAPABILITY,
         )
-        return self._status
 
     def unlock(
         self,
         device: Device,
         layout: MediumLayout,
+        observations: tuple[InterfaceObservation, ...],
         *,
         unlocked: bool,
         integrity_verified: bool,
@@ -363,7 +497,7 @@ class PersistenceSession:
         volume is opened only when the repair was re-verified afterwards.
         """
 
-        self._require_open_session()
+        self._require_open_session(observations)
         self._require_the_medium(device)
         check_layout(layout)
         if not has_persistence(layout):
@@ -375,42 +509,42 @@ class PersistenceSession:
         _require_generation(last_seen_generation)
 
         if not unlocked:
-            return self._record(UnlockOutcome.UNLOCK_FAILED, "the volume did not unlock")
+            return self._quarantine_volume(
+                UnlockOutcome.UNLOCK_FAILED, "the volume did not unlock"
+            )
         if not integrity_verified:
-            return self._record(
+            return self._quarantine_volume(
                 UnlockOutcome.INTEGRITY_UNVERIFIED,
                 "a modification that is not authenticated is detected, not repaired",
             )
         if stored_generation < last_seen_generation:
-            return self._record(
+            return self._quarantine_volume(
                 UnlockOutcome.ROLLBACK_DETECTED,
                 "an older generation is detected, never silently accepted",
             )
         if dirty:
             if not repairable:
-                return self._record(
+                return self._quarantine_volume(
                     UnlockOutcome.UNRECOVERABLE_DIRTY_VOLUME,
                     "a volume that cannot be repaired to a verified state is quarantined",
                 )
             if not reverified_after_repair:
-                return self._record(
+                return self._quarantine_volume(
                     UnlockOutcome.REPAIR_NOT_REVERIFIED,
                     "a repair that was not verified afterwards is not an open volume",
                 )
 
-        self._status = PersistenceStatus(
-            state=PersistenceState.OPEN,
-            outcome=(
-                UnlockOutcome.OPENED_AFTER_BOUNDED_REPAIR if dirty else UnlockOutcome.OPENED
-            ),
-            reasons=(
-                "the volume was repaired within bounds and re-verified"
+        return self._settle(
+            PersistenceState.OPEN,
+            UnlockOutcome.OPENED_AFTER_REPAIR if dirty else UnlockOutcome.OPENED,
+            (
+                "the volume was repaired and re-verified; the bound on the repair "
+                "is the caller's to enforce, not this module's"
                 if dirty
-                else "the volume unlocked and verified",
+                else "the volume unlocked and verified"
             ),
-            capability=Capability.LITE,
+            Capability.LITE,
         )
-        return self._status
 
     def fence_after_removal(self) -> PersistenceStatus:
         """The medium was pulled. Fence new actions without reading the medium.
@@ -418,8 +552,8 @@ class PersistenceSession:
         `docs/threat-model.md` §4 requires the release supervisor to be
         RAM-resident and to withdraw what it owns without reading anything from
         the removed device. This takes no argument for that reason — and it
-        **revokes**: every later act on this session is refused, and `status()`
-        reports the fence rather than whatever was true before.
+        **revokes**, one way: every later act is refused, `status()` reports the
+        fence, and nothing can clear it.
         """
 
         self._fenced = True
@@ -428,18 +562,21 @@ class PersistenceSession:
 
     # -- internals ---------------------------------------------------------
 
-    def _require_open_session(self) -> None:
+    def _require_open_session(
+        self, observations: tuple[InterfaceObservation, ...]
+    ) -> None:
         if self._fenced:
             raise PersistenceRefused(
                 Refusal.SESSION_FENCED,
                 "the medium was removed; this session cannot act again",
             )
-        same_session = self.binding.session_id == self.session_id
-        same_host = self.binding.host_fingerprint == self.host_fingerprint
-        _refuse_binding(same_session=same_session, same_host=same_host)
+        applies = binding_applies(
+            self._binding, observations, session_id=self._session_id
+        )
+        _refuse_binding(applies=applies)
 
     def _require_the_medium(self, device: Device) -> None:
-        disposition = self.quarantine.disposition(device)
+        disposition = self._quarantine.disposition(device)
         if disposition is None:
             raise PersistenceRefused(
                 Refusal.UNOBSERVED_TARGET,
@@ -453,14 +590,24 @@ class PersistenceSession:
                 "created on, mounted, repaired or written back to",
             )
 
-    def _record(self, outcome: UnlockOutcome, reason: str) -> PersistenceStatus:
+    def _settle(
+        self,
+        state: PersistenceState,
+        outcome: UnlockOutcome | None,
+        reason: str,
+        capability: Capability,
+    ) -> PersistenceStatus:
         self._status = PersistenceStatus(
-            state=PersistenceState.QUARANTINED,
-            outcome=outcome,
-            reasons=(reason,),
-            capability=DEGRADED_CAPABILITY,
+            state=state, outcome=outcome, reasons=(reason,), capability=capability
         )
         return self._status
+
+    def _quarantine_volume(
+        self, outcome: UnlockOutcome, reason: str
+    ) -> PersistenceStatus:
+        return self._settle(
+            PersistenceState.QUARANTINED, outcome, reason, DEGRADED_CAPABILITY
+        )
 
 
 #: What an operator may do from each state. Every option acts on the medium or
@@ -469,6 +616,10 @@ class PersistenceSession:
 #: review added "mount it read-write to salvage the session" and a denylist of
 #: four nouns did not notice.
 RECOVERY_OPTIONS: dict[PersistenceState, tuple[str, ...]] = {
+    PersistenceState.UNEXAMINED: (
+        "continue without persistence, at CORE",
+        "examine the medium: no act has run in this session yet",
+    ),
     PersistenceState.ABSENT: (
         "continue without persistence, at CORE",
         "create persistence on this medium as a separate explicit act",
@@ -487,23 +638,19 @@ RECOVERY_OPTIONS: dict[PersistenceState, tuple[str, ...]] = {
 }
 
 
-def recovery_options(status: PersistenceStatus) -> tuple[str, ...]:
-    """What is offered next. Never a repair of the host, in any state."""
-
-    return RECOVERY_OPTIONS[status.state]
-
-
 def status_field_names() -> tuple[str, ...]:
     """The model's own field names, for the test that asserts what it cannot hold."""
 
     return tuple(field_.name for field_ in fields(PersistenceStatus))
 
 
-def _absent() -> PersistenceStatus:
+def _unexamined() -> PersistenceStatus:
+    """Nothing has been looked at, and saying `absent` would claim otherwise."""
+
     return PersistenceStatus(
-        state=PersistenceState.ABSENT,
+        state=PersistenceState.UNEXAMINED,
         outcome=None,
-        reasons=("the medium carries no persistence partition",),
+        reasons=("no act has run in this session; nothing about the medium is known",),
         capability=DEGRADED_CAPABILITY,
     )
 
@@ -520,23 +667,23 @@ def _fenced_status() -> PersistenceStatus:
     )
 
 
-def _refuse_binding(*, same_session: bool, same_host: bool) -> None:
-    """Raise from a frame that holds booleans and nothing else.
+def _refuse_binding(*, applies: bool) -> None:
+    """Raise from a frame that holds one boolean and nothing else.
 
     A traceback with captured locals is an ordinary thing for a crash reporter
-    to build, and the earlier version raised from a frame holding the binding,
+    to build, and an earlier version raised from a frame holding the binding,
     the host fingerprint and the session id verbatim.
+
+    One refusal rather than two: `binding_applies` answers the host and the
+    session together, and distinguishing them here would mean re-deriving the
+    fingerprint a second time in this frame.
     """
 
-    if not same_session:
+    if not applies:
         raise PersistenceRefused(
-            Refusal.NOT_THIS_SESSION, "a binding does not outlive its session"
-        )
-    if not same_host:
-        raise PersistenceRefused(
-            Refusal.NOT_THIS_HOST,
-            "this record was bound to another machine; a medium carried to a "
-            "different laptop starts from nothing",
+            Refusal.NOT_THIS_HOST_OR_SESSION,
+            "this record was bound to another machine or another session; a "
+            "medium carried to a different laptop starts from nothing",
         )
 
 
