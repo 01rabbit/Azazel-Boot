@@ -357,6 +357,7 @@ class Quarantine:
         "_approval",
         "_audit",
         "_fenced",
+        "_volume_quarantined",
         "_sealed",
     )
 
@@ -368,6 +369,7 @@ class Quarantine:
         self._approval: ExportApproval | None = None
         self._audit: list[AuditEntry] = []
         self._fenced = False
+        self._volume_quarantined = False
         object.__setattr__(self, "_sealed", True)
 
     def __setattr__(self, name: str, value: object) -> None:
@@ -402,6 +404,9 @@ class Quarantine:
                 object.__setattr__(self, name, value)
                 return
             if name == "_fenced" and value is True:
+                object.__setattr__(self, name, True)
+                return
+            if name == "_volume_quarantined" and value is True:
                 object.__setattr__(self, name, True)
                 return
             raise AttributeError(
@@ -567,6 +572,45 @@ class Quarantine:
         """Whether the medium has been fenced this session. Never clears."""
 
         return self._fenced
+
+
+    def quarantine_volume(self) -> None:
+        """An interrupted write is suspected. Record it on the **medium's** rule.
+
+        [ADR-0010](../../docs/adr/0010-persistence-key-and-migration.md) D4.
+        It lives here for the reason :meth:`fence` does, and the reason is not
+        theoretical: it was put on `PersistenceSession` first, and an
+        adversarial review built a second session from the same quarantine,
+        binding and session id — the three arguments a legitimate caller
+        already holds — and got an un-quarantined volume that permitted every
+        ordinary act and unlocked to `open`. That is the same defeat `fence`
+        suffered, in the same place, one release later. A fact about the medium
+        does not belong to whichever object happened to notice it.
+
+        One-way, like the fence, and for the same reason.
+
+        **It deliberately does not withdraw a standing export approval, and
+        does not fence.** [Quarantine policy](../../docs/quarantine-policy.md)
+        §4 offers an export of a quarantined volume **unmodified** for offline
+        examination, and ADR-0010 D5 leaves that path open on purpose: the
+        volume is untrustworthy, which is the reason to copy it out, not a
+        reason to refuse. Reusing `_fenced` here would have closed it — the
+        obvious-looking implementation, and the wrong one.
+        """
+
+        already = self._volume_quarantined
+        self._volume_quarantined = True
+        self._record(
+            self._dispositions.get(self._boot_medium_identity),
+            "volume_quarantined",
+            "already_quarantined" if already else "quarantined",
+        )
+
+    @property
+    def volume_is_quarantined(self) -> bool:
+        """Whether an interrupted write is suspected. Never clears."""
+
+        return self._volume_quarantined
 
     def approve_export(self, approval: ExportApproval) -> None:
         """Record one approval, and audit the attempt either way.

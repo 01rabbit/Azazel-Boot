@@ -32,7 +32,7 @@ operator may later truthfully tell someone about the evidence, so
 `tests/unit/test_dirty_write.py` scans every rendered string for those six
 words.
 
-## Ambiguity is not a third answer
+## Ambiguity is not a third answer, and an unreadable input is not one either
 
 A receipt that cannot be read, a verification that errored, a continuity nobody
 established: each resolves **to quarantine**. There is no vocabulary for "probably
@@ -106,11 +106,38 @@ class WriteObservation:
     There is no field for the record, the offset, the size, the byte count, the
     device, the time or the content. A free-text or numeric field here is how
     that reaches an audit, and D4 says the classification is the payload.
+
+    **The three fields are checked, because an annotation is not a check.** An
+    adversarial review built `WriteObservation(receipt="missing",
+    continuity="removed_during_write", verification="failed")` — three strings
+    naming the worst faults there are — and it classified as a *clean write*,
+    because the six `is` comparisons matched nothing and the function fell
+    through to `None`. The whole "ambiguity resolves to quarantine" claim
+    failed on an input a caller could construct by accident with the wrong
+    import.
     """
 
     receipt: ReceiptState
     continuity: MediumContinuity
     verification: Verification
+
+    def __post_init__(self) -> None:
+        # The three fields are named as literals rather than read with
+        # `getattr`, so that `tests/unit/test_dirty_write.py` can refuse
+        # `getattr` outright: it is one of the names that makes a dynamic reach
+        # possible without an import, and an exemption for a convenience here
+        # would be an exemption everywhere in the module.
+        for name, value, expected in (
+            ("receipt", self.receipt, ReceiptState),
+            ("continuity", self.continuity, MediumContinuity),
+            ("verification", self.verification, Verification),
+        ):
+            if not isinstance(value, expected):
+                raise TypeError(
+                    f"{name} must be a member of {expected.__name__}; a value "
+                    f"this module cannot classify is refused where it is built, "
+                    f"not treated as a clean write where it is read"
+                )
 
 
 #: The one observation out of twenty-seven that is a clean write.
@@ -137,7 +164,20 @@ def classify(observation: WriteObservation) -> DirtySignal | None:
     `if signal is DirtySignal.CLEAN` and have it mean "safe" — there is nothing
     to compare against. Callers do not branch on this at all: they hand the
     observation to `PersistenceSession.report_write`, which refuses or does not.
+
+    **The fall-through to `None` is sound only because the input is checked.**
+    Six `is` comparisons followed by `return None` means *anything unrecognised
+    is a clean write*, which is the opposite of what this module claims. A
+    review passed a `SimpleNamespace` with three `None` fields and got a clean
+    write; so the type is asserted here as well as in `__post_init__`, because
+    a caller can reach this function with an object that never ran that.
     """
+
+    if not isinstance(observation, WriteObservation):
+        raise TypeError(
+            "classify takes a WriteObservation; something this module cannot "
+            "read is refused rather than reported as a clean write"
+        )
 
     if observation.continuity is MediumContinuity.REMOVED_DURING_WRITE:
         return DirtySignal.REMOVAL_DURING_WRITE

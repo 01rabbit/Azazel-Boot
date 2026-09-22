@@ -266,6 +266,15 @@ Of the twenty-seven possible observations, **one is a clean write.** The other
 twenty-six quarantine the volume, and the test enumerates all of them rather
 than sampling, so a widened condition is a red test.
 
+**The three fields are checked where the observation is built, and the type is
+checked again where it is read.** Six `is` comparisons followed by `return
+None` means *anything unrecognised is a clean write* — the opposite of what
+this page claims. An adversarial review passed a `SimpleNamespace` of three
+`None`s and got a clean write, and built a `WriteObservation` whose three
+fields were the *strings* naming the worst faults there are, which also
+classified clean. An annotation is not a check, and the wrong import is enough
+to produce the second one by accident.
+
 The classification order is fixed and is part of the contract, because faults
 arrive together and the audit records one word: continuity first, then whether
 the verify step reached an answer, then the receipt. A pulled medium *causes* a
@@ -296,11 +305,33 @@ removed.
 ### Nothing is called erased
 
 The data is on the medium. Boot **will not use it in ordinary operation**, and
-that is a different sentence from "the volume was wiped". No message, field,
-reason code or docstring says wiped, cleared, erased, destroyed, shredded or
-deleted — scanned over the rendered status, the refusal, the audit and the
-module's own code. What an operator may later truthfully tell someone about the
-evidence depends on the distinction.
+that is a different sentence from "the volume was wiped". What an operator may
+later truthfully tell someone about the evidence depends on the distinction.
+
+What is scanned for `wiped`, `cleared`, `erased`, `destroyed`, `shredded` and
+`deleted`, and what is not, is worth stating exactly — an earlier version of
+this paragraph claimed more than the test did:
+
+- **`azazel_boot.dirty_write`: everything, including its class and function
+  docstrings.** A docstring is where an operator-facing claim actually lives —
+  `help()`, an IDE hover, generated documentation — and the first version
+  excluded docstrings *as a category*, so a review put "the volume has been
+  wiped and its contents erased and destroyed" into `classify`'s docstring and
+  the suite stayed green. Only the module docstring is exempt, by node
+  identity, because it names the six words in order to say the volume is none
+  of them.
+- **`azazel_boot.persistence`: every string it can render** — reason strings,
+  refusal details, every `Refusal`, `UnlockOutcome` and `PersistenceState`
+  value, and every line of `RECOVERY_OPTIONS`. The first version scanned none
+  of them, and a review replaced the D4 unlock reason with "the dirty volume
+  was shredded, erased and destroyed, not repaired" — a string that lands
+  straight in `PersistenceStatus.reasons` — with the suite green.
+- **Not `azazel_boot.persistence`'s docstrings.** They carry long historical
+  narrative about reviews that "cleared the fence with one assignment" and an
+  `_audit.clear()` that "erases the record": prose about *other objects*.
+  Scanning it for six English words would fail on the history that exists to
+  stop those bugs recurring, and a proximity heuristic would stop meaning
+  anything. The boundary is stated here rather than left to be discovered.
 
 The offline-examination export of [quarantine
 policy](quarantine-policy.md) §4 is **unchanged**: an approved, unmodified copy

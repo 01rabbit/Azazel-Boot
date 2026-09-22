@@ -1,10 +1,13 @@
 # ADR-0010: Persistence key handling, dirty-write detection, and migration
 
-Status: **accepted (2026-09-22). D1–D3 implemented in software and
-hardware-unverified; D4–D10 not implemented.** The owner decided D1–D10 below.
+Status: **accepted (2026-09-22). D1–D5 implemented in software and
+hardware-unverified; D6–D10 not implemented.** The owner decided D1–D10 below.
 `azazel_boot.session_mode` implements D1, D2 and D3 — see
-[session mode](../session-mode.md) — on no hardware: no passphrase has been
-attempted and no volume opened on any device.
+[session mode](../session-mode.md) — and `azazel_boot.dirty_write` with
+`azazel_boot.persistence` implements D4 and D5, see
+[persistence](../persistence.md) §4.1. All of it on no hardware: no passphrase
+has been attempted, no volume opened, and no USB SSD pulled mid-write on any
+device.
 [#7](https://github.com/01rabbit/Azazel-Boot/issues/7) stays open, and so do
 the three children this record names.
 
@@ -246,9 +249,11 @@ these values are not traceability.
 ## What this record does not establish
 
 **No volume has been created, opened, sealed, torn, quarantined, snapshotted,
-migrated or restored on any device. No passphrase has been attempted.** D1–D3
-now exist as decision logic in `azazel_boot.session_mode`, which opens nothing
-and prompts for nothing: it decides what an outcome reported by something else
-means. D4–D10 are decisions with no code behind them at all. #7 and its three
+migrated or restored on any device. No passphrase has been attempted, and no
+medium has been pulled mid-write.** D1–D3 exist as decision logic in
+`azazel_boot.session_mode`, and D4–D5 in `azazel_boot.dirty_write` and
+`azazel_boot.persistence`. Both open nothing and read nothing: they decide what
+an outcome reported by something else means. D6–D10 are decisions with no code
+behind them at all. #7 and its three
 children stay open, and every one of them carries `hardware-unverified` until a
 real USB SSD and a real laptop say otherwise.

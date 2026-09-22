@@ -947,7 +947,6 @@ class PersistenceSession:
         "_fenced",
         "_status",
         "_sealed",
-        "_volume_quarantined",
         "_audit",
     )
 
@@ -960,7 +959,6 @@ class PersistenceSession:
         self._session_id = session_id
         self._fenced = False
         self._status: PersistenceStatus | None = None
-        self._volume_quarantined = False
         self._audit: list[VolumeAuditEntry] = []
         if quarantine.session_id != session_id:
             raise PersistenceRefused(
@@ -982,11 +980,6 @@ class PersistenceSession:
                 object.__setattr__(self, name, value)
                 return
             if name == "_fenced" and value is True:
-                object.__setattr__(self, name, True)
-                return
-            if name == "_volume_quarantined" and value is True:
-                # One-way, for the same reason the fence is: a quarantine a
-                # caller can clear with one assignment is not a quarantine.
                 object.__setattr__(self, name, True)
                 return
             raise AttributeError(
@@ -1028,6 +1021,11 @@ class PersistenceSession:
 
         if self._is_fenced:
             return _fenced_status()
+        if self.volume_is_quarantined and self._status is None:
+            # A session rebuilt over a quarantined medium has no stored status,
+            # and `unexamined` would be a positive claim that nothing is known
+            # about a volume something already judged.
+            return _volume_quarantined_status()
         return self._status if self._status is not None else _unexamined()
 
     def recovery_options(self) -> tuple[str, ...]:
@@ -1061,6 +1059,7 @@ class PersistenceSession:
         """
 
         self._require_open_session(observations)
+        self._require_the_volume_is_not_quarantined()
         self._require_the_medium(device)
         self._require_the_media_binding(device, media, binding_key)
         check_layout(layout)
@@ -1094,6 +1093,7 @@ class PersistenceSession:
         """
 
         self._require_open_session(observations)
+        self._require_the_volume_is_not_quarantined()
         self._require_the_medium(device)
         self._require_the_media_binding(device, media, binding_key)
         check_layout(layout)
@@ -1143,16 +1143,26 @@ class PersistenceSession:
 
     @property
     def volume_is_quarantined(self) -> bool:
-        """One-way within this boot. There is no call that clears it.
+        """Read from the **quarantine**, not from this object. One-way.
 
-        Not `set_quarantined(False)`, not `clear()`, not `reopen()`. ADR-0010
-        D4 puts leaving quarantine behind the explicit recovery workflow of D8,
-        which is [#42](https://github.com/01rabbit/Azazel-Boot/issues/42) and
-        does not exist. A method here that ended the state would be that
-        workflow, minus its four gates.
+        It was a flag on this session first, and an adversarial review built a
+        second `PersistenceSession` from the same quarantine, binding and
+        session id — the three arguments a legitimate caller already holds —
+        and got an un-quarantined volume that permitted every ordinary act and
+        unlocked to `open`. That is the identical defeat `fence_after_removal`
+        already records for the fence, repeated one release later on the flag
+        beside it. The fact belongs to the medium, so it lives on the medium's
+        rule.
+
+        There is no call that clears it — not here and not on the quarantine.
+        ADR-0010 D4 puts leaving quarantine behind D8's explicit recovery
+        workflow, which is
+        [#42](https://github.com/01rabbit/Azazel-Boot/issues/42) and does not
+        exist. A method that ended the state would be that workflow, minus its
+        four gates.
         """
 
-        return self._volume_quarantined
+        return self._quarantine.volume_is_quarantined
 
     def report_write(
         self, observation: WriteObservation, observations: tuple[InterfaceObservation, ...]
@@ -1172,6 +1182,7 @@ class PersistenceSession:
         """
 
         self._require_open_session(observations)
+        self._require_the_volume_is_not_quarantined()
 
         signal = classify(observation)
         if signal is None:
@@ -1179,12 +1190,21 @@ class PersistenceSession:
 
         return self._enter_volume_quarantine(signal)
 
-    def require_ordinary(self, act: OrdinaryAct) -> None:
+    def require_ordinary(
+        self, act: OrdinaryAct, observations: tuple[InterfaceObservation, ...]
+    ) -> None:
         """Refuse an ordinary read, write or export on a quarantined volume.
 
         All three, and the same refusal for each: ADR-0010 D5 has no
         per-record salvage, no "the earlier ones are fine" and no partial
         mount, so there is no act that is still ordinary here.
+
+        It takes the inventory like every other act, because the module
+        docstring says *"every act takes the inventory and calls
+        `commissioning.binding_applies`"* and a review pointed out that this
+        one did not — making the sentence false for the newest act rather than
+        the sentence wrong. A captured tuple replayed elsewhere still passes;
+        the strength of the check is the strength of whoever collected it.
 
         **This does not close the offline-examination export** of
         [quarantine policy](../../docs/quarantine-policy.md) §4. That export is
@@ -1193,16 +1213,26 @@ class PersistenceSession:
         module cannot reach it.
         """
 
-        if self._is_fenced:
-            raise PersistenceRefused(
-                Refusal.SESSION_FENCED,
-                "the medium was removed; no session over it acts again",
-            )
-        if not self._volume_quarantined:
+        self._require_open_session(observations)
+        if not self.volume_is_quarantined:
             return
 
         self._record(VolumeAuditEvent.ORDINARY_ACT_REFUSED, act=act)
         _refuse_quarantined_volume()
+
+    def _require_the_volume_is_not_quarantined(self) -> None:
+        """The gate `create`, `unlock` and `report_write` were missing.
+
+        `require_ordinary` refused the three ordinary acts, and nothing else
+        asked. A review quarantined the volume and then called `unlock` —
+        which is under no obligation to re-assert `dirty` — and reached
+        `PersistenceState.OPEN`, `writable=True`, `LITE`, with
+        `recovery_options()` empty: no reboot instruction and no export offer
+        on a volume this module had already judged.
+        """
+
+        if self.volume_is_quarantined:
+            _refuse_quarantined_volume()
 
     def fence_after_removal(self) -> PersistenceStatus:
         """The medium was pulled. Fence new actions without reading the medium.
@@ -1316,7 +1346,7 @@ class PersistenceSession:
         """
 
         self._record(VolumeAuditEvent.DIRTY_WRITE_DETECTED, signal=signal)
-        self._volume_quarantined = True
+        self._quarantine.quarantine_volume()
         self._record(VolumeAuditEvent.VOLUME_QUARANTINED, signal=signal)
         return self._settle(
             PersistenceState.QUARANTINED,
@@ -1342,6 +1372,24 @@ class PersistenceSession:
     def _quarantine_volume(
         self, outcome: UnlockOutcome, reason: str
     ) -> PersistenceStatus:
+        """An unlock fault, quarantining the volume **for real**.
+
+        This used to set `PersistenceState.QUARANTINED` on the status and
+        nothing else — no shared flag, no audit entry. So `unlock(dirty=True)`,
+        the canonical ADR-0010 D4 case, reported `quarantined` while every
+        ordinary read, write and export stayed permitted, and the same held for
+        the three other unlock faults. A review found it: the status was a
+        label, and the refusal was somewhere else entirely.
+
+        The audit entry carries **no signal**. `DirtySignal` is the
+        torn-write vocabulary and an unlock fault is not one of its members;
+        which fault it was is `PersistenceStatus.outcome`, and inventing a
+        member to cross the two vocabularies would be a third fact to keep in
+        agreement with the other two.
+        """
+
+        self._quarantine.quarantine_volume()
+        self._record(VolumeAuditEvent.VOLUME_QUARANTINED)
         return self._settle(
             PersistenceState.QUARANTINED, outcome, reason, DEGRADED_CAPABILITY
         )
@@ -1399,6 +1447,20 @@ def _fenced_status() -> PersistenceStatus:
         reasons=(
             "the medium was removed; new actions are fenced and the session "
             "requires a reboot rather than continuing ambiguously",
+        ),
+        capability=DEGRADED_CAPABILITY,
+    )
+
+
+def _volume_quarantined_status() -> PersistenceStatus:
+    """What a session rebuilt over a quarantined medium reports."""
+
+    return PersistenceStatus(
+        state=PersistenceState.QUARANTINED,
+        outcome=None,
+        reasons=(
+            "an interrupted write is suspected; Boot will not use this volume "
+            "in ordinary operation, and does not repair it",
         ),
         capability=DEGRADED_CAPABILITY,
     )
