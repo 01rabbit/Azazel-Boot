@@ -3,7 +3,7 @@
 Status: **accepted (2026-09-22) — nothing implemented.** The owner decided
 D1–D10 below. Implementation has **not** started;
 [#7](https://github.com/01rabbit/Azazel-Boot/issues/7) stays open and is
-decomposed into the four children this record names.
+decomposed into the three children this record names.
 
 Related: [ADR-0008 D4.1 / D4.1.1](0008-debian-13-live-baseline.md) ·
 [ADR-0003 D4](0003-immutable-ab-update.md) ·
@@ -233,7 +233,7 @@ these values are not traceability.
   credential format. Those follow these decisions rather than the reverse, and
   offline-attack resistance is a property of that choice, not of D2.
 - The snapshot's on-disk container format, versioning scheme or integrity
-  construction. D6 fixes the requirements; the construction is the first
+  construction. D6 fixes the requirements; the construction is the third
   child's design work.
 - Anything requiring hardware. D4 in particular cannot be called demonstrated
   without the hardware-in-the-loop record [threat model](../threat-model.md)
@@ -244,5 +244,5 @@ these values are not traceability.
 **Nothing here is implemented.** No volume has been created, opened, sealed,
 torn, quarantined, snapshotted, migrated or restored on any device. No
 passphrase has been attempted. These are decisions; the work that follows them
-is #7 and its four children, and every one of those carries
+is #7 and its three children, and every one of those carries
 `hardware-unverified` until a real USB SSD and a real laptop say otherwise.
