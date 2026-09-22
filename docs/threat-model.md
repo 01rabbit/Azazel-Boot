@@ -74,6 +74,29 @@ accordingly** is.
 | Tampered update installed to the media | Updates are written to the **inactive** slot; the full digest is verified before selection; promotion happens only after a health-confirmed trial boot; failure falls back automatically. |
 | Correctly signed but obsolete or wrong-role artifact | Admission requires an exact tested compatibility tuple, the correct signer role, and a minimum security epoch, in addition to a valid signature. Anti-rollback by version number alone is insufficient. |
 | Media physically stolen | Persistence is encrypted; evidence export is encrypted; the passphrase/recovery path is documented and portable. Theft of the media must not yield plaintext evidence. |
+| Persistence opened on a medium that is not the one it was created on | Opening requires a **hardware-provided stable media identity** — a USB serial descriptor, a SCSI VPD WWN, an NVMe EUI-64 or NGUID, an ATA serial — bound under a **key-protected HMAC** together with the LUKS persistence UUID, the signed Boot image digest and the commissioning generation. Any of the four changing refuses. Topology is never identity: a bus path, a device node, a port or an enumeration order is not an accepted source. |
+
+**What the media binding does not defend against, stated here rather than
+discovered later.** It does not defeat a full byte-for-byte clone of the medium
+made together with its hardware identity, and it does not defeat an enclosure
+or bridge that reports an identity of the adversary's choosing — cheap USB-SATA
+and USB-NVMe bridges are programmable, and a whole production run may ship with
+one serial descriptor. Boot refuses the placeholders it can recognise, which is
+a floor and not a guarantee: a bridge reporting a plausible unique string is
+indistinguishable from a genuine device at this layer. The *source* vocabulary
+also cannot be a topology one — there is no value for a bus path or a port —
+but nothing stops a caller putting a bus path in the **value** under a hardware
+source, so that half is enforcement and this half is discipline. Both cases are hardware
+substitution, which §9 already excludes. What the binding does is make the
+**ordinary** failures refuse rather than open: a different medium, a re-created
+volume, a rolled-back generation, a different Boot image.
+
+The raw identity is treated as the owner's hardware. It is held in the
+encrypted commissioning record and nowhere else — **not** in the audit, a
+journal, a terminal, an issue, a pull request or an external report. The audit
+is a place for traceability, not a guarantee of confidentiality. No such
+encrypted record exists in this repository yet; what exists is the discipline
+that makes one possible, and it is enforced by test rather than by convention.
 
 ## 3. Initramfs host-storage quarantine
 
@@ -150,7 +173,9 @@ of the system an attacker with transient physical access will reach for.
 | Threat | Intended mitigation |
 | --- | --- |
 | Offline modification of persistence contents | Encryption with integrity protection; a modification that is not authenticated is detected at boot and the volume is quarantined rather than repaired into use. |
-| Rollback to an older persistence generation | Generation counters bound into the signed checkpoint chain; an older generation is detected, not silently accepted. A rollback of software never restores obsolete trust state, policy, or hardware bindings. |
+| Rollback to an older persistence generation | Generation counters bound into the signed checkpoint chain; an older generation is detected, not silently accepted. A rollback of software never restores obsolete trust state, policy, or hardware bindings. §2.1's media binding includes the commissioning generation, so a binding **cannot be reused across generations** — which is not the same as rollback resistance, and an earlier version of this row said it was. A rollback restores the volume together with the binding stored beside it, both halves move, and the pair still matches. Rollback resistance comes from the checkpoint chain named above, which compares the generation against a value the attacker cannot roll back. |
+| Persistence carried to a second medium, or re-created under the same name | The binding covers the LUKS volume UUID and the device identity the quarantine holds, as well as the medium's hardware identity, so a re-created volume is a different volume and a binding cannot be presented alongside a different device. A changed identity and a forged binding are **one refusal**: naming which input was wrong would make the refusal an oracle. |
+| The medium's identity changes **while a volume is already open** | Not detected. The binding is checked at each act — creating, unlocking — and an open volume stays open until the next one. Surprise removal is what §4 covers; a live substitution without a removal event is not modelled, and is stated here rather than implied by "a medium whose identity changed is refused". |
 | Audit chain truncation or splice | Two-copy signed checkpoints binding product/node/boot identity, log and security epoch, monotonic sequence, previous checkpoint, current head, active versions, and generation; an operator-carried or remote anchor when available. |
 | No anchor is available (common on borrowed hardware) | Audit assurance is reported as `LOCAL_CONTINUITY_ONLY`. That state forbids live Deception, forbids disruptive actions, and forbids claiming rollback-verified finalized evidence unless a named emergency policy records explicit operator acceptance. Exports are labeled locally consistent and **not** rollback verified. This is a reduced claim, not a disabled product. |
 | Dirty volume from an unclean shutdown is repaired into a state an attacker chose | Boot-time repair is bounded and conservative; a volume that cannot be repaired to a verified state is quarantined, and the failure is visible rather than silent. |

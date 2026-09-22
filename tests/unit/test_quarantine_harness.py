@@ -473,3 +473,312 @@ def test_a_refusal_message_names_no_device() -> None:
     with pytest.raises(ExportRefused) as refused:
         quarantine.approve_export(approval("never-seen-SN-DEADBEEF"))
     assert "DEADBEEF" not in str(refused.value)
+
+
+# --------------------------------------------------------------------------
+# The fence: removal, and what the rule does afterwards
+#
+# `fence()` and `is_fenced` arrived with `azazel_boot.persistence` and were
+# tested only from the persistence side. A review pointed out the asymmetry and
+# then used it: the class's own primary consumer, `evaluate`, never consulted
+# the flag, so every action on a fenced medium was still allowed.
+# --------------------------------------------------------------------------
+
+
+def test_a_fenced_medium_allows_nothing() -> None:
+    """The fence decides; it is not a note attached to the decision.
+
+    `_decide` short-circuited on `disposition is BOOT_MEDIUM` and returned
+    ALLOWED without looking at the fence, so a writable mount, an fsck, a
+    journal replay and a swap activation against a medium that had been pulled
+    were all permitted — and the audit recorded them as permitted, on
+    `boot_medium`. That is the threat model's "new actions taken after removal"
+    with an audit path that says they were fine.
+    """
+
+    quarantine = a_quarantine()
+    quarantine.observe(BOOT_MEDIUM)
+    assert quarantine.evaluate(BOOT_MEDIUM, Action.WRITABLE_MOUNT) is Verdict.ALLOWED
+
+    quarantine.fence()
+    for action in Action:
+        assert quarantine.evaluate(BOOT_MEDIUM, action) is Verdict.BLOCKED
+        assert quarantine.evaluate(HOST_NVME, action) is Verdict.BLOCKED
+
+
+def test_a_device_arriving_after_the_fence_on_the_mediums_identity_is_blocked() -> None:
+    """The sharp case, and the one the fence exists for.
+
+    A device presenting the medium's identity after the removal is the
+    transient-physical-access adversary this module states it cannot tell apart.
+    Classification is unchanged — identity decides, and that is deliberate — but
+    the verdict is not: it used to be a writable mount.
+    """
+
+    quarantine = a_quarantine()
+    quarantine.observe(BOOT_MEDIUM)
+    quarantine.fence()
+
+    impostor = Device(identity=MEDIUM_ID, device_class=DeviceClass.HOST_STORAGE)
+    assert quarantine.observe(impostor) is Disposition.BOOT_MEDIUM
+    assert quarantine.evaluate(impostor, Action.WRITABLE_MOUNT) is Verdict.BLOCKED
+    assert quarantine.evaluate(impostor, Action.SWAP_ACTIVATION) is Verdict.BLOCKED
+    assert quarantine.medium_is_bound() is False
+
+
+def test_the_fence_is_one_way_and_idempotent() -> None:
+    """Nothing tested the quarantine's own flag, so making it two-way was green.
+
+    `fence()` twice is still fenced; a re-appearance of the medium does not
+    clear it; and plain assignment raises, which is the guard the session had
+    from the start and the quarantine did not have when the flag moved here.
+    """
+
+    quarantine = a_quarantine()
+    quarantine.observe(BOOT_MEDIUM)
+    assert quarantine.is_fenced is False
+
+    quarantine.fence()
+    quarantine.fence()
+    assert quarantine.is_fenced is True
+
+    quarantine.observe(BOOT_MEDIUM)
+    assert quarantine.is_fenced is True
+
+    with pytest.raises(AttributeError):
+        quarantine._fenced = False  # noqa: SLF001 - the attack
+    assert quarantine.is_fenced is True
+
+
+def test_the_fence_is_audited_once_and_then_as_a_repeat() -> None:
+    """`docs/quarantine-policy.md` documents these entries; nothing asserted them."""
+
+    quarantine = a_quarantine()
+    quarantine.observe(BOOT_MEDIUM)
+    quarantine.fence()
+    quarantine.fence()
+
+    fences = [entry for entry in quarantine.audit() if entry.action == "medium_fenced"]
+    assert [entry.verdict for entry in fences] == ["fenced", "already_fenced"]
+    assert all(entry.disposition == "boot_medium" for entry in fences)
+
+
+def test_a_sealed_quarantine_refuses_the_assignment_that_promotes_any_device() -> None:
+    """Reading through a property stopped a generated setter, not an assignment.
+
+    Identity-only classification makes `_boot_medium_identity` the whole of this
+    module's authority, which the class docstring has said since a second review
+    said it. Careless-caller defence, on the terms stated there: it is not a
+    seal, and nothing here claims one.
+    """
+
+    quarantine = a_quarantine()
+    quarantine.observe(HOST_NVME)
+    for name, value in (
+        ("_boot_medium_identity", "host-nvme-SN-1"),
+        ("_session_id", "s-other"),
+        ("_dispositions", {}),
+        ("_audit", []),
+    ):
+        with pytest.raises(AttributeError):
+            setattr(quarantine, name, value)
+    assert quarantine.evaluate(HOST_NVME, Action.WRITABLE_MOUNT) is Verdict.BLOCKED
+
+
+def test_the_fence_blocks_the_one_host_disk_write_it_actually_changes() -> None:
+    """The earlier test's host-disk half was vacuous.
+
+    `evaluate(HOST_NVME, action) is BLOCKED` passes with or without a fence,
+    because a quarantined disk with no approval is blocked anyway — so a
+    mutation narrowing the fence to the medium's own identity survived. The one
+    pair where the fence changes a host-disk answer is an **approved export**,
+    which is the product's single deliberate host write.
+    """
+
+    quarantine = a_quarantine()
+    quarantine.observe(BOOT_MEDIUM)
+    quarantine.observe(HOST_NVME)
+    quarantine.approve_export(
+        ExportApproval(
+            session_id="s1",
+            target_identity=HOST_NVME.identity,
+            reason="incident record",
+            confirmed=True,
+        )
+    )
+    assert quarantine.evaluate(HOST_NVME, Action.EXPORT_WRITE) is Verdict.ALLOWED
+
+    quarantine.fence()
+    assert quarantine.evaluate(HOST_NVME, Action.EXPORT_WRITE) is Verdict.BLOCKED
+
+
+def test_an_export_cannot_be_approved_once_the_medium_is_gone() -> None:
+    """Granted-then-blocked was the one combination that was neither policy.
+
+    The approval succeeded, the audit recorded it as granted, and `evaluate`
+    blocked the write unconditionally — so the audit asserted an operator had
+    granted an authority nobody could exercise. The refusal now agrees with
+    what the verdict already was.
+
+    The cost is real and is recorded in `docs/quarantine-policy.md`: an operator
+    mid-export when the medium is knocked out loses the sanctioned path off the
+    machine. Sparing host-disk exports is the other coherent answer and is a
+    product decision, not one taken in a test.
+    """
+
+    quarantine = a_quarantine()
+    quarantine.observe(HOST_NVME)
+    quarantine.fence()
+
+    with pytest.raises(ExportRefused) as refused:
+        quarantine.approve_export(
+            ExportApproval(
+                session_id="s1",
+                target_identity=HOST_NVME.identity,
+                reason="incident record",
+                confirmed=True,
+            )
+        )
+    assert refused.value.refusal is Refusal.SESSION_FENCED
+    assert HOST_NVME.identity not in str(refused.value)
+    assert not [e for e in quarantine.audit() if e.verdict == "granted"]
+
+
+def test_a_dict_write_cannot_go_round_the_quarantines_guard() -> None:
+    """`vars(obj)[k] = v` is what fixtures and serialisation helpers do.
+
+    The guard refused `q._fenced = False` and a `__dict__` write cleared it
+    anyway, because the class had no `__slots__` — the one asymmetry with
+    `PersistenceSession`, which had them from the start. The same route
+    reassigned `_boot_medium_identity`, and the host disk was then classified
+    as the medium.
+    """
+
+    quarantine = a_quarantine()
+    quarantine.observe(BOOT_MEDIUM)
+    quarantine.fence()
+
+    assert not hasattr(quarantine, "__dict__")
+    with pytest.raises((AttributeError, TypeError)):
+        vars(quarantine)["_fenced"] = False
+    assert quarantine.is_fenced is True
+    assert quarantine.evaluate(BOOT_MEDIUM, Action.WRITABLE_MOUNT) is Verdict.BLOCKED
+
+
+def test_the_reassignable_allowlist_is_not_an_attribute_that_can_be_replaced() -> None:
+    """The allowlist defining the seal was itself outside the seal.
+
+    An instance `__setattr__` does not intercept a **class** assignment, so
+    `Quarantine._REASSIGNABLE = frozenset({"_approval", "_fenced"})` reopened
+    the fence. There is no such attribute now; the one permitted name is a
+    literal inside the guard, with nothing to swap.
+    """
+
+    assert not hasattr(Quarantine, "_REASSIGNABLE")
+
+    quarantine = a_quarantine()
+    quarantine.observe(HOST_NVME)
+    quarantine.approve_export(
+        ExportApproval(
+            session_id="s1",
+            target_identity=HOST_NVME.identity,
+            reason="incident record",
+            confirmed=True,
+        )
+    )
+    assert quarantine.evaluate(HOST_NVME, Action.EXPORT_WRITE) is Verdict.ALLOWED
+    quarantine.withdraw_export()
+    assert quarantine.evaluate(HOST_NVME, Action.EXPORT_WRITE) is Verdict.BLOCKED
+
+
+def test_a_quarantine_refuses_to_be_serialised_or_copied() -> None:
+    """A redacted repr is not a redacted object.
+
+    `pickle.dumps` walked the instance state and handed over every observed
+    identity, the medium's identity, the session id and the whole audit in 262
+    bytes. `copy.deepcopy` was sharper still: a copy taken before a fence was an
+    unfenced quarantine that allowed a writable mount on the removed medium.
+    Both dispatch through `__reduce__`.
+    """
+
+    import copy
+    import pickle
+
+    quarantine = a_quarantine()
+    quarantine.observe(BOOT_MEDIUM)
+    quarantine.observe(HOST_NVME)
+
+    for attempt in (
+        lambda: pickle.dumps(quarantine),
+        lambda: copy.copy(quarantine),
+        lambda: copy.deepcopy(quarantine),
+    ):
+        with pytest.raises(TypeError):
+            attempt()
+
+    assert MEDIUM_ID not in repr(quarantine)
+    assert HOST_NVME.identity not in repr(quarantine)
+
+
+def test_the_fence_withdraws_a_standing_export_approval() -> None:
+    """Refusing a new grant while letting an old one stand was half a rule.
+
+    The refusal added for a fenced quarantine says the session cannot grant an
+    authority it can no longer exercise. A grant made a second before the fence
+    is exactly that, and it stood: `withdraw_export` afterwards reported
+    `withdrawn` rather than `nothing_to_withdraw`, so the record still asserted
+    a live approval naming a target.
+    """
+
+    quarantine = a_quarantine()
+    quarantine.observe(BOOT_MEDIUM)
+    quarantine.observe(HOST_NVME)
+    quarantine.approve_export(
+        ExportApproval(
+            session_id="s1",
+            target_identity=HOST_NVME.identity,
+            reason="incident record",
+            confirmed=True,
+        )
+    )
+    assert quarantine.evaluate(HOST_NVME, Action.EXPORT_WRITE) is Verdict.ALLOWED
+
+    quarantine.fence()
+
+    assert quarantine.evaluate(HOST_NVME, Action.EXPORT_WRITE) is Verdict.BLOCKED
+    approvals = [e for e in quarantine.audit() if e.action == "export_approval"]
+    assert approvals[-1].verdict == "withdrawn_on_fence"
+
+    quarantine.withdraw_export()
+    assert quarantine.audit()[-1].verdict == "nothing_to_withdraw"
+
+
+def test_container_mutation_is_named_as_a_limit_rather_than_implied_to_be_closed() -> None:
+    """The one routine route the seal does not cover, recorded as such.
+
+    `__setattr__` stops an attribute being rebound, not the object it points at
+    being mutated, and the authority lives in those objects: a dict write to
+    `_dispositions` promotes a host disk and `_audit.clear()` erases the record.
+    That is more ordinary than the `vars()` route `__slots__` closes — this
+    suite uses it itself to simulate a demotion — so the limit is documented
+    rather than removed, and the assertion here is what keeps the paragraph
+    from quietly disappearing.
+
+    What the test *does* check is that nothing reaches those containers through
+    the public API.
+    """
+
+    from pathlib import Path
+
+    from azazel_boot import quarantine as module
+
+    source = " ".join(Path(module.__file__).read_text(encoding="utf-8").split())
+    assert "does not stop the object it points at being *mutated*" in source
+
+    live = a_quarantine()
+    live.observe(BOOT_MEDIUM)
+    live.fence()
+    handed_out = live.audit()
+    assert isinstance(handed_out, tuple)
+    assert handed_out is not live.audit()
+    assert live.audit(), "the record survives whatever a caller does with a copy"

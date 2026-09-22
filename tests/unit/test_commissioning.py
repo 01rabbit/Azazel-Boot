@@ -286,3 +286,126 @@ def test_topology_is_not_readmitted_as_a_role():
     for zone in ("internal", "external", "protected", "egress"):
         assert zone not in ROLES
         assert zone not in INTERFACE_ROLES
+
+
+# --------------------------------------------------------------------------
+# What a fingerprint is taken over, and what an Assessment may render
+# --------------------------------------------------------------------------
+
+
+def test_a_host_with_no_commissionable_identity_has_no_fingerprint(sysfs_mac_only):
+    """The empty digest was a value, and the value matched every such host.
+
+    `sha256:e3b0c442…` is the digest of the empty string. A host presenting no
+    commissionable interface produced it, so a binding made on one such laptop
+    applied to every other one — and a host Boot cannot identify is the ordinary
+    case for borrowed hardware, not an exotic one.
+    """
+
+    from azazel_boot.commissioning import UnidentifiedHost
+
+    observations = _observe(sysfs_mac_only, {"eth0": "de:ad:be:ef:00:01"})
+    assert assess(observations).state is CommissioningState.COMMISSIONING_REQUIRED
+
+    with pytest.raises(UnidentifiedHost):
+        host_fingerprint(observations)
+    with pytest.raises(UnidentifiedHost):
+        host_fingerprint(())
+    with pytest.raises(UnidentifiedHost):
+        bind_session(observations, session_id="session-1")
+
+
+def test_binding_applies_fails_closed_where_it_cannot_be_derived(sysfs_two_nics, sysfs_mac_only):
+    """A caller asking "does this apply" is owed an answer, and it is no."""
+
+    here = _observe(sysfs_two_nics, TWO_NIC_MACS)
+    unidentifiable = _observe(sysfs_mac_only, {"eth0": "de:ad:be:ef:00:01"})
+    binding = bind_session(here, session_id="session-1")
+
+    assert binding_applies(binding, here, session_id="session-1")
+    assert not binding_applies(binding, unidentifiable, session_id="session-1")
+    assert not binding_applies(binding, (), session_id="session-1")
+
+
+def test_an_assessment_renders_no_raw_interface_identity(sysfs_two_nics):
+    """An `interface_key` is `bus_path|permanent_mac`, which is why it is hidden.
+
+    `InterfaceObservation` redacts its own repr for this reason. An `Assessment`
+    holds those keys and interpolates them into `reasons`, and its generated
+    repr put the borrowed machine's permanent MACs into any traceback captured
+    while one was in scope.
+
+    The values stay readable as data — `describe_for_operator` is the deliberate
+    disclosure path, and this test asserts that path still works.
+    """
+
+    observations = _observe(sysfs_two_nics, TWO_NIC_MACS)
+    assessment = assess(observations)
+    rendered = repr(assessment)
+
+    for observation in observations:
+        assert observation.permanent_mac
+        assert observation.permanent_mac not in rendered
+        assert observation.interface_key not in rendered
+        assert observation.permanent_mac not in repr(observation)
+        # Still available where an operator is meant to see it.
+        assert observation.interface_key in describe_for_operator(observation).values()
+
+    assert assessment.commissionable_keys
+    assert assessment.state.value in rendered
+
+
+def test_the_fingerprint_is_taken_over_a_removable_interface_and_that_is_recorded(
+    sysfs_two_nics,
+):
+    """A stated limit, asserted so it cannot be quietly lost or quietly fixed.
+
+    The fingerprint covers commissionable identities only. A host whose onboard
+    NICs cannot be identified but which carries one identifiable removable NIC
+    therefore has a fingerprint belonging to **the dongle**: an adversary who
+    supplies the interface supplies the host identity, and one USB NIC moved
+    between three laptops gives all three the same fingerprint.
+
+    Closing it means deciding what host identity is — a board or chassis
+    identifier in the digest, or a refusal when every commissionable interface
+    is hot-pluggable, which needs a field `InterfaceObservation` does not have.
+    Both change a public contract, so this test records the limit and
+    `UnidentifiedHost`'s docstring states it. Whoever closes it turns this red.
+    """
+
+    from azazel_boot.inventory import InterfaceObservation
+
+    dongle = InterfaceObservation(
+        interface_key="usb-1|de:ad:be:ef:00:99",
+        bus_path="usb-1",
+        permanent_mac="de:ad:be:ef:00:99",
+        usb_vid_pid="0bda:8153",
+    )
+
+    def unidentifiable(name, mac):
+        return InterfaceObservation(
+            interface_key=f"unidentified:{name}",
+            permanent_mac=mac,
+            incomplete_reasons=("no_discriminator_beyond_mac",),
+        )
+
+    one = (unidentifiable("enp3s0", "aa:aa:aa:aa:aa:01"), dongle)
+    other = (
+        unidentifiable("wlp2s0", "bb:bb:bb:bb:bb:02"),
+        unidentifiable("eth7", "cc:cc:cc:cc:cc:03"),
+        dongle,
+    )
+    assert host_fingerprint(one) == host_fingerprint(other)
+    assert binding_applies(
+        bind_session(one, session_id="session-1"), other, session_id="session-1"
+    )
+
+    # The behaviour above is pinned, but the escalation rested on the limit
+    # being **stated**, and a statement is what can vanish without a test. A
+    # mutation deleting the paragraph from `UnidentifiedHost` left the suite
+    # green; `test_the_seal_is_defence_against_a_careless_caller_and_says_no_more`
+    # already shows the shape, so it is used here.
+    from azazel_boot import commissioning
+
+    source = " ".join(Path(commissioning.__file__).read_text(encoding="utf-8").split())
+    assert "closes the zero-identity case and not the partial-identity one" in source

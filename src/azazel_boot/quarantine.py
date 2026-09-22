@@ -183,6 +183,7 @@ class Refusal(Enum):
     NOT_THIS_SESSION = "not_this_session"
     NO_REASON_GIVEN = "no_reason_given"
     NOT_CONFIRMED = "not_confirmed"
+    SESSION_FENCED = "session_fenced"
     BOOT_MEDIUM_IS_NOT_AN_EXPORT_TARGET = "boot_medium_is_not_an_export_target"
 
 
@@ -269,6 +270,17 @@ class Device:
     identity: str
     device_class: DeviceClass
 
+    def __repr__(self) -> str:
+        """Redacted, for the reason `Quarantine.__repr__` is.
+
+        A `Device` is an argument of nearly every call here and in
+        `azazel_boot.persistence`, so a captured-locals traceback — which is
+        what `pytest --showlocals` and most crash reporters build — carried the
+        identity out of every refusal raised anywhere downstream.
+        """
+
+        return f"Device(identity=<redacted>, device_class={self.device_class})"
+
 
 @dataclass(frozen=True)
 class ExportApproval:
@@ -309,16 +321,118 @@ class Quarantine:
     module's authority — assigning to it promotes any device — so it is read
     through a property now.
 
-    Neither closes attribute assignment; Python has no way to. This is defence
-    against a careless caller, not against code already running in the process.
+    A third mechanism arrived with the fence: `__setattr__` below refuses plain
+    assignment to the session, the medium's identity, the dispositions and the
+    audit, and makes `_fenced` one-way. `__slots__` closes the `__dict__` route
+    that went round it — `vars(q)["_fenced"] = False` is what a serialisation
+    helper or a fixture does routinely, and it cleared the fence — and
+    `__reduce__` refuses to pickle or copy, which is why a snapshot taken before
+    a fence can no longer be kept as an unfenced quarantine.
+
+    **None of that is a seal, and Python has no way to make one.**
+    `object.__setattr__` writes the attribute regardless, `Quarantine.__new__`
+    yields an instance that never ran `__init__`, and a subclass can override
+    the hook. This is defence against a careless caller, not against code
+    already running in the process, and
+    `azazel_boot.persistence.PersistenceSession` states the same limit in the
+    same words for the same reason.
+
+    **A fourth limit is the ordinary one, and it is named because the other
+    three are not what a routine caller would reach for.** `__setattr__` stops
+    an attribute being *rebound*; it does not stop the object it points at
+    being *mutated*, and the authority lives in those objects.
+    ``q._dispositions[identity] = Disposition.BOOT_MEDIUM`` promotes a host
+    disk, and ``q._audit.clear()`` erases the record — an attribute read and a
+    container write, no hook involved. That is more ordinary than the
+    ``vars(q)`` route `__slots__` closes, and this repository's own test suite
+    uses it to simulate a demotion, which is why it is documented as a limit
+    rather than removed. `audit()` returns a copy and `disposition()` returns a
+    value, so nothing reaches these containers through the public API.
     """
 
+    __slots__ = (
+        "_session_id",
+        "_boot_medium_identity",
+        "_dispositions",
+        "_approval",
+        "_audit",
+        "_fenced",
+        "_sealed",
+    )
+
     def __init__(self, session_id: str, boot_medium_identity: str) -> None:
+        object.__setattr__(self, "_sealed", False)
         self._session_id = session_id
         self._boot_medium_identity = boot_medium_identity
         self._dispositions: dict[str, Disposition] = {}
         self._approval: ExportApproval | None = None
         self._audit: list[AuditEntry] = []
+        self._fenced = False
+        object.__setattr__(self, "_sealed", True)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        """Sealed after construction, and the fence is one-way.
+
+        `azazel_boot.persistence.PersistenceSession` refused `_fenced = False`
+        from the day the fence existed. Moving the fence here — the right home,
+        because the removal happened to the medium — moved it from the one
+        object in this design that resisted casual assignment to the one that
+        did not, and a review cleared it with `q._fenced = False` and reopened
+        persistence. The two fixes pointed opposite ways on the same flag.
+
+        `_boot_medium_identity` is covered for the reason the class docstring
+        already gives: assigning to it promotes any device, which is the whole
+        of this module's authority. Reading it through a property stopped a
+        dataclass from generating a setter; it never stopped an assignment.
+
+        This is the same **careless-caller** defence stated above, on the same
+        terms. `object.__setattr__` writes the attribute regardless and Python
+        offers no way to prevent it.
+        """
+
+        if getattr(self, "_sealed", False):
+            # Written out rather than read from a `_REASSIGNABLE` attribute. A
+            # review replaced that attribute on the class — an instance
+            # `__setattr__` does not intercept a class assignment — and the
+            # allowlist defining the seal was itself outside the seal. A
+            # literal in this frame has nothing to swap. `_approval` is here
+            # because `approve_export` replaces it and `withdraw_export` clears
+            # it; every other attribute is written once, in `__init__`.
+            if name == "_approval":
+                object.__setattr__(self, name, value)
+                return
+            if name == "_fenced" and value is True:
+                object.__setattr__(self, name, True)
+                return
+            raise AttributeError(
+                "a Quarantine is sealed after construction; the fence is "
+                "one-way and the session, the medium's identity, the "
+                "dispositions and the audit cannot be rebound — which is not "
+                "the same as their contents being protected; see the class "
+                "docstring"
+            )
+        object.__setattr__(self, name, value)
+
+    def __reduce__(self):
+        """Refuse to pickle or copy, rather than handing over the session.
+
+        `__repr__` was written by hand so that every observed identity would not
+        reach a traceback, a log line or a debugger frame. `pickle` walks the
+        instance state instead and hands over `_dispositions` — every device
+        seen this session — with `_boot_medium_identity`, `_session_id`, the
+        approval and the whole audit. A review dumped one in 262 bytes with all
+        three identities legible in it. This is the same defeat that made
+        `PersistenceSession` refuse serialisation; the fix belongs on both.
+
+        `copy.copy` and `copy.deepcopy` dispatch through here too, which closes
+        the sharper case: a deep copy taken **before** a fence was an unfenced
+        quarantine that still allowed a writable mount on the removed medium.
+        """
+
+        raise TypeError(
+            "a Quarantine is not serialisable; it holds the session's observed "
+            "identities and its fence"
+        )
 
     @property
     def session_id(self) -> str:
@@ -374,7 +488,10 @@ class Quarantine:
         decision.
         """
 
-        return f"Quarantine(session=<redacted>, observed={len(self._dispositions)})"
+        return (
+            f"Quarantine(session=<redacted>, observed={len(self._dispositions)}, "
+            f"fenced={self._fenced})"
+        )
 
     def medium_is_bound(self) -> bool:
         """Whether the medium has been seen this session.
@@ -382,8 +499,15 @@ class Quarantine:
         A caller — a trial boot, a status screen — must be able to ask. Without
         it, "the medium is not available" is indistinguishable from "a host disk
         was refused", which is what the audit shows either way.
+
+        A fence answers it False. The question a caller asks through this is
+        whether the medium is available, and a medium that was pulled is not —
+        a device arriving afterwards on the same identity is the case the fence
+        exists for, not evidence that the medium came back.
         """
 
+        if self._fenced:
+            return False
         # Identity equality decides classification, so "present in the map" and
         # "holds BOOT_MEDIUM" are the same question today. The stricter form is
         # written out so a future change to `observe` cannot quietly widen it.
@@ -391,6 +515,58 @@ class Quarantine:
 
     def disposition(self, device: Device) -> Disposition | None:
         return self._dispositions.get(device.identity)
+
+    def fence(self) -> None:
+        """The medium was removed. Record it here, where the medium's rule lives.
+
+        The fence belongs to the **medium**, not to whoever noticed it go. An
+        adversarial review fenced an `azazel_boot.persistence.PersistenceSession`
+        after a surprise removal and then built a second one from the same three
+        constructor arguments the legitimate caller already held -- same
+        quarantine, same binding, same session id -- and the new object opened
+        persistence on a device that was no longer there and offered no reboot.
+        Nothing was forged; the fence was simply per-object, and the object that
+        held it was not the one asked next.
+
+        So it is one flag on the one thing that represents the removed medium,
+        and it is one-way: a fence that can be lifted is a fence that an
+        attacker who benefits from the removal can lift. Reappearance does not
+        clear it either -- `_withdraw_on_reappearance` already treats a device
+        coming back as a fresh, untrusted arrival, and a session that survived
+        the gap is the thing being refused.
+
+        Every consumer must consult :attr:`is_fenced` before acting;
+        `azazel_boot.persistence` does. It is deliberately not folded into
+        :meth:`disposition`, which answers "what is this device" -- a question
+        whose answer did not change when the medium was pulled.
+        """
+
+        already = self._fenced
+        self._fenced = True
+        self._record(
+            self._dispositions.get(self._boot_medium_identity),
+            "medium_fenced",
+            "already_fenced" if already else "fenced",
+        )
+        # A standing approval is withdrawn by the fence, and the withdrawal is
+        # audited. Refusing to *grant* one after a removal while letting one
+        # granted a second earlier stand was the same asymmetry from the other
+        # side: "an authority the session can no longer exercise" describes
+        # both. The record would otherwise keep asserting a live grant, and
+        # `withdraw_export` would report `withdrawn` rather than
+        # `nothing_to_withdraw`, which is how a review found it.
+        if self._approval is not None:
+            target = self._approval.target_identity
+            self._approval = None
+            self._record(
+                self._dispositions.get(target), "export_approval", "withdrawn_on_fence"
+            )
+
+    @property
+    def is_fenced(self) -> bool:
+        """Whether the medium has been fenced this session. Never clears."""
+
+        return self._fenced
 
     def approve_export(self, approval: ExportApproval) -> None:
         """Record one approval, and audit the attempt either way.
@@ -447,8 +623,40 @@ class Quarantine:
         An approval that is both unconfirmed and names the medium should report
         the medium: one is a slip at a prompt, the other is a mistake about what
         is being written to.
+
+        **The fence pre-empts all of them, deliberately, and that costs a
+        signal this docstring otherwise values.** After a removal every
+        approval refuses as `session_fenced`, so an operator who aimed at the
+        medium's own identity is audited as fenced rather than as having aimed
+        at the medium. The trade is taken this way because the fence is the
+        dominant fact and the finer refusals invite a retry that cannot
+        succeed: an operator told `not_confirmed` would confirm and try again.
+        A review raised the alternative — ordering the fence below the target
+        and session checks to keep the audit's distinctions — and it is a real
+        alternative; this records why it was not taken rather than leaving the
+        ordering to look accidental.
         """
 
+        if self._fenced:
+            # The one combination that was neither policy: a review approved an
+            # export on a fenced quarantine, the audit recorded it as granted,
+            # and `evaluate` then blocked the write unconditionally. An audit
+            # asserting an operator granted an authority nobody could exercise
+            # is worse than either answer.
+            #
+            # This makes the refusal agree with what `_decide` already does. It
+            # is the conservative direction and it widens nothing: the export
+            # was already blocked. **It also has a cost**, and the cost is
+            # stated rather than discovered later — an operator mid-export when
+            # the medium is knocked out loses the product's one sanctioned host
+            # write, which `docs/threat-model.md` section 3 exists to permit.
+            # Sparing host-disk exports from the fence is the other coherent
+            # answer, and it is a product decision rather than one taken here.
+            raise ExportRefused(
+                Refusal.SESSION_FENCED,
+                "the medium was removed; the session cannot grant an authority "
+                "it can no longer exercise",
+            )
         if approval.session_id != self._session_id:
             raise ExportRefused(
                 Refusal.NOT_THIS_SESSION, "an approval does not outlive a session"
@@ -511,6 +719,23 @@ class Quarantine:
 
     def _decide(self, device: Device, action: Action) -> Verdict:
         if action in NEVER_ALLOWED_ANYWHERE:
+            return Verdict.BLOCKED
+        if self._fenced:
+            # Ahead of the `BOOT_MEDIUM` short-circuit, which is what made this
+            # necessary — second overall, after the actions refused everywhere.
+            # A review fenced the medium and then evaluated a
+            # writable mount, an fsck, a journal replay and a swap activation
+            # against it: all four were allowed, and the audit recorded them as
+            # permitted on `boot_medium`. The sharp case is a device presenting
+            # the medium's identity **after** the removal — the
+            # transient-physical-access adversary this module states it cannot
+            # tell apart — which was classified as the medium and then allowed
+            # to be mounted writable.
+            #
+            # `disposition()` deliberately does not consult the fence: "what is
+            # this device" did not change when the medium was pulled. This
+            # question is "may this happen **now**", and now is after the
+            # removal.
             return Verdict.BLOCKED
         disposition = self._dispositions.get(device.identity)
         if disposition is None:
