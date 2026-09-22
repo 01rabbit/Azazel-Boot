@@ -1193,9 +1193,16 @@ class RecoveryWorkflow:
         # first is what makes the comparison below a comparison.
         _require_an_exact_str("session_id", session_id)
         if session_id != self._session_id:
-            if self._stage not in TERMINAL_STAGES:
-                self._sealed_assign("_stage", RecoveryStage.REFUSED)
-                self._record(SnapshotAuditEvent.RECOVERY_FOREIGN_SITTING)
+            # Unconditional. This used to be wrapped in `if self._stage not in
+            # TERMINAL_STAGES:`, which can never be false: every caller passes
+            # `_require_stage` — or, in `interrupt`, its own terminal check —
+            # before reaching here. A review narrowed the condition to
+            # `NOT_STARTED` and four foreign probes against a live `TRIAL_OPEN`
+            # workflow left no record and no terminal stage, with the suite
+            # green. A guard that cannot fail for its own reason is not a
+            # guard; the recording is what this rule is.
+            self._sealed_assign("_stage", RecoveryStage.REFUSED)
+            self._record(SnapshotAuditEvent.RECOVERY_FOREIGN_SITTING)
             self._refuse(
                 Refusal.NOT_THIS_SITTING,
                 "this workflow belongs to one sitting; a stage asked for "

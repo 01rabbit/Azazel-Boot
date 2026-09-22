@@ -346,7 +346,13 @@ of what the interpreter's own import machinery does and bytecode writing off.
 And the drive held `binding_holds`, the capacity and `current_schema` at their
 passing values, so a write on the binding branch never ran under the hook: the
 drive varies them now. The limit of the runtime check, stated and unchanged:
-it covers the paths that drive reaches.
+it covers the paths that drive reaches — and a fifth review showed what that
+costs when the drive is careless. A `fenced = build(); fenced.fence()` sat in
+it and was handed to nothing, so `is_fenced` answered `False` on every read
+under the hook and `volume_is_quarantined` answered `True`; the same escape
+placed on either unreached branch of `azazel_boot.quarantine` wrote a
+boot-medium identity to the host disk with the suite green, twice. The drive
+builds all four flag states now. A dead variable is not coverage.
 
 Nine audit classifications. `SnapshotAuditEntry` has five fields — `event`,
 `check`, `gate`, `schema_version`, `fingerprint` — and **no** field for

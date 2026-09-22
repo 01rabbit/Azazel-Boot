@@ -1151,9 +1151,9 @@ def test_this_module_cannot_reach_a_host_a_network_a_vm_or_a_second_partition() 
     permitted. Everything after it is a second line, kept because it is cheap.
 
     What this still does **not** establish is that the module performs no I/O:
-    a static scan refuses the shapes it knows. `test_the_workflow_performs_no_
-    io_when_it_actually_runs` is the capability check, and it is the one that
-    covers what this module *calls*.
+    a static scan refuses the shapes it knows.
+    `test_this_module_performs_no_io_when_it_actually_runs` is the capability
+    check, and it is the one that covers what this module *calls*.
     """
 
     bound: set[str] = set()
@@ -1907,10 +1907,30 @@ def test_a_snapshot_is_recorded_as_written_only_after_the_caller_acted() -> None
     # An equal-but-distinct descriptor is not the one that was judged either:
     # the tie is identity, because the point is *which* snapshot the preflight
     # actually looked at.
-    with pytest.raises(RecoveryRefused):
-        ledger.note_snapshot_written(minted, descriptor(),
-            quarantine=a_quarantine(quarantined=False),
+    #
+    # On a **fresh** verdict, and asserting **which** rule answered. This used
+    # to reuse `minted`, which three lines above had already been spent — so
+    # with the identity tie weakened to `!=` the spent-verdict rule answered
+    # instead, still a `RecoveryRefused`, still green. The incidental-refusal
+    # antipattern this repository has now hit five times, in the one test whose
+    # comment says the tie is identity.
+    unspent = preflight(
+        a_quarantine(quarantined=False),
+        snapshot=judged,
+        capacity=capacity(),
+        current_schema=1,
+        target_schema=2,
+        binding_holds=True,
+        generation_holds=True,
+        image_digest_holds=True,
+    )
+    twin = descriptor()
+    assert twin == judged and twin is not judged
+    with pytest.raises(RecoveryRefused) as tie:
+        ledger.note_snapshot_written(
+            unspent, twin, quarantine=a_quarantine(quarantined=False)
         )
+    assert tie.value.refusal is Refusal.VERDICT_NOT_MINTED_BY_A_PREFLIGHT
 
     # And both methods exist, which the class docstring used to claim while
     # shipping neither.
@@ -2527,6 +2547,13 @@ def test_every_stage_refuses_a_foreign_sitting(stage, observations) -> None:
     with pytest.raises(RecoveryRefused) as refused:
         call()
     assert refused.value.refusal is Refusal.NOT_THIS_SITTING
+    # **And the stage and the record**, for all three. Asserting only the
+    # refusal enum let a review narrow the rule to `NOT_STARTED`: four foreign
+    # probes against a live `TRIAL_OPEN` workflow then left no record and no
+    # terminal stage, which is verbatim what the module says this rule exists
+    # to notice.
+    assert flow.stage is RecoveryStage.REFUSED
+    assert flow.audit()[-1].event is SnapshotAuditEvent.RECOVERY_FOREIGN_SITTING
 
 
 def test_the_snapshot_pin_compares_every_field_the_descriptor_has() -> None:
@@ -3177,11 +3204,14 @@ def test_this_module_performs_no_io_when_it_actually_runs() -> None:
             def attempt(self):
                 return AttemptOutcome.OPENED
 
-        def build():
+        def build(*, quarantined=True, fenced=False):
             rule = Quarantine(session_id=SESSION, boot_medium_identity=MEDIUM.identity)
             rule.observe(MEDIUM)
             rule.observe(Device(identity="host-nvme-SN-1", device_class=DeviceClass.HOST_STORAGE))
-            rule.quarantine_volume()
+            if quarantined:
+                rule.quarantine_volume()
+            if fenced:
+                rule.fence()
             return rule
 
         # An **allowlist**, of what the interpreter's own import machinery
@@ -3220,9 +3250,20 @@ def test_this_module_performs_no_io_when_it_actually_runs() -> None:
             for version in (1, 2)
             for integrity in SnapshotIntegrity
         ]
-        prepared = [(build(), snapshot) for snapshot in snapshots]
-        fenced = build()
-        fenced.fence()
+        # **All four flag states.** A `fenced = build(); fenced.fence()` used
+        # to sit here and was never handed to anything, so `is_fenced` answered
+        # `False` on every read under the hook and `volume_is_quarantined`
+        # answered `True` on every read. A review put the escape back on each
+        # of the two unreached branches — in `azazel_boot.quarantine`, which
+        # this module reads on every gate — and the suite stayed green both
+        # times, writing a boot-medium identity to the host disk during the
+        # run. A dead variable is not coverage.
+        prepared = [
+            (build(quarantined=quarantined, fenced=fenced), snapshot)
+            for snapshot in snapshots
+            for quarantined in (True, False)
+            for fenced in (False, True)
+        ]
 
         seen = []
         sys.addaudithook(lambda event, arguments: seen.append(event))
@@ -3859,3 +3900,194 @@ def test_a_passing_verdict_that_skipped_a_check_is_refused() -> None:
         ledger.may_migrate(verdict, quarantine=a_quarantine(quarantined=False))
     assert refused.value.refusal is Refusal.VERDICT_DID_NOT_ASK_EVERY_CHECK
     assert ledger.audit() == ()
+
+
+# --------------------------------------------------------------------------
+# The fifth review, on the suite itself: checks with no test behind them
+# --------------------------------------------------------------------------
+
+
+def test_a_snapshot_subclass_is_refused_like_every_other_stand_in(observations) -> None:
+    """R5: the one `type(...) is` in this module with no subclass test.
+
+    The quarantine, the verdict and the candidate each have a test that drives
+    a genuine **subclass**; the snapshot had only a stand-in that was not one.
+    Weakening its check to `isinstance` therefore survived the whole suite —
+    and with it the entire round-four attack returns, because a subclass can
+    simply decline `__post_init__` and carry fields that answer comparisons for
+    themselves.
+    """
+
+    class Sneaky(SnapshotDescriptor):
+        def __post_init__(self) -> None:
+            pass
+
+    class Lies(int):
+        def __eq__(self, other) -> bool:
+            return True
+
+        def __ne__(self, other) -> bool:
+            return False
+
+        def __hash__(self) -> int:
+            return 0
+
+    sneaky = Sneaky(Lies(99), 1, SnapshotIntegrity.VERIFIED, FINGERPRINT)
+    assert int(sneaky.container_version) == 99
+    assert 99 not in KNOWN_CONTAINER_VERSIONS
+
+    flow = workflow(observations)
+    for act in (
+        lambda: flow.start(sneaky, observations, session_id=SESSION, started_by_operator=True),
+        lambda: preflight(
+            a_quarantine(quarantined=False),
+            snapshot=sneaky,
+            capacity=capacity(),
+            current_schema=1,
+            target_schema=2,
+            binding_holds=True,
+            generation_holds=True,
+            image_digest_holds=True,
+        ),
+        lambda: MigrationLedger().note_snapshot_written(
+            PreflightVerdict(None), sneaky, quarantine=a_quarantine(quarantined=False)
+        ),
+    ):
+        with pytest.raises(TypeError, match="exactly"):
+            act()
+    assert flow.stage is RecoveryStage.NOT_STARTED
+
+
+def test_a_workflow_with_nothing_pinned_commits_nothing(observations) -> None:
+    """R5: `pinned is not None` was the last guard, and had no test.
+
+    Forcing the stage to `TRIAL_OPEN` while `_pinned` is still `None` is the
+    round-four outcome `_sealed_assign` was hardened against — a candidate
+    whose entire audit is `['recovery_completed']`. `_sealed_assign` refuses
+    the jump now, so the reach is `object.__setattr__`, which this module
+    concedes it cannot defend against. That makes this half of the comparison
+    the thing that is left, and it is driven here rather than assumed.
+    """
+
+    flow = workflow(observations)
+    object.__setattr__(flow, "_stage", RecoveryStage.TRIAL_OPEN)
+    assert flow._pinned is None
+
+    with pytest.raises(RecoveryRefused) as refused:
+        flow.commit(
+            descriptor(schema_version=2),
+            observations,
+            session_id=SESSION,
+            acquisition=Opens(),
+            confirmed=True,
+        )
+    assert refused.value.refusal is Refusal.SNAPSHOT_CHANGED_UNDER_THE_WORKFLOW
+    assert flow.stage is RecoveryStage.REFUSED
+    assert flow.holds(RecoveryCandidate(2, FINGERPRINT)) is False
+
+
+def test_a_workflow_and_a_ledger_do_not_fork(observations) -> None:
+    """R5: two of the four `__reduce__` defences had no test at all.
+
+    Deleting `RecoveryWorkflow.__reduce__` survived the whole suite, and
+    `copy.copy` then forked a one-way workflow into two live ones that each
+    minted a candidate from one trial — the same "n records for one act" false
+    count the ledger's spend rules exist to prevent, on the workflow side.
+    `MigrationLedger.__reduce__` was untested the same way, and a deep copy
+    carried its audit into a second ledger.
+    """
+
+    flow = workflow(observations)
+    snap = descriptor()
+    flow.start(snap, observations, session_id=SESSION, started_by_operator=True)
+    flow.open_trial(snap, observations, session_id=SESSION)
+
+    ledger = MigrationLedger()
+    for subject in (flow, ledger):
+        assert type(subject).__reduce__ is not object.__reduce__
+        for act in (copy.copy, copy.deepcopy, pickle.dumps):
+            with pytest.raises(TypeError, match="not serialisable"):
+                act(subject)
+    assert flow.stage is RecoveryStage.TRIAL_OPEN
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"capacity": type("C", (), {"required": 1, "available": 10**18})()},
+        {"capacity": None},
+        {"snapshot": type("S", (), {"container_version": 1, "schema_version": 1})()},
+    ],
+)
+def test_preflights_own_inputs_are_pinned_too(overrides) -> None:
+    """R5: `capacity` and `snapshot` were the two `preflight` inputs with none.
+
+    Every other one has a dedicated test. Removing either check survived the
+    whole suite, and a capacity stand-in claiming `10**18` bytes needed of `1`
+    free produced a **passing** verdict — the space gate satisfied by two class
+    attributes.
+    """
+
+    arguments = {
+        "snapshot": descriptor(),
+        "capacity": capacity(),
+        "current_schema": 1,
+        "target_schema": 2,
+        "binding_holds": True,
+        "generation_holds": True,
+        "image_digest_holds": True,
+    }
+    arguments.update(overrides)
+    with pytest.raises(TypeError, match="exactly"):
+        preflight(a_quarantine(quarantined=False), **arguments)
+
+
+def test_a_schema_two_recovery_hands_back_a_schema_two_candidate(observations) -> None:
+    """R5: every commit in the suite ran on `descriptor()`, i.e. schema 1.
+
+    So the candidate's only substantive payload was never checked against a
+    value that differs from the default: hard-coding `RecoveryCandidate(1, …)`
+    survived the whole suite, and a schema-2 recovery — the ADR-0010 D7/D8
+    migration case this module exists for — handed back a candidate naming the
+    wrong schema, with the audit naming it too.
+    """
+
+    snap = descriptor(schema_version=2, fingerprint="snapshot-fingerprint-0002")
+    flow = workflow(observations)
+    candidate = run_to_commit(flow, observations, snapshot=snap)
+
+    assert candidate.schema_version == 2
+    assert candidate_applies_to(flow, candidate) is True
+    assert flow.audit()[-1].schema_version == 2
+    assert flow.audit()[-1].fingerprint == "snapshot-fingerprint-0002"
+    # And the start event names it too: it used to carry neither, so "which
+    # snapshot did this workflow begin on" was unanswerable from the record.
+    assert flow.audit()[0].event is SnapshotAuditEvent.RECOVERY_STARTED
+    assert flow.audit()[0].schema_version == 2
+    assert flow.audit()[0].fingerprint == "snapshot-fingerprint-0002"
+
+
+@pytest.mark.parametrize("current", [0, -1, 99])
+def test_a_schema_this_build_does_not_know_migrates_nowhere(current) -> None:
+    """R5: the `current` membership half was satisfied by the other clause.
+
+    `test_a_schema_downgrade_and_a_no_op_are_both_refused` drives `current=99`,
+    above the supported range, where `target > current` answers first. Below it
+    nothing did: `schema_is_compatible(current=0, target=1)` answered `True`,
+    so a migration **from a schema this build does not know** was permitted.
+    """
+
+    assert current not in SUPPORTED_SCHEMA_VERSIONS
+    assert schema_is_compatible(current=current, target=1) is False
+    verdict = preflight(
+        a_quarantine(quarantined=False),
+        snapshot=descriptor(),
+        capacity=capacity(),
+        current_schema=current,
+        target_schema=1,
+        binding_holds=True,
+        generation_holds=True,
+        image_digest_holds=True,
+    )
+    assert verdict.may_migrate is False
+    assert verdict.refused_by is PreflightCheck.SCHEMA_COMPATIBILITY
