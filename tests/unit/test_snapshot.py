@@ -21,7 +21,10 @@ import ast
 import copy
 import dataclasses
 import inspect
+import os
 import pickle
+import subprocess
+import sys
 import textwrap
 from pathlib import Path
 
@@ -2739,3 +2742,297 @@ def test_every_stage_refuses_observations_that_are_not_observations(
         call(stand_ins)
     with pytest.raises(TypeError, match="tuple"):
         call(list(observations))
+
+
+# --------------------------------------------------------------------------
+# The guard that does not pin what it feeds
+# --------------------------------------------------------------------------
+
+
+QUARANTINE_SETATTR = Quarantine.__setattr__
+QUARANTINE_DELATTR = Quarantine.__delattr__
+
+
+def _swallow(call, *args, **keywords) -> None:
+    """Drive it and keep going. A refusal is the ordinary outcome here."""
+
+    try:
+        call(*args, **keywords)
+    except (RecoveryRefused, TypeError, AttributeError):
+        pass
+
+
+def _whole_quarantine_state(rule: Quarantine) -> dict[str, object]:
+    """Every slot, not the two flags.
+
+    `_flags` read `is_fenced`, `volume_is_quarantined`, `audit()` and one
+    disposition, and a review wrote to `_dispositions` for every *other*
+    device, deleted `_sealed`, and rebound `Quarantine.__setattr__` — each time
+    with that comparison satisfied, because it asked about four things out of
+    eight and nothing about the class.
+    """
+
+    state: dict[str, object] = {}
+    for name in Quarantine.__slots__:
+        try:
+            state[name] = copy.deepcopy(object.__getattribute__(rule, name))
+        except AttributeError:
+            state[name] = "<deleted>"
+    return state
+
+
+def _quarantine_defences_intact(rule: Quarantine) -> tuple[object, ...]:
+    """The seal as a *behaviour*, and the class as an identity.
+
+    `del quarantine._sealed` leaves every slot value a before/after comparison
+    would look at untouched and makes `q._volume_quarantined = False` succeed
+    from any caller one line later. Rebinding `Quarantine.__setattr__` does the
+    same for every `Quarantine` in the process, including ones this module was
+    never handed. Neither shows up in a state diff, so neither is checked by
+    one.
+    """
+
+    refused = False
+    try:
+        rule._volume_quarantined = False
+    except AttributeError:
+        refused = True
+    return (
+        Quarantine.__setattr__ is QUARANTINE_SETATTR,
+        Quarantine.__delattr__ is QUARANTINE_DELATTR,
+        refused,
+    )
+
+
+def test_no_input_to_this_module_changes_anything_about_the_quarantine(
+    observations,
+) -> None:
+    """The behavioural guard, over the input space rather than one row of it.
+
+    Round four's decisive finding was not a new AST shape. It was that the
+    guard which *did* hold — the one driving every public method and comparing
+    the flags before and after — drove them with one fixed descriptor. A
+    payload reading `if snapshot.schema_version > 1: clear the flags` passed
+    the entire suite: a schema-1 recovery behaved perfectly, and a schema-2
+    recovery, which is exactly the ADR-0010 D7/D8 migration case this module
+    exists for, returned a candidate and turned both flags off.
+
+    A guard that enumerates the call surface and fixes the inputs is a guard
+    over one row of the input space. So this varies the inputs the module
+    branches on — both schema versions, every container version it might see,
+    every integrity verdict, both flag states, both operator flags and every
+    acquisition outcome — and compares the **whole** of the quarantine's state,
+    plus the defences that do not appear in a state diff at all.
+
+    Three static guards in this file remain, and are worth what they are worth.
+    This one is the claim.
+    """
+
+    from itertools import product
+
+    binding = SessionBinding(
+        host_fingerprint=host_fingerprint(observations), session_id=SESSION
+    )
+    drives = 0
+    for (
+        schema_version,
+        container_version,
+        integrity,
+        fenced,
+        quarantined,
+        by_operator,
+        confirmed,
+        outcome,
+    ) in product(
+        (1, 2, 3),
+        (1, 2),
+        tuple(SnapshotIntegrity),
+        (False, True),
+        (True, False),
+        (True, False),
+        (True, False),
+        tuple(AttemptOutcome),
+    ):
+        rule = a_quarantine(fenced=fenced, quarantined=quarantined)
+        before = _whole_quarantine_state(rule)
+        snap = SnapshotDescriptor(
+            container_version=container_version,
+            schema_version=schema_version,
+            integrity=integrity,
+            fingerprint=f"snapshot-fingerprint-{schema_version}{container_version}",
+        )
+
+        try:
+            preflight(
+                rule,
+                snapshot=snap,
+                capacity=capacity(),
+                current_schema=1,
+                target_schema=schema_version,
+                binding_holds=True,
+                generation_holds=True,
+                image_digest_holds=True,
+            )
+        except (RecoveryRefused, TypeError):  # pragma: no cover - refusals are the point
+            pass
+
+        flow = RecoveryWorkflow(rule, binding, session_id=SESSION)
+        _swallow(flow.start, snap, observations, session_id=SESSION,
+                 started_by_operator=by_operator)
+        _swallow(flow.open_trial, snap, observations, session_id=SESSION)
+        _swallow(flow.commit, snap, observations, session_id=SESSION,
+                 acquisition=Opens(outcome), confirmed=confirmed)
+        _swallow(flow.audit)
+        _swallow(flow.holds, RecoveryCandidate(schema_version, "x"))
+        _swallow(repr, flow)
+        _swallow(candidate_applies_to, flow, RecoveryCandidate(schema_version, "x"))
+        _swallow(flow.interrupt, session_id=SESSION)
+
+        drives += 1
+        assert _whole_quarantine_state(rule) == before, (
+            f"the quarantine moved on schema={schema_version} "
+            f"container={container_version} integrity={integrity.value}"
+        )
+        assert _quarantine_defences_intact(rule) == (True, True, True)
+
+    assert drives == 3 * 2 * 3 * 2 * 2 * 2 * 2 * len(AttemptOutcome)
+
+
+def test_this_module_performs_no_io_when_it_actually_runs() -> None:
+    """The capability check. The three static guards above are not one.
+
+    A static scan refuses the shapes it has been taught. Round four taught it
+    two more — `locals()` at module level *is* the module dict, and CPython
+    puts `__builtins__` in it — and the honest reading of three rounds is that
+    a per-file AST spelling check cannot establish "this module performs no
+    I/O". It also cannot say anything at all about `azazel_boot.quarantine`,
+    whose `is_fenced` this module reads on every call: a review put the same
+    escape there and the whole suite stayed green.
+
+    So this asks the runtime instead. The workflow is driven end to end under
+    `sys.addaudithook`, which cannot be removed once installed, and the hook
+    records **every** audited event: `open`, `exec`, `compile`, `import`,
+    `socket.*`, `subprocess.*`, `os.*`. The assertion is that the list is
+    empty — not that no forbidden name appears, but that no operation
+    happened, whatever it was spelled. What this module calls is covered too,
+    because the hook is on the interpreter rather than on a file.
+
+    The limit, stated: this covers the paths this drive reaches. It is a
+    capability check over an executed path, not a proof about unexecuted ones.
+    """
+
+    script = textwrap.dedent(
+        """
+        import sys
+
+        from azazel_boot.commissioning import SessionBinding, host_fingerprint
+        from azazel_boot.inventory import InterfaceObservation
+        from azazel_boot.quarantine import Device, DeviceClass, Quarantine
+        from azazel_boot.session_mode import AttemptOutcome, PassphraseChannel
+        from azazel_boot.snapshot import (
+            CapacityReport,
+            MigrationLedger,
+            RecoveryWorkflow,
+            SnapshotDescriptor,
+            SnapshotIntegrity,
+            candidate_applies_to,
+            preflight,
+            schema_is_compatible,
+            verdict_was_minted_here,
+        )
+
+        SESSION = "session-0001"
+        MEDIUM = Device(identity="usb-SN-0001", device_class=DeviceClass.BOOT_MEDIUM)
+        observations = (
+            InterfaceObservation(interface_key="en-0001", permanent_mac="02:00:00:00:00:01"),
+            InterfaceObservation(interface_key="en-0002", permanent_mac="02:00:00:00:00:02"),
+        )
+
+        class Opens:
+            channel = PassphraseChannel.LOCAL_HIDDEN_PROMPT
+
+            def attempt(self):
+                return AttemptOutcome.OPENED
+
+        def build():
+            rule = Quarantine(session_id=SESSION, boot_medium_identity=MEDIUM.identity)
+            rule.observe(MEDIUM)
+            rule.observe(Device(identity="host-nvme-SN-1", device_class=DeviceClass.HOST_STORAGE))
+            rule.quarantine_volume()
+            return rule
+
+        binding = SessionBinding(
+            host_fingerprint=host_fingerprint(observations), session_id=SESSION
+        )
+        snapshots = [
+            SnapshotDescriptor(1, version, integrity, f"fingerprint-{version}")
+            for version in (1, 2)
+            for integrity in SnapshotIntegrity
+        ]
+        prepared = [(build(), snapshot) for snapshot in snapshots]
+        fenced = build()
+        fenced.fence()
+
+        seen = []
+        sys.addaudithook(lambda event, arguments: seen.append(event))
+
+        for rule, snapshot in prepared:
+            verdict = preflight(
+                rule,
+                snapshot=snapshot,
+                capacity=CapacityReport(required=100, available=1000),
+                current_schema=1,
+                target_schema=snapshot.schema_version,
+                binding_holds=True,
+                generation_holds=True,
+                image_digest_holds=True,
+            )
+            verdict_was_minted_here(verdict)
+            schema_is_compatible(current=1, target=snapshot.schema_version)
+            ledger = MigrationLedger()
+            try:
+                ledger.may_migrate(verdict)
+                ledger.note_snapshot_written(verdict, snapshot)
+            except Exception:
+                pass
+            repr(verdict)
+            repr(snapshot)
+
+            flow = RecoveryWorkflow(rule, binding, session_id=SESSION)
+            for act in (
+                lambda: flow.start(
+                    snapshot, observations, session_id=SESSION, started_by_operator=True
+                ),
+                lambda: flow.open_trial(snapshot, observations, session_id=SESSION),
+                lambda: flow.commit(
+                    snapshot,
+                    observations,
+                    session_id=SESSION,
+                    acquisition=Opens(),
+                    confirmed=True,
+                ),
+                lambda: repr(flow.audit()),
+                lambda: candidate_applies_to(flow, flow._candidate),
+                lambda: flow.interrupt(session_id=SESSION),
+            ):
+                try:
+                    act()
+                except Exception:
+                    pass
+
+        print(repr(sorted(set(seen))))
+        """
+    )
+
+    finished = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        cwd=MODULE.parents[2],
+        env={**os.environ, "PYTHONPATH": str(MODULE.parents[2] / "src")},
+        timeout=120,
+        check=False,
+    )
+    assert finished.returncode == 0, finished.stderr
+    events = ast.literal_eval(finished.stdout.strip())
+    assert events == [], f"the decision path performed audited operations: {events}"

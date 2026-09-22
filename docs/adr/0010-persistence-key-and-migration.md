@@ -15,18 +15,28 @@ device.
 **A note on how D9 and D10 are checked, which changes neither.** The
 repository holds them with static scans over the modules above. *A static scan
 is not a proof of absence; it is a check that refuses the paths found so far.*
-These guards have been defeated by adversarial review three times: by
+These guards have been defeated by adversarial review four times: by
 assembling module names from fragments for `__import__`; by walking
-`().__class__.__base__.__subclasses__()` to `open`; and by raising an exception
-and reading `__traceback__.tb_frame.f_builtins["open"]` — the last two with no
-import statement at all.
+`().__class__.__base__.__subclasses__()` to `open`; by raising an exception and
+reading `__traceback__.tb_frame.f_builtins["open"]`; and by calling `locals()`
+at module level, which *is* the module dict and holds `__builtins__` — the last
+three with no import statement at all, and the last with no subscript, no
+`getattr` and no `except` either.
 
 **Each was closed in `azazel_boot.snapshot`'s guard only.** An earlier draft of
 this paragraph said all of them were "named in the guards", which was not true:
-the other modules' guards still name the `__import__` route and not the two
+the other modules' guards still name the `__import__` route and not the
 reflection routes, and the same chain inserted into `azazel_boot.session_mode`
 writes to the host filesystem with the suite green. Widening them is work this
 record does not do.
+
+**And a per-file scan is not a bound on the module it scans.** The fourth
+review put the same escape in `azazel_boot.quarantine`, whose `is_fenced`
+`azazel_boot.snapshot` reads on every gate, and the suite stayed green. So
+`azazel_boot.snapshot` now also carries a **runtime** check: the workflow is
+driven end to end under `sys.addaudithook` and the assertion is that no audited
+operation occurs at all — which covers what the module calls, and covers the
+paths that drive reaches and no others. The other modules do not have one.
 
 This is a statement of fact about the checks, not a revision of what D9 and D10
 decide.

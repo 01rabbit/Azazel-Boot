@@ -56,6 +56,25 @@ So it is checked structurally, not trusted as prose:
   inherited it and wrote the flags through it;
 - `is_fenced` and `volume_is_quarantined` **are** read, which is the point.
 
+**And none of the above is the claim.** A fourth review made the point that
+settles it: the behavioural guard that *did* hold — driving every public method
+and comparing the flags before and after — drove them with one fixed
+descriptor. A payload reading `if snapshot.schema_version > 1:` then clearing
+both flags passed the entire suite, because a schema-1 recovery behaved
+perfectly and no test committed a schema-2 one. It also emptied the
+`_dispositions` of every other device, deleted `_sealed` so the medium could be
+unquarantined by ordinary assignment one line later, and rebound
+`Quarantine.__setattr__` process-wide — none of which a comparison of two flags
+and one disposition can see.
+
+So the claim now rests on a guard that **varies what it feeds**: both schema
+versions, every container version, every integrity verdict, both flag states,
+both operator flags and every acquisition outcome, with the **whole** of the
+quarantine's state compared before and after — every slot, plus
+`Quarantine.__setattr__`'s identity, plus the seal still refusing an ordinary
+assignment afterwards. The static rules above remain, and are worth what they
+are worth.
+
 ## The snapshot (D6)
 
 Inside the single existing encrypted persistence partition. **No second
@@ -148,7 +167,10 @@ runs every gate again — which is what starting one does.
 
 **The gates run before the trial opens and again before the commit**, not once
 at the start — except key acquisition, which runs only at the commit, because
-that is where an operator is asked to type. A medium can be pulled while an
+that is where an operator is asked to type. **And the medium is read once
+more after the prompt returns**: `attempt()` is the only step in this workflow
+that blocks on a human, and the last fence read used to sit before it, so a
+medium pulled while the operator typed committed anyway. A medium can be pulled while an
 operator reads a confirmation screen, and a gate checked once is a gate checked
 at a moment that has passed. Tests fence the quarantine between the start and
 the trial, and again between the trial and the commit, and assert each refuses;
@@ -165,7 +187,10 @@ The gates, in order — D8's four, with two that precede them:
    re-derived from the supplied inventory, not a stored answer
 4. **key acquisition** — `session_mode`'s `KeyAcquisition` Protocol, reused
    rather than reimplemented, so what crosses back is the same single enum and
-   this module never sees a passphrase
+   this module never sees a passphrase. `commit` **requires** one: `None` used
+   to skip the gate entirely and leave an audit byte-identical to a legitimate
+   commit, so nothing downstream could tell a recovery that unlocked the volume
+   from one where nobody was ever prompted
 5. **integrity verification**
 6. **operator confirmation** — `confirmed` grants nothing by itself, which the
    first test in the file drives: the volume is still quarantined afterwards
@@ -214,11 +239,25 @@ and `getattr` — which had a blanket exemption, and which *was* the hole once
 the names are strings — is allowed only in the seal's one shape,
 `getattr(self, "_sealed", False)`.
 
-**A static scan is not a proof of absence.** Two have now been defeated here,
-each in a way the previous fix did not anticipate. The honest reading is that
-the next hole is closed when it is found.
+**A static scan is not a proof of absence.** Three have now been defeated here,
+each in a way the previous fix did not anticipate — most recently `locals()`,
+which at module level *is* the module dict, into which CPython puts
+`__builtins__`, reached with no import, no subscript, no `getattr` and no
+`except`, and with the spelling assembled from fragments the scan never reads.
 
-Eight audit classifications. `SnapshotAuditEntry` has five fields — `event`,
+Two things follow, and only the second is a claim. The name rule is no longer a
+denylist: **every free name the module reads is listed, and the assertion is
+equality**, so a builtin that is not one of the fourteen is unreachable by any
+spelling. And the question is asked of the runtime instead — the workflow is
+driven end to end under `sys.addaudithook`, which cannot be removed once
+installed, and the assertion is that **no audited operation happens at all**,
+whatever it was spelled. That also covers what this module *calls*: the same
+escape placed in `azazel_boot.quarantine`, whose `is_fenced` every gate reads,
+left the suite green, because a per-file scan is not a bound on anything but
+its own file. The limit of the runtime check, stated: it covers the paths that
+drive reaches.
+
+Nine audit classifications. `SnapshotAuditEntry` has five fields — `event`,
 `check`, `gate`, `schema_version`, `fingerprint` — and **no** field for
 snapshot contents, a byte count, a free-space figure, a capacity, a raw key, a
 passphrase, a device identity, a path or an operator identifier.
@@ -236,7 +275,13 @@ entry's generated repr. A review found it by rendering `repr(workflow.audit())`,
 which the absence test had not.
 
 The refusal raised from `_raise_gate_refused` holds **nothing** in its frame —
-no gate, no snapshot, no binding, no sitting. The limit `session_mode` states
+no gate, no snapshot, no binding, no sitting. A stage asked for another
+sitting is now **terminal and audited** (`recovery_foreign_sitting`) on the
+module's own principle that a swap is an event rather than a typo — it used to
+raise and leave the workflow untouched, so a foreign sitting could probe a live
+`TRIAL_OPEN` workflow as often as it liked with nothing recording that it had.
+`interrupt` takes a `session_id` like every other stage; it was the one
+exempt, so any holder of the object could end a workflow mid-flight. The limit `session_mode` states
 applies unchanged: the frames above still hold what they were handed, because a
 frame cannot forget its own argument.
 
