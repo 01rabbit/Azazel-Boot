@@ -13,7 +13,8 @@ Related: [ADR-0008 D4.1 / D4.1.1](0008-debian-13-live-baseline.md) ·
 [Threat model](../threat-model.md) §4–§5 ·
 [Quarantine policy](../quarantine-policy.md) §4 ·
 [Persistence](../persistence.md) · [Recovery](../recovery.md) ·
-[Session mode](../session-mode.md) — D1–D3 as implemented
+[Session mode](../session-mode.md) — D1–D3 as implemented ·
+[ADR-0011](0011-unlock-helper-boundary.md) — where the passphrase is typed
 
 ## Context
 
