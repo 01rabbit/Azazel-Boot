@@ -583,3 +583,138 @@ def test_a_sealed_quarantine_refuses_the_assignment_that_promotes_any_device() -
         with pytest.raises(AttributeError):
             setattr(quarantine, name, value)
     assert quarantine.evaluate(HOST_NVME, Action.WRITABLE_MOUNT) is Verdict.BLOCKED
+
+
+def test_the_fence_blocks_the_one_host_disk_write_it_actually_changes() -> None:
+    """The earlier test's host-disk half was vacuous.
+
+    `evaluate(HOST_NVME, action) is BLOCKED` passes with or without a fence,
+    because a quarantined disk with no approval is blocked anyway — so a
+    mutation narrowing the fence to the medium's own identity survived. The one
+    pair where the fence changes a host-disk answer is an **approved export**,
+    which is the product's single deliberate host write.
+    """
+
+    quarantine = a_quarantine()
+    quarantine.observe(BOOT_MEDIUM)
+    quarantine.observe(HOST_NVME)
+    quarantine.approve_export(
+        ExportApproval(
+            session_id="s1",
+            target_identity=HOST_NVME.identity,
+            reason="incident record",
+            confirmed=True,
+        )
+    )
+    assert quarantine.evaluate(HOST_NVME, Action.EXPORT_WRITE) is Verdict.ALLOWED
+
+    quarantine.fence()
+    assert quarantine.evaluate(HOST_NVME, Action.EXPORT_WRITE) is Verdict.BLOCKED
+
+
+def test_an_export_cannot_be_approved_once_the_medium_is_gone() -> None:
+    """Granted-then-blocked was the one combination that was neither policy.
+
+    The approval succeeded, the audit recorded it as granted, and `evaluate`
+    blocked the write unconditionally — so the audit asserted an operator had
+    granted an authority nobody could exercise. The refusal now agrees with
+    what the verdict already was.
+
+    The cost is real and is recorded in `docs/quarantine-policy.md`: an operator
+    mid-export when the medium is knocked out loses the sanctioned path off the
+    machine. Sparing host-disk exports is the other coherent answer and is a
+    product decision, not one taken in a test.
+    """
+
+    quarantine = a_quarantine()
+    quarantine.observe(HOST_NVME)
+    quarantine.fence()
+
+    with pytest.raises(ExportRefused) as refused:
+        quarantine.approve_export(
+            ExportApproval(
+                session_id="s1",
+                target_identity=HOST_NVME.identity,
+                reason="incident record",
+                confirmed=True,
+            )
+        )
+    assert refused.value.refusal is Refusal.SESSION_FENCED
+    assert HOST_NVME.identity not in str(refused.value)
+    assert not [e for e in quarantine.audit() if e.verdict == "granted"]
+
+
+def test_a_dict_write_cannot_go_round_the_quarantines_guard() -> None:
+    """`vars(obj)[k] = v` is what fixtures and serialisation helpers do.
+
+    The guard refused `q._fenced = False` and a `__dict__` write cleared it
+    anyway, because the class had no `__slots__` — the one asymmetry with
+    `PersistenceSession`, which had them from the start. The same route
+    reassigned `_boot_medium_identity`, and the host disk was then classified
+    as the medium.
+    """
+
+    quarantine = a_quarantine()
+    quarantine.observe(BOOT_MEDIUM)
+    quarantine.fence()
+
+    assert not hasattr(quarantine, "__dict__")
+    with pytest.raises((AttributeError, TypeError)):
+        vars(quarantine)["_fenced"] = False
+    assert quarantine.is_fenced is True
+    assert quarantine.evaluate(BOOT_MEDIUM, Action.WRITABLE_MOUNT) is Verdict.BLOCKED
+
+
+def test_the_reassignable_allowlist_is_not_an_attribute_that_can_be_replaced() -> None:
+    """The allowlist defining the seal was itself outside the seal.
+
+    An instance `__setattr__` does not intercept a **class** assignment, so
+    `Quarantine._REASSIGNABLE = frozenset({"_approval", "_fenced"})` reopened
+    the fence. There is no such attribute now; the one permitted name is a
+    literal inside the guard, with nothing to swap.
+    """
+
+    assert not hasattr(Quarantine, "_REASSIGNABLE")
+
+    quarantine = a_quarantine()
+    quarantine.observe(HOST_NVME)
+    quarantine.approve_export(
+        ExportApproval(
+            session_id="s1",
+            target_identity=HOST_NVME.identity,
+            reason="incident record",
+            confirmed=True,
+        )
+    )
+    assert quarantine.evaluate(HOST_NVME, Action.EXPORT_WRITE) is Verdict.ALLOWED
+    quarantine.withdraw_export()
+    assert quarantine.evaluate(HOST_NVME, Action.EXPORT_WRITE) is Verdict.BLOCKED
+
+
+def test_a_quarantine_refuses_to_be_serialised_or_copied() -> None:
+    """A redacted repr is not a redacted object.
+
+    `pickle.dumps` walked the instance state and handed over every observed
+    identity, the medium's identity, the session id and the whole audit in 262
+    bytes. `copy.deepcopy` was sharper still: a copy taken before a fence was an
+    unfenced quarantine that allowed a writable mount on the removed medium.
+    Both dispatch through `__reduce__`.
+    """
+
+    import copy
+    import pickle
+
+    quarantine = a_quarantine()
+    quarantine.observe(BOOT_MEDIUM)
+    quarantine.observe(HOST_NVME)
+
+    for attempt in (
+        lambda: pickle.dumps(quarantine),
+        lambda: copy.copy(quarantine),
+        lambda: copy.deepcopy(quarantine),
+    ):
+        with pytest.raises(TypeError):
+            attempt()
+
+    assert MEDIUM_ID not in repr(quarantine)
+    assert HOST_NVME.identity not in repr(quarantine)

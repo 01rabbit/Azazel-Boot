@@ -183,6 +183,7 @@ class Refusal(Enum):
     NOT_THIS_SESSION = "not_this_session"
     NO_REASON_GIVEN = "no_reason_given"
     NOT_CONFIRMED = "not_confirmed"
+    SESSION_FENCED = "session_fenced"
     BOOT_MEDIUM_IS_NOT_AN_EXPORT_TARGET = "boot_medium_is_not_an_export_target"
 
 
@@ -320,15 +321,32 @@ class Quarantine:
     module's authority — assigning to it promotes any device — so it is read
     through a property now.
 
-    Neither closes attribute assignment; Python has no way to. This is defence
-    against a careless caller, not against code already running in the process.
+    A third mechanism arrived with the fence: `__setattr__` below refuses plain
+    assignment to the session, the medium's identity, the dispositions and the
+    audit, and makes `_fenced` one-way. `__slots__` closes the `__dict__` route
+    that went round it — `vars(q)["_fenced"] = False` is what a serialisation
+    helper or a fixture does routinely, and it cleared the fence — and
+    `__reduce__` refuses to pickle or copy, which is why a snapshot taken before
+    a fence can no longer be kept as an unfenced quarantine.
+
+    **None of that is a seal, and Python has no way to make one.**
+    `object.__setattr__` writes the attribute regardless, `Quarantine.__new__`
+    yields an instance that never ran `__init__`, and a subclass can override
+    the hook. This is defence against a careless caller, not against code
+    already running in the process, and
+    `azazel_boot.persistence.PersistenceSession` states the same limit in the
+    same words for the same reason.
     """
 
-    #: Attributes an operation legitimately reassigns after construction.
-    #: `_approval` is replaced by `approve_export` and cleared by
-    #: `withdraw_export`; `_fenced` is one-way and handled separately. Every
-    #: other attribute is written once, in `__init__`.
-    _REASSIGNABLE = frozenset({"_approval"})
+    __slots__ = (
+        "_session_id",
+        "_boot_medium_identity",
+        "_dispositions",
+        "_approval",
+        "_audit",
+        "_fenced",
+        "_sealed",
+    )
 
     def __init__(self, session_id: str, boot_medium_identity: str) -> None:
         object.__setattr__(self, "_sealed", False)
@@ -361,7 +379,14 @@ class Quarantine:
         """
 
         if getattr(self, "_sealed", False):
-            if name in self._REASSIGNABLE:
+            # Written out rather than read from a `_REASSIGNABLE` attribute. A
+            # review replaced that attribute on the class — an instance
+            # `__setattr__` does not intercept a class assignment — and the
+            # allowlist defining the seal was itself outside the seal. A
+            # literal in this frame has nothing to swap. `_approval` is here
+            # because `approve_export` replaces it and `withdraw_export` clears
+            # it; every other attribute is written once, in `__init__`.
+            if name == "_approval":
                 object.__setattr__(self, name, value)
                 return
             if name == "_fenced" and value is True:
@@ -373,6 +398,27 @@ class Quarantine:
                 "dispositions and the audit cannot be replaced"
             )
         object.__setattr__(self, name, value)
+
+    def __reduce__(self):
+        """Refuse to pickle or copy, rather than handing over the session.
+
+        `__repr__` was written by hand so that every observed identity would not
+        reach a traceback, a log line or a debugger frame. `pickle` walks the
+        instance state instead and hands over `_dispositions` — every device
+        seen this session — with `_boot_medium_identity`, `_session_id`, the
+        approval and the whole audit. A review dumped one in 262 bytes with all
+        three identities legible in it. This is the same defeat that made
+        `PersistenceSession` refuse serialisation; the fix belongs on both.
+
+        `copy.copy` and `copy.deepcopy` dispatch through here too, which closes
+        the sharper case: a deep copy taken **before** a fence was an unfenced
+        quarantine that still allowed a writable mount on the removed medium.
+        """
+
+        raise TypeError(
+            "a Quarantine is not serialisable; it holds the session's observed "
+            "identities and its fence"
+        )
 
     @property
     def session_id(self) -> str:
@@ -552,6 +598,26 @@ class Quarantine:
         is being written to.
         """
 
+        if self._fenced:
+            # The one combination that was neither policy: a review approved an
+            # export on a fenced quarantine, the audit recorded it as granted,
+            # and `evaluate` then blocked the write unconditionally. An audit
+            # asserting an operator granted an authority nobody could exercise
+            # is worse than either answer.
+            #
+            # This makes the refusal agree with what `_decide` already does. It
+            # is the conservative direction and it widens nothing: the export
+            # was already blocked. **It also has a cost**, and the cost is
+            # stated rather than discovered later — an operator mid-export when
+            # the medium is knocked out loses the product's one sanctioned host
+            # write, which `docs/threat-model.md` section 3 exists to permit.
+            # Sparing host-disk exports from the fence is the other coherent
+            # answer, and it is a product decision rather than one taken here.
+            raise ExportRefused(
+                Refusal.SESSION_FENCED,
+                "the medium was removed; the session cannot grant an authority "
+                "it can no longer exercise",
+            )
         if approval.session_id != self._session_id:
             raise ExportRefused(
                 Refusal.NOT_THIS_SESSION, "an approval does not outlive a session"
@@ -617,7 +683,8 @@ class Quarantine:
             return Verdict.BLOCKED
         if self._fenced:
             # Ahead of the `BOOT_MEDIUM` short-circuit, which is what made this
-            # necessary. A review fenced the medium and then evaluated a
+            # necessary — second overall, after the actions refused everywhere.
+            # A review fenced the medium and then evaluated a
             # writable mount, an fsck, a journal replay and a swap activation
             # against it: all four were allowed, and the audit recorded them as
             # permitted on `boot_medium`. The sharp case is a device presenting

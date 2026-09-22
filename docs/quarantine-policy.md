@@ -73,13 +73,34 @@ device with no rule.
 **The `Quarantine` is not a value, and is not sealed.** It stopped being a
 dataclass because a review built one with a ready-made export approval through
 the generated `__init__`, and `boot_medium_identity` is read through a property
-because assigning to it promotes any device. Neither closes attribute
-assignment, and **Python has no way to**: `object.__setattr__` writes the
-attribute regardless, and an instance built with `__new__` never ran `__init__`.
-This is defence against a careless caller, not against code already running in
-the process, and it is stated that way in both this module and
+because assigning to it promotes any device — neither of which closes attribute
+assignment. Three mechanisms were added when the fence moved here, each after a
+review used its absence:
+
+- `__setattr__` refuses plain assignment to the session, the medium's identity,
+  the dispositions and the audit, and makes `_fenced` one-way. The one
+  permitted name is a literal inside the guard rather than a `_REASSIGNABLE`
+  class attribute, because an instance hook does not intercept a class
+  assignment and the allowlist defining the seal was itself outside it.
+- `__slots__` closes the `__dict__` route that went round that guard.
+  `vars(q)["_fenced"] = False` cleared the fence, and the same route renamed the
+  medium so a host disk was classified as it. That is what a serialisation
+  helper, a fixture or a debugger does routinely, not an exotic attack.
+- `__reduce__` refuses pickling and copying. A redacted `__repr__` is not a
+  redacted object: `pickle.dumps` handed over every observed identity, the
+  medium's identity, the session id and the whole audit in 262 bytes, and a
+  `deepcopy` taken before a fence was an unfenced quarantine that still allowed
+  a writable mount on the removed medium.
+
+**None of that is a seal, and Python has no way to make one.**
+`object.__setattr__` writes the attribute regardless, an instance built with
+`__new__` never ran `__init__`, and a subclass can override the hook. This is
+defence against a careless caller, not against code already running in the
+process, and it is stated that way in both this module and
 [persistence](persistence.md) §1 so that neither page claims a seal that the
-mechanism does not provide.
+mechanism does not provide. An earlier version of this paragraph enumerated two
+mechanisms and said neither closed assignment, which stayed on the page after
+one that does was added — while §5 of the other page correctly said it had.
 
 **What a device says about itself decides nothing.** Classification is identity
 against identity. When a device carrying the medium's identity says it is *not*
@@ -184,7 +205,9 @@ returning device as a fresh, untrusted arrival, and the session that survived
 the gap is the thing being refused. The audit gets `medium_fenced`, once as
 `fenced` and thereafter as `already_fenced`.
 
-**`evaluate()` consults it, ahead of everything else.** That was not true when
+**`evaluate()` consults it, ahead of the disposition.** Only the actions refused
+on every device are checked before it; both answers are `BLOCKED`, so the order
+between those two is not observable. That was not true when
 the fence arrived: `_decide` short-circuited on `disposition is BOOT_MEDIUM` and
 returned ALLOWED, so a fenced medium still permitted a writable mount, an fsck,
 a journal replay and a swap activation — and the audit recorded them as
@@ -193,6 +216,21 @@ identity *after* the removal, which is the transient-physical-access adversary
 this policy says it cannot tell apart: it was classified as the medium and
 allowed to be mounted writable. `medium_is_bound()` also answers False after a
 fence, because the question a caller asks through it is availability.
+
+**An export cannot be approved after a fence**, and that is a decision with a
+cost rather than a free safety win. Before, the approval succeeded and was
+audited as `granted` while `evaluate` blocked the write unconditionally — an
+audit asserting that an operator granted an authority nobody could exercise,
+which is worse than either coherent answer. The refusal now agrees with the
+verdict, and it widens nothing.
+
+What it costs: [the threat model](threat-model.md) §3's operator-approved export
+is the product's **one deliberate host write**, and an operator mid-export when
+the medium is knocked out loses the sanctioned path off the machine. Sparing
+host-disk exports from the fence is the other coherent answer — the removal
+happened to the medium, not to the disk being written — and it is a product
+decision that has not been taken. Until it is, the conservative direction holds
+because it is the one that adds no capability after a removal.
 
 It does **not** change `disposition()`, which answers "what is this device" — a
 question whose answer did not change when the medium was pulled. So the fence

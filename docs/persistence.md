@@ -206,8 +206,11 @@ arguments and got an unfenced one.
 Moving it there was not enough on its own. `Quarantine.evaluate` — the call that
 decides whether a write happens — did not consult the flag, so a fenced medium
 still allowed a writable mount, an fsck, a journal replay and a swap activation,
-and the audit recorded them as permitted. It does consult it now, ahead of
-everything else, and `medium_is_bound()` answers False after a fence.
+and the audit recorded them as permitted. It does consult it now, ahead of the
+disposition (only the actions refused on every device are checked first, and
+both answers are `BLOCKED`), and `medium_is_bound()` answers False after a
+fence. An export can no longer be approved once the medium is gone either; the
+cost of that is recorded in [the quarantine policy](quarantine-policy.md) §4.
 `disposition()` still does not: "what is this device" did not change when the
 medium was pulled, and "may this happen now" did.
 

@@ -399,3 +399,13 @@ def test_the_fingerprint_is_taken_over_a_removable_interface_and_that_is_recorde
     assert binding_applies(
         bind_session(one, session_id="session-1"), other, session_id="session-1"
     )
+
+    # The behaviour above is pinned, but the escalation rested on the limit
+    # being **stated**, and a statement is what can vanish without a test. A
+    # mutation deleting the paragraph from `UnidentifiedHost` left the suite
+    # green; `test_the_seal_is_defence_against_a_careless_caller_and_says_no_more`
+    # already shows the shape, so it is used here.
+    from azazel_boot import commissioning
+
+    source = " ".join(Path(commissioning.__file__).read_text(encoding="utf-8").split())
+    assert "closes the zero-identity case and not the partial-identity one" in source
