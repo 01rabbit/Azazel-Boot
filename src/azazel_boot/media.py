@@ -34,6 +34,8 @@ from __future__ import annotations
 from dataclasses import dataclass, fields
 from enum import Enum
 
+from .refusals import Refused
+
 #: Fields the screen may carry: enough for a human to identify the object in
 #: front of them, and nothing that identifies it to anyone else.
 SCREEN_FIELDS = ("capacity_bytes", "bus_path", "physical_label")
@@ -58,13 +60,48 @@ class Refusal(Enum):
     ALREADY_USED = "already_used"
 
 
-class SelectionRefused(Exception):
+class SelectionRefused(Refused):
     """A target code did not resolve to an offered candidate."""
 
     def __init__(self, refusal: Refusal, detail: str) -> None:
         super().__init__(f"{refusal.value}: {detail}")
         self.refusal = refusal
         self.detail = detail
+
+
+class DeviceIdentity:
+    """A stable device identity that no accidental rendering can print.
+
+    `repr=False` on a dataclass stops `repr`, and an adversarial review then
+    pulled the identity straight back out with `dataclasses.asdict` — which is
+    what a `--json` output or an audit line actually calls. Holding the value in
+    an opaque object fixes that class of leak rather than one instance of it:
+    `asdict` yields this object, `json.dumps` refuses it loudly instead of
+    serialising it quietly, and a caller that genuinely needs the value asks for
+    it by name.
+    """
+
+    __slots__ = ("_value",)
+
+    def __init__(self, value: str) -> None:
+        self._value = value
+
+    def disclose(self) -> str:
+        """The raw value, for the one component that must open the device."""
+
+        return self._value
+
+    def __repr__(self) -> str:
+        return "DeviceIdentity(<redacted>)"
+
+    def __str__(self) -> str:
+        return "<redacted>"
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, DeviceIdentity) and other._value == self._value
+
+    def __hash__(self) -> int:
+        return hash(self._value)
 
 
 @dataclass(frozen=True, repr=False)
@@ -76,7 +113,7 @@ class MediaCandidate:
     log, export or publish them.
     """
 
-    identity: str
+    identity: DeviceIdentity
     capacity_bytes: int
     partition_table: str | None
     bus_path: str

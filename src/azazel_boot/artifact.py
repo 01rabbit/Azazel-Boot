@@ -28,10 +28,13 @@ something `write` accepts by being renamed.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
+
+from .refusals import Refused
 
 #: The eighteen fields of `docs/builder-writer-contract.md` section 3, in the
 #: order that document lists them. A record is this set exactly: a missing field
@@ -75,7 +78,7 @@ class Refusal(Enum):
     SIGNATURE_WITHOUT_SUBJECT = "signature_without_subject"
 
 
-class RecordRefused(Exception):
+class RecordRefused(Refused):
     """The document is not an artifact record. There is no partial record."""
 
     def __init__(self, refusal: Refusal, detail: str) -> None:
@@ -113,6 +116,21 @@ class ArtifactRecord:
     def __getitem__(self, name: str) -> object:
         return self.fields[name]
 
+    def fingerprint(self) -> str:
+        """A digest over the **whole** record, canonically serialised.
+
+        An adversarial review bound a verification to the payload digest alone
+        and then attached a different record — unsigned, claiming
+        `hardware_verified`, naming another quarantine policy — to a write whose
+        bytes were honest. The record is "the only thing a later reader has",
+        so what a verification is about has to be all eighteen fields.
+        """
+
+        canonical = json.dumps(
+            self.fields, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        )
+        return "sha256:" + hashlib.sha256(canonical.encode("ascii")).hexdigest()
+
     @property
     def unsigned_payload_digest(self) -> str:
         return str(self.fields["unsigned_payload_digest"])
@@ -123,7 +141,14 @@ class ArtifactRecord:
 
     @property
     def is_signed(self) -> bool:
-        return self.fields.get("signature") is not None
+        """A signature is a non-empty string. `False`, `0`, `[]` and `{}` are not.
+
+        The first version asked whether the field was `not None`, so any falsy
+        non-null value read as signed and reached the verifier as `str(value)`.
+        """
+
+        signature = self.fields.get("signature")
+        return isinstance(signature, str) and bool(signature.strip())
 
 
 @dataclass(frozen=True)
@@ -141,8 +166,8 @@ class Verification:
     outcome: VerificationOutcome
     #: The digest measured over the artifact that was checked.
     measured_digest: str
-    #: The digest the record claims for its payload.
-    record_digest: str
+    #: A digest over every field of the record that was checked.
+    record_fingerprint: str
     refusal: VerificationRefusal | None = None
 
     @property
@@ -155,7 +180,7 @@ class Verification:
         """Whether this answer is about *this* record and *these* bytes."""
 
         return (
-            self.record_digest == record.unsigned_payload_digest
+            self.record_fingerprint == record.fingerprint()
             and self.measured_digest == measured_digest
         )
 
@@ -177,10 +202,12 @@ def parse(document: object) -> ArtifactRecord:
 
     for name in RECORD_FIELDS:
         if name in OPTIONAL_FIELDS:
-            # Absent is a valid value here. *Present and empty* is not: an
-            # empty signature would read as signed, which is the one place
-            # where a truncated record decides whether a medium may be written.
-            if document.get(name) is not None and not str(document[name]).strip():
+            # Absent is a valid value here. Present and not a non-empty string
+            # is not: an empty signature — or `false`, or `0`, or `[]` — would
+            # otherwise read as signed, which is the one place where a
+            # malformed record decides whether a medium may be written.
+            present = document.get(name)
+            if present is not None and not (isinstance(present, str) and present.strip()):
                 raise RecordRefused(Refusal.EMPTY_FIELD, name)
             continue
         if name not in document:
@@ -225,7 +252,7 @@ def verify(
 
     about = {
         "measured_digest": measured_digest,
-        "record_digest": record.unsigned_payload_digest,
+        "record_fingerprint": record.fingerprint(),
     }
     if measured_digest != record.unsigned_payload_digest:
         return Verification(

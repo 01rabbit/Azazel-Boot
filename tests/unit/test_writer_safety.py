@@ -20,6 +20,7 @@ Those are the tests to keep if this file is ever cut down.
 from __future__ import annotations
 
 import ast
+import dataclasses
 import hashlib
 from pathlib import Path
 
@@ -28,7 +29,7 @@ import pytest
 from azazel_boot import writer as writer_module
 from azazel_boot.artifact import Verification, VerificationOutcome, VerificationRefusal, parse
 from azazel_boot.artifact import verify as verify_artifact
-from azazel_boot.media import MediaCandidate, MediaSession
+from azazel_boot.media import DeviceIdentity, MediaCandidate, MediaSession
 from azazel_boot.writer import (
     DESTRUCTIVE_CONFIRMATION,
     REVERIFIED_ATTRIBUTES,
@@ -48,7 +49,8 @@ PAYLOAD = b"an image, for the purposes of this test"
 DIGEST = "sha256:" + hashlib.sha256(PAYLOAD).hexdigest()
 OTHER = b"a different image entirely"
 OTHER_DIGEST = "sha256:" + hashlib.sha256(OTHER).hexdigest()
-IDENTITY = "stable-identity-1"
+IDENTITY = DeviceIdentity("stable-identity-1")
+IDENTITY_VALUE = "stable-identity-1"
 
 
 def record(digest: str = DIGEST):
@@ -100,14 +102,14 @@ class Device:
         self.path.write_bytes(b"")
         self._truncate_to = truncate_to
 
-    def write(self, identity: str, artifact_path: str) -> int:
+    def write(self, identity: DeviceIdentity, artifact_path: str) -> int:
         data = Path(artifact_path).read_bytes()
         if self._truncate_to is not None:
             data = data[: self._truncate_to]
         self.path.write_bytes(data)
         return len(data)
 
-    def digest(self, identity: str, length: int) -> str | None:
+    def digest(self, identity: DeviceIdentity, length: int) -> str | None:
         data = self.path.read_bytes()[:length]
         if not data:
             return None
@@ -129,10 +131,10 @@ class Files:
 class Probe:
     """A probe keyed by identity, the way a real one is."""
 
-    def __init__(self, devices: dict[str, MediaCandidate] | None = None) -> None:
+    def __init__(self, devices: dict[DeviceIdentity, MediaCandidate] | None = None) -> None:
         self._devices = {IDENTITY: candidate()} if devices is None else devices
 
-    def reread(self, identity: str) -> MediaCandidate | None:
+    def reread(self, identity: DeviceIdentity) -> MediaCandidate | None:
         return self._devices.get(identity)
 
 
@@ -140,7 +142,7 @@ class Unmounter:
     def __init__(self, *, succeeds: bool = True) -> None:
         self._succeeds = succeeds
 
-    def unmount(self, identity: str) -> bool:
+    def unmount(self, identity: DeviceIdentity) -> bool:
         return self._succeeds
 
 
@@ -197,14 +199,13 @@ def test_a_verified_signed_artifact_is_written_and_read_back(
 
 
 def test_an_authorisation_built_by_hand_is_refused(tmp_path: Path, artifact: Path) -> None:
-    """The review's first finding: one line reached `execute` with nothing checked."""
+    """The first review's finding: one line reached `execute` with nothing checked."""
 
     authority, _ = an_authority()
     device = Device(tmp_path / "device")
     forged = Authorised(
         confirmed=TargetConfirmed(
             plan=Planned(
-                nonce="forged",
                 target_code="m1-1-01",
                 enumerated=candidate(),
                 record=record(),
@@ -222,10 +223,77 @@ def test_an_authorisation_built_by_hand_is_refused(tmp_path: Path, artifact: Pat
     assert device.written == b""
 
 
+def test_a_copy_of_an_issued_plan_is_refused(tmp_path: Path, artifact: Path) -> None:
+    """The second review's finding: a token can be copied onto another object.
+
+    `dataclasses.replace` works on a frozen dataclass, so a plan issued for one
+    artifact and one device was retargeted to any other — and the write was
+    reported valid. Membership is object identity for exactly this reason.
+    """
+
+    other = tmp_path / "evil.img"
+    other.write_bytes(OTHER)
+    authority, code = an_authority()
+    rec = record()
+    planned = authority.plan(
+        target_code=code,
+        record=rec,
+        verification=verified_for(rec, artifact),
+        artifact_path=str(artifact),
+    )
+    retargeted = dataclasses.replace(
+        planned,
+        record=record(OTHER_DIGEST),
+        artifact_path=str(other),
+        artifact_bytes=len(OTHER),
+        artifact_digest=OTHER_DIGEST,
+    )
+    device = Device(tmp_path / "device")
+    with pytest.raises(WriteRefused) as refused:
+        authority.execute(
+            confirm_destruction(confirm_target(retargeted, code), DESTRUCTIVE_CONFIRMATION),
+            probe=Probe(),
+            unmounter=Unmounter(),
+            raw_writer=device,
+            reader=device,
+        )
+    assert refused.value.refusal is Refusal.AUTHORISATION_NOT_ISSUED
+    assert device.written == b""
+
+
+def test_an_authorisation_refused_by_execute_is_not_usable_again(
+    tmp_path: Path, artifact: Path
+) -> None:
+    """A substitution is refused, not warned about — and not retryable."""
+
+    authority, code = an_authority()
+    authorisation = authorised_write(artifact, authority, code)
+    device = Device(tmp_path / "device")
+    with pytest.raises(WriteRefused) as first:
+        authority.execute(
+            authorisation,
+            probe=Probe(),
+            unmounter=Unmounter(succeeds=False),
+            raw_writer=device,
+            reader=device,
+        )
+    assert first.value.refusal is Refusal.UNMOUNT_FAILED
+    with pytest.raises(WriteRefused) as second:
+        authority.execute(
+            authorisation,
+            probe=Probe(),
+            unmounter=Unmounter(),
+            raw_writer=device,
+            reader=device,
+        )
+    assert second.value.refusal is Refusal.AUTHORISATION_NOT_ISSUED
+    assert device.written == b""
+
+
 def test_an_authorisation_from_another_authority_is_refused(
     tmp_path: Path, artifact: Path
 ) -> None:
-    mine, my_code = an_authority()
+    mine, _ = an_authority()
     theirs, their_code = an_authority()
     device = Device(tmp_path / "device")
     with pytest.raises(WriteRefused) as refused:
@@ -238,7 +306,6 @@ def test_an_authorisation_from_another_authority_is_refused(
         )
     assert refused.value.refusal is Refusal.AUTHORISATION_NOT_ISSUED
     assert device.written == b""
-    assert my_code != their_code or True  # both sessions issue their own codes
 
 
 def test_an_authorisation_cannot_be_replayed(tmp_path: Path, artifact: Path) -> None:
@@ -309,6 +376,36 @@ def test_a_verification_obtained_for_another_artifact_authorises_nothing(
             record=record(OTHER_DIGEST),
             verification=verified_for(record(), artifact),
             artifact_path=str(other),
+        )
+    assert refused.value.refusal is Refusal.VERIFICATION_IS_ABOUT_SOMETHING_ELSE
+
+
+def test_a_verification_for_another_record_with_the_same_payload_authorises_nothing(
+    artifact: Path,
+) -> None:
+    """Binding to the payload digest alone leaves seventeen fields free.
+
+    A review attached an unsigned record claiming `hardware_verified` to a write
+    whose bytes were honest. The record is what a later reader has.
+    """
+
+    signed = record()
+    impostor = parse(
+        {
+            **signed.fields,
+            "signature": None,
+            "signed_artifact_digest": None,
+            "compatibility_claim": "hardware_verified",
+            "quarantine_policy_version": "quarantine.v0",
+        }
+    )
+    authority, code = an_authority()
+    with pytest.raises(WriteRefused) as refused:
+        authority.plan(
+            target_code=code,
+            record=impostor,
+            verification=verified_for(signed, artifact),
+            artifact_path=str(artifact),
         )
     assert refused.value.refusal is Refusal.VERIFICATION_IS_ABOUT_SOMETHING_ELSE
 
@@ -567,7 +664,7 @@ def test_there_is_no_outcome_meaning_written_but_unchecked() -> None:
 
 def test_an_unreadable_medium_is_not_verified(tmp_path: Path, artifact: Path) -> None:
     class Silent(Device):
-        def digest(self, identity: str, length: int) -> str | None:
+        def digest(self, identity: DeviceIdentity, length: int) -> str | None:
             return None
 
     authority, code = an_authority()
@@ -631,9 +728,34 @@ def test_no_rendering_of_a_plan_or_a_candidate_prints_the_identity(
         repr(confirmed),
         repr(authorisation),
         f"{offers[0]}",
+        str(candidate().identity),
     ):
-        assert IDENTITY not in rendered, f"identity leaked into {rendered!r}"
+        assert IDENTITY_VALUE not in rendered, f"identity leaked into {rendered!r}"
     assert str(artifact) not in repr(planned)
+
+
+def test_serialising_a_candidate_or_a_plan_does_not_yield_the_raw_identity(
+    artifact: Path,
+) -> None:
+    """`asdict` walks past a redacted `__repr__`; it is how a `--json` output is built."""
+
+    session = MediaSession("m1")
+    offers = session.offer([candidate()])
+    authority = WriteAuthority(session, artifact_reader=Files())
+    rec = record()
+    planned = authority.plan(
+        target_code=offers[0].target_code,
+        record=rec,
+        verification=verified_for(rec, artifact),
+        artifact_path=str(artifact),
+    )
+    for structure in (
+        dataclasses.asdict(offers[0]),
+        dataclasses.asdict(candidate()),
+        dataclasses.asdict(planned),
+    ):
+        assert IDENTITY_VALUE not in repr(structure)
+    assert IDENTITY_VALUE not in repr(dataclasses.astuple(candidate()))
 
 
 # --- what this module is allowed to touch ----------------------------------

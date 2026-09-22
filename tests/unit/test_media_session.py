@@ -9,10 +9,13 @@ reached a screen and then a screenshot.
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
 from azazel_boot.media import (
     SCREEN_FIELDS,
+    DeviceIdentity,
     Eligibility,
     MediaCandidate,
     MediaSession,
@@ -83,7 +86,7 @@ def test_an_internal_disk_is_refused_as_internal_even_if_it_is_also_mounted() ->
 
 def test_an_ineligible_device_is_listed_without_a_code() -> None:
     session = MediaSession("m1")
-    offers = session.offer([candidate(identity="internal", internal=True)])
+    offers = session.offer([candidate(identity=DeviceIdentity("internal"), internal=True)])
     assert offers[0].eligibility is Eligibility.INTERNAL_DISK
     assert offers[0].target_code is None
     with pytest.raises(SelectionRefused):
@@ -94,10 +97,10 @@ def test_only_eligible_devices_consume_a_code() -> None:
     session = MediaSession("m1")
     offers = session.offer(
         [
-            candidate(identity="internal", internal=True),
-            candidate(identity="usb-a"),
-            candidate(identity="mounted", mounted=True),
-            candidate(identity="usb-b"),
+            candidate(identity=DeviceIdentity("internal"), internal=True),
+            candidate(identity=DeviceIdentity("usb-a")),
+            candidate(identity=DeviceIdentity("mounted"), mounted=True),
+            candidate(identity=DeviceIdentity("usb-b")),
         ]
     )
     codes = [offer.target_code for offer in offers]
@@ -106,13 +109,13 @@ def test_only_eligible_devices_consume_a_code() -> None:
 
 def test_a_code_resolves_to_the_device_as_enumerated() -> None:
     session = MediaSession("m1")
-    session.offer([candidate(identity="usb-a")])
-    assert session.claim("m1-1-01").identity == "usb-a"
+    session.offer([candidate(identity=DeviceIdentity("usb-a"))])
+    assert session.claim("m1-1-01").identity == DeviceIdentity("usb-a")
 
 
 def test_a_code_is_single_use() -> None:
     session = MediaSession("m1")
-    session.offer([candidate(identity="usb-a")])
+    session.offer([candidate(identity=DeviceIdentity("usb-a"))])
     session.claim("m1-1-01")
     with pytest.raises(SelectionRefused) as refused:
         session.claim("m1-1-01")
@@ -129,21 +132,21 @@ def test_a_code_from_an_earlier_listing_does_not_resolve() -> None:
     """
 
     session = MediaSession("m1")
-    session.offer([candidate(identity="usb-a")])
-    session.offer([candidate(identity="usb-b")])
+    session.offer([candidate(identity=DeviceIdentity("usb-a"))])
+    session.offer([candidate(identity=DeviceIdentity("usb-b"))])
     with pytest.raises(SelectionRefused) as refused:
         session.claim("m1-1-01")
     assert refused.value.refusal is Refusal.UNKNOWN_CODE
-    assert session.claim("m1-2-01").identity == "usb-b"
+    assert session.claim("m1-2-01").identity == DeviceIdentity("usb-b")
 
 
 def test_a_spent_code_stays_spent_across_a_re_listing() -> None:
     """Re-enumeration must not hand a used code back."""
 
     session = MediaSession("m1")
-    session.offer([candidate(identity="usb-a")])
+    session.offer([candidate(identity=DeviceIdentity("usb-a"))])
     session.claim("m1-1-01")
-    session.offer([candidate(identity="usb-b")])
+    session.offer([candidate(identity=DeviceIdentity("usb-b"))])
     with pytest.raises(SelectionRefused) as refused:
         session.claim("m1-1-01")
     assert refused.value.refusal is Refusal.ALREADY_USED
@@ -151,9 +154,9 @@ def test_a_spent_code_stays_spent_across_a_re_listing() -> None:
 
 def test_a_code_from_another_session_does_not_resolve() -> None:
     first = MediaSession("m1")
-    first.offer([candidate(identity="usb-a")])
+    first.offer([candidate(identity=DeviceIdentity("usb-a"))])
     second = MediaSession("m2")
-    second.offer([candidate(identity="usb-a")])
+    second.offer([candidate(identity=DeviceIdentity("usb-a"))])
     with pytest.raises(SelectionRefused) as refused:
         second.claim("m1-1-01")
     assert refused.value.refusal is Refusal.UNKNOWN_CODE
@@ -161,7 +164,7 @@ def test_a_code_from_another_session_does_not_resolve() -> None:
 
 def test_the_operator_screen_carries_no_identity() -> None:
     session = MediaSession("m1")
-    offers = session.offer([candidate(identity="stable-identity-1")])
+    offers = session.offer([candidate(identity=DeviceIdentity("stable-identity-1"))])
     screen = offers[0].describe_for_screen()
     assert set(screen) == {*SCREEN_FIELDS, "eligibility", "target_code"}
     assert "stable-identity-1" not in repr(screen)
@@ -171,9 +174,10 @@ def test_no_default_rendering_prints_the_identity() -> None:
     """`describe_for_screen` is a discipline; `repr` is what a log actually calls."""
 
     session = MediaSession("m1")
-    offers = session.offer([candidate(identity="WWN-0x5001234")])
+    offers = session.offer([candidate(identity=DeviceIdentity("WWN-0x5001234"))])
     for rendered in (repr(offers[0]), repr(offers[0].candidate), f"{offers[0]}"):
         assert "WWN-0x5001234" not in rendered
+    assert "WWN-0x5001234" not in repr(dataclasses.asdict(offers[0]))
 
 
 def test_the_screen_carries_what_a_human_needs_to_pick_the_right_object() -> None:

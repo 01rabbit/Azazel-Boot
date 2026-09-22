@@ -201,11 +201,51 @@ def test_a_verification_names_the_record_and_the_bytes_it_is_about() -> None:
 
     result = verify(parse(signed_record()), DIGEST, signature_verifier=lambda _r, _s: True)
     assert result.measured_digest == DIGEST
-    assert result.record_digest == DIGEST
+    assert result.record_fingerprint == parse(signed_record()).fingerprint()
     assert result.is_about(parse(signed_record()), DIGEST) is True
     assert result.is_about(parse(signed_record()), "sha256:" + "0" * 64) is False
     other = a_record(unsigned_payload_digest="sha256:" + "f" * 64)
     assert result.is_about(parse(other), DIGEST) is False
+
+
+def test_a_verification_is_about_the_whole_record_not_just_the_payload() -> None:
+    """Two records sharing a payload digest are not interchangeable.
+
+    The record is "the only thing a later reader has": a different
+    `compatibility_claim`, `quarantine_policy_version` or `git_revision` is a
+    different set of facts travelling with the same bytes.
+    """
+
+    signed = parse(signed_record())
+    result = verify(signed, DIGEST, signature_verifier=lambda _r, _s: True)
+    for field, value in (
+        ("compatibility_claim", "hardware_verified"),
+        ("quarantine_policy_version", "quarantine.v0"),
+        ("git_revision", "b" * 40),
+    ):
+        impostor = parse({**signed.fields, field: value})
+        assert impostor.unsigned_payload_digest == signed.unsigned_payload_digest
+        assert result.is_about(impostor, DIGEST) is False
+
+
+@pytest.mark.parametrize("value", [False, 0, [], {}, 1])
+def test_a_signature_that_is_not_a_string_is_refused(value) -> None:
+    """`str(False)` is not blank, so a looser check let all of these read as signed."""
+
+    with pytest.raises(RecordRefused) as refused:
+        parse(a_record(signature=value, signed_artifact_digest="sha256:" + "8" * 64))
+    assert refused.value.refusal is Refusal.EMPTY_FIELD
+
+
+def test_every_refusal_in_these_modules_shares_one_base() -> None:
+    """A caller that means "do not write unless everything is in order" needs one except."""
+
+    from azazel_boot.media import SelectionRefused
+    from azazel_boot.refusals import Refused
+    from azazel_boot.writer import WriteRefused
+
+    for kind in (RecordRefused, SelectionRefused, WriteRefused):
+        assert issubclass(kind, Refused)
 
 
 def test_an_evaluation_record_does_not_parse_as_a_release_record() -> None:

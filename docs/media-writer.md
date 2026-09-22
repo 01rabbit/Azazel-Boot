@@ -30,11 +30,17 @@ Verification produces one of three outcomes:
 | `refused` | the digest did not match, or the signature was rejected | no |
 
 A verification also carries **what it is about** — the digest it was measured
-over and the digest its record claims. The write authority re-measures the
-artifact and refuses unless the verification is about that record and those
-bytes. Without that binding, a verification obtained for one artifact
-authorises writing another, which is what an adversarial review of the first
-version of these modules demonstrated.
+over, and a digest over **every field** of the record it checked. The write
+authority re-measures the artifact and refuses unless the verification is about
+that record and those bytes.
+
+Binding to the payload digest alone is not enough, and a review demonstrated
+why: two records can share a payload digest, so an unsigned record claiming
+`hardware_verified` and naming a different quarantine policy was attached to a
+write whose bytes were honest. The record is what a later reader has.
+
+A signature is a **non-empty string**. `""`, `false`, `0`, `[]` and `{}` are
+refused rather than read as signed.
 
 **Verification is injected and the default verifies nothing.** Boot has no
 signing key, no signer role and no signed artifact
@@ -79,22 +85,29 @@ after they re-ran `list-media`, to an evidence disk — a substitution upstream 
 every check the writer performs. That is why the enumeration is in the code.
 
 `MediaCandidate` has **no model field and no serial field**: the model cannot
-hold them, so no rendering can leak them. The stable identity *is* a field —
-the writer needs it — so it is kept out of renderings by an explicit `__repr__`
-on every type that holds one (`MediaCandidate`, `MediaOffer`, `Planned`,
-`TargetConfirmed`, `Authorised`), because a default repr reaches a log through
-an f-string nobody thought about. The operator screen carries capacity, bus
-path, physical label, eligibility and the code.
+hold them, so no rendering can leak them. The stable identity *is* a field — the
+writer needs it — and it is held in an opaque `DeviceIdentity` whose `repr` and
+`str` are redacted and whose value is reachable only by asking for it. A
+redacted `__repr__` alone was not enough: `dataclasses.asdict`, which is how a
+`--json` output or an audit line is actually built, walked straight past it.
+`json.dumps` now refuses the object loudly instead of serialising the value
+quietly. The operator screen carries capacity, bus path, physical label,
+eligibility and the code.
 
 ## 3. The write
 
-An authorisation is **issued, not constructed**. A `WriteAuthority` holds the
-enumeration session, claims the target itself, re-measures the artifact, and
-mints a nonce; `execute` refuses an authorisation it did not issue and spends
-the nonce, so an authorisation is single-use rather than replayable. The first
-version made the three states public dataclasses and let `execute` trust what it
-was handed — one line built an authorisation around an unverified artifact and
-the medium was erased and reported valid.
+An authorisation is **an object the authority issued**, not a value a caller
+holds. A `WriteAuthority` owns the enumeration session, claims the target
+itself, re-measures the artifact, and keeps the plans it made; `execute` checks
+**object identity** against that set and removes the plan on entry, so neither a
+success nor a refusal leaves an authorisation usable again.
+
+Two rounds of adversarial review produced that shape. The first version let
+`execute` trust any value it was handed, and one line built an authorisation
+around an unverified artifact. The second minted a nonce — and a nonce is a
+bearer token, so a single `dataclasses.replace` carried it onto a plan naming a
+different artifact and a different device, with the same outcome. A token can be
+copied; being the object cannot.
 
 The two confirmations remain separate steps: `plan`, `confirm_target`,
 `confirm_destruction`, `execute`. There is no `force` and no `yes`.
@@ -122,6 +135,13 @@ not unmount it on the operator's behalf. The operator unmounts it and re-runs
 `list-media`. An explicit unmount-then-write step is a change to
 [the contract](builder-writer-contract.md) section 7.4 and would need its own
 revision; it is named here so nobody discovers the gap while holding a stick.
+
+The artifact file is measured at plan time and re-read by the write service at
+write time. A file swapped in between is written and then caught by the
+read-back, so the medium is never called valid — but the destruction already
+happened. The artifact must sit where the write service controls it between the
+two, and that is a property of the deployment, not something these modules can
+check.
 
 Persistence is not part of this. Creating encrypted persistence is a separate
 explicit operation on the USB medium only

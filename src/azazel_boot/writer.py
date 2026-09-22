@@ -7,23 +7,26 @@ Where the real ports will live is the write service
 (`docs/builder-writer-contract.md` section 8) — the only component that opens a
 block device for writing.
 
-An adversarial review of the first version of this module found that its safety
-rested on a story rather than on enforcement, and the three changes below are
-what that review cost:
+Two rounds of adversarial review shaped what is here, and each round found the
+previous version's safety to be a story rather than an enforcement:
 
-**An authorisation is issued, not constructed.** The first version made
-`Planned`, `TargetConfirmed` and `Authorised` public dataclasses and let
-`execute` trust whatever it was handed. One line built an `Authorised` around an
-unverified artifact, and the medium was erased and reported valid. Now a
-`WriteAuthority` mints a nonce at planning time, `execute` refuses an
-authorisation it did not issue, and the nonce is spent by the write, so an
-authorisation is single-use rather than replayable.
+**An authorisation is an object the authority issued, not a value a caller
+holds.** The first version let `execute` trust any `Authorised` it was handed.
+The second minted a nonce — and a nonce is a bearer token, so one
+`dataclasses.replace` carried it onto a `Planned` naming a different artifact
+and a different device, with the same result: an unverified image on the medium,
+reported valid. So there is no token at all now. The authority keeps the
+`Planned` objects it issued and `execute` checks **object identity**, which
+nothing a caller constructs can satisfy. An authorisation is removed from that
+set the moment `execute` accepts it, so neither a success nor a refusal leaves
+it usable again.
 
-**A verification names its subject.** The first version passed the record, the
-`Verification` and the artifact path as three unrelated arguments, so a
-verification obtained for one artifact authorised writing a different one. Now
-the authority re-measures the artifact at planning time and refuses unless the
-verification is about *that* record and *those* bytes.
+**A verification names its subject — the whole record.** The first version
+passed the record, the `Verification` and the path as three unrelated arguments.
+The second bound the verification to the payload digest, which left the other
+seventeen fields free: a review attached an unsigned record claiming
+`hardware_verified` to a write whose bytes were honest. The binding is now a
+digest over every field.
 
 **Re-verification compares what an operator actually chose by.** Comparing the
 identity a probe was queried with against the identity it returned is `x != x`
@@ -41,13 +44,13 @@ module can start it.
 
 from __future__ import annotations
 
-import secrets
 from dataclasses import dataclass
 from enum import Enum
 from typing import Protocol
 
 from .artifact import ArtifactRecord, Verification
-from .media import Eligibility, MediaCandidate, MediaSession, assess
+from .media import DeviceIdentity, Eligibility, MediaCandidate, MediaSession, assess
+from .refusals import Refused
 
 #: The operator types this, exactly, to authorise the destruction. It is a
 #: sentence rather than "y" because the act is not reversible.
@@ -81,7 +84,7 @@ class Refusal(Enum):
     UNMOUNT_FAILED = "unmount_failed"
 
 
-class WriteRefused(Exception):
+class WriteRefused(Refused):
     """Nothing was written. Every refusal in this module happens before any write."""
 
     def __init__(self, refusal: Refusal, detail: str) -> None:
@@ -109,23 +112,23 @@ class DeviceProbe(Protocol):
     This module cannot check that, and says so rather than implying otherwise.
     """
 
-    def reread(self, identity: str) -> MediaCandidate | None: ...
+    def reread(self, identity: DeviceIdentity) -> MediaCandidate | None: ...
 
 
 class Unmounter(Protocol):
-    def unmount(self, identity: str) -> bool: ...
+    def unmount(self, identity: DeviceIdentity) -> bool: ...
 
 
 class RawWriter(Protocol):
     """Writes the artifact to the device. The only thing here that destroys data."""
 
-    def write(self, identity: str, artifact_path: str) -> int: ...
+    def write(self, identity: DeviceIdentity, artifact_path: str) -> int: ...
 
 
 class MediumReader(Protocol):
     """Reads the medium back and returns a digest over `length` bytes."""
 
-    def digest(self, identity: str, length: int) -> str | None: ...
+    def digest(self, identity: DeviceIdentity, length: int) -> str | None: ...
 
 
 class ArtifactReader(Protocol):
@@ -138,12 +141,12 @@ class ArtifactReader(Protocol):
 class Planned:
     """An artifact and a target, neither confirmed by anyone yet.
 
-    `nonce` is what makes this an authority's issue rather than a caller's
-    assertion. A `Planned` built by hand carries a nonce the authority never
-    minted, and `execute` refuses it.
+    What makes this the authority's issue is the object itself: the authority
+    keeps the ones it made, and `execute` compares by identity. There is
+    deliberately no token field — a token can be copied onto another object,
+    and a review did exactly that.
     """
 
-    nonce: str
     target_code: str
     enumerated: MediaCandidate
     record: ArtifactRecord
@@ -222,7 +225,10 @@ class WriteAuthority:
     def __init__(self, session: MediaSession, *, artifact_reader: ArtifactReader) -> None:
         self._session = session
         self._artifact_reader = artifact_reader
-        self._issued: set[str] = set()
+        #: The `Planned` objects this authority made. Membership is tested by
+        #: identity, never by equality: `__eq__` is generated over the fields,
+        #: and a caller who controls the fields controls equality.
+        self._issued: list[Planned] = []
 
     def plan(
         self,
@@ -258,10 +264,7 @@ class WriteAuthority:
         if eligibility is not Eligibility.ELIGIBLE:
             raise WriteRefused(Refusal.TARGET_NOT_ELIGIBLE, eligibility.value)
 
-        nonce = secrets.token_hex(16)
-        self._issued.add(nonce)
-        return Planned(
-            nonce=nonce,
+        planned = Planned(
             target_code=target_code,
             enumerated=enumerated,
             record=record,
@@ -269,6 +272,8 @@ class WriteAuthority:
             artifact_bytes=size,
             artifact_digest=digest,
         )
+        self._issued.append(planned)
+        return planned
 
     def execute(
         self,
@@ -282,11 +287,19 @@ class WriteAuthority:
         """Re-verify, unmount, write, read back. Refuses before writing, never after."""
 
         planned = authorised.confirmed.plan
-        if planned.nonce not in self._issued:
+        for index, issued in enumerate(self._issued):
+            if issued is planned:
+                # Spent on entry: a refusal below must not leave an
+                # authorisation that succeeds on a retry. A substitution is
+                # "refused, not a warning and not a prompt" (contract 7.2), and
+                # an authorisation that survives the refusal is a prompt.
+                del self._issued[index]
+                break
+        else:
             raise WriteRefused(
                 Refusal.AUTHORISATION_NOT_ISSUED,
-                "this authorisation was not issued by this authority; an "
-                "authorisation is minted by plan(), not constructed by a caller",
+                "this authorisation was not issued by this authority; a plan is "
+                "made by plan(), never constructed or copied by a caller",
             )
 
         current = probe.reread(planned.enumerated.identity)
@@ -314,10 +327,6 @@ class WriteAuthority:
                 "the device could not be released; writing under a live mount "
                 "corrupts whatever is using it",
             )
-
-        # Spent before the write, so a crash mid-write cannot leave a reusable
-        # authorisation behind.
-        self._issued.discard(planned.nonce)
 
         written = raw_writer.write(current.identity, planned.artifact_path)
         # The extent verified is the artifact's own length, measured here, not
