@@ -613,6 +613,24 @@ class MediaIdentity:
             )
         object.__setattr__(self, name, value)
 
+    def __delattr__(self, name: str) -> None:
+        """The seal's other door. `__setattr__` alone left it open.
+
+        Every seal in this package gates on `getattr(self, "_sealed", False)`,
+        and `_sealed` is an ordinary slot: `del x._sealed` removes it with
+        plain syntax, no dunder call and nothing for a static scan to see, and
+        every later assignment is then an ordinary one. A review deleted it and
+        wrote a stage, a candidate, a quarantine and a sitting onto a workflow
+        by assignment — reaching `COMMITTED` with a forged candidate and an
+        **empty audit**, past the moving-fields allowlist, the stage graph and
+        the clearance interlock at once. A defence is not deeper than its floor.
+
+        `azazel_boot.media.DeviceIdentity` already refused this; the idiom was
+        in the codebase and in one class of twelve.
+        """
+
+        raise AttributeError("a MediaIdentity is sealed after construction")
+
     def __reduce__(self):
         raise TypeError(
             "a MediaIdentity is not serialisable; the raw value belongs in the "
@@ -676,6 +694,24 @@ class BindingKey:
 
     def __setattr__(self, name: str, value: object) -> None:
         raise AttributeError("a BindingKey is fixed at construction")
+
+    def __delattr__(self, name: str) -> None:
+        """The seal's other door. `__setattr__` alone left it open.
+
+        Every seal in this package gates on `getattr(self, "_sealed", False)`,
+        and `_sealed` is an ordinary slot: `del x._sealed` removes it with
+        plain syntax, no dunder call and nothing for a static scan to see, and
+        every later assignment is then an ordinary one. A review deleted it and
+        wrote a stage, a candidate, a quarantine and a sitting onto a workflow
+        by assignment — reaching `COMMITTED` with a forged candidate and an
+        **empty audit**, past the moving-fields allowlist, the stage graph and
+        the clearance interlock at once. A defence is not deeper than its floor.
+
+        `azazel_boot.media.DeviceIdentity` already refused this; the idiom was
+        in the codebase and in one class of twelve.
+        """
+
+        raise AttributeError("a BindingKey is sealed after construction")
 
     def __reduce__(self):
         raise TypeError("a BindingKey is not serialisable")
@@ -1012,6 +1048,24 @@ class PersistenceSession:
                 "is one-way and the quarantine and binding cannot be replaced"
             )
         object.__setattr__(self, name, value)
+
+    def __delattr__(self, name: str) -> None:
+        """The seal's other door. `__setattr__` alone left it open.
+
+        Every seal in this package gates on `getattr(self, "_sealed", False)`,
+        and `_sealed` is an ordinary slot: `del x._sealed` removes it with
+        plain syntax, no dunder call and nothing for a static scan to see, and
+        every later assignment is then an ordinary one. A review deleted it and
+        wrote a stage, a candidate, a quarantine and a sitting onto a workflow
+        by assignment — reaching `COMMITTED` with a forged candidate and an
+        **empty audit**, past the moving-fields allowlist, the stage graph and
+        the clearance interlock at once. A defence is not deeper than its floor.
+
+        `azazel_boot.media.DeviceIdentity` already refused this; the idiom was
+        in the codebase and in one class of twelve.
+        """
+
+        raise AttributeError("a PersistenceSession is sealed after construction")
 
     def __reduce__(self):
         """Refuse to pickle rather than writing the binding into a file or queue."""

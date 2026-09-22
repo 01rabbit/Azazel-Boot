@@ -125,6 +125,12 @@ class SnapshotDescriptor:
                 raise TypeError(f"{name} must be a positive integer version")
         if type(self.fingerprint) is not str or not self.fingerprint.strip():
             raise TypeError("fingerprint must be a non-empty opaque string")
+        # And **shaped** like one. "Opaque" was a word here and a check
+        # nowhere: this value is the single caller-supplied string the audit
+        # carries, and a review put a capacity figure, a device serial and a
+        # host path through this constructor into an audit entry in which
+        # every other value is redacted.
+        _require_an_opaque_value("fingerprint", self.fingerprint)
 
     def __reduce__(self):
         raise TypeError("a SnapshotDescriptor is not serialisable")
@@ -202,6 +208,24 @@ class CapacityReport:
         object.__setattr__(self, "_available", available)
 
     def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError("a CapacityReport is fixed when it is built")
+
+    def __delattr__(self, name: str) -> None:
+        """The seal's other door. `__setattr__` alone left it open.
+
+        Every seal in this package gates on `getattr(self, "_sealed", False)`,
+        and `_sealed` is an ordinary slot: `del x._sealed` removes it with
+        plain syntax, no dunder call and nothing for a static scan to see, and
+        every later assignment is then an ordinary one. A review deleted it and
+        wrote a stage, a candidate, a quarantine and a sitting onto a workflow
+        by assignment — reaching `COMMITTED` with a forged candidate and an
+        **empty audit**, past the moving-fields allowlist, the stage graph and
+        the clearance interlock at once. A defence is not deeper than its floor.
+
+        `azazel_boot.media.DeviceIdentity` already refused this; the idiom was
+        in the codebase and in one class of twelve.
+        """
+
         raise AttributeError("a CapacityReport is fixed when it is built")
 
     def __reduce__(self):
@@ -289,6 +313,15 @@ class PreflightVerdict:
         point at and a caller holding one cannot read. A value that is not on
         the object cannot be copied off it.
 
+        **What that sentence covers, exactly.** It is about the token and the
+        medium, and it was written as though it covered everything: a verdict
+        does hold `_snapshot`, the `SnapshotDescriptor` its preflight judged,
+        so `verdict._snapshot.fingerprint` reads back. That is deliberate — the
+        tie is what `note_snapshot_written` checks with `is` — and it discloses
+        nothing new, because the descriptor is the caller's own object, passed
+        in by the caller, whose `__repr__` redacts. What is **not** here is a
+        mintedness token and a `Quarantine`; the fingerprint is.
+
         Round eight found that sentence false again, and worse than the token
         was. `_judged` held the **live `Quarantine`**: `fence()`,
         `quarantine_volume()`, the sitting and the medium identity, one
@@ -304,6 +337,24 @@ class PreflightVerdict:
         object.__setattr__(self, "_evaluated", ())
 
     def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError("a PreflightVerdict is fixed when it is minted")
+
+    def __delattr__(self, name: str) -> None:
+        """The seal's other door. `__setattr__` alone left it open.
+
+        Every seal in this package gates on `getattr(self, "_sealed", False)`,
+        and `_sealed` is an ordinary slot: `del x._sealed` removes it with
+        plain syntax, no dunder call and nothing for a static scan to see, and
+        every later assignment is then an ordinary one. A review deleted it and
+        wrote a stage, a candidate, a quarantine and a sitting onto a workflow
+        by assignment — reaching `COMMITTED` with a forged candidate and an
+        **empty audit**, past the moving-fields allowlist, the stage graph and
+        the clearance interlock at once. A defence is not deeper than its floor.
+
+        `azazel_boot.media.DeviceIdentity` already refused this; the idiom was
+        in the codebase and in one class of twelve.
+        """
+
         raise AttributeError("a PreflightVerdict is fixed when it is minted")
 
     def __reduce__(self):
@@ -368,14 +419,34 @@ class PreflightVerdict:
 #: verdict a caller was legitimately handed.
 _MINTED_HERE: _WeakSet = _WeakSet()
 
-#: Which medium each verdict's preflight judged — kept **beside** the verdict
-#: rather than on it. It was a `_judged` slot, and that slot handed the live
-#: `Quarantine` to every holder of a verdict: `fence()`, `quarantine_volume()`,
-#: the sitting and the boot medium identity, one attribute access away, on
-#: refusals as well as passes. The same reasoning `_MINTED_HERE` rests on
-#: applies unchanged — a value that is not on the object cannot be read off it
-#: — and it is weak on the verdict so that the association ends with it.
+#: Which verdicts each medium's preflights judged — kept **beside** the
+#: verdict rather than on it. It was a `_judged` slot, and that slot handed the
+#: live `Quarantine` to every holder of a verdict: `fence()`,
+#: `quarantine_volume()`, the sitting and the boot medium identity, one
+#: attribute access away, on refusals as well as passes. The same reasoning
+#: `_MINTED_HERE` rests on applies unchanged — a value that is not on the
+#: object cannot be read off it.
+#:
+#: **Keyed by the medium, not by the verdict**, which is the other half of the
+#: same lesson. Keyed the other way round, the answer to "which medium?" was a
+#: `Quarantine` coming *out* of this module's own index — and the static walk
+#: that holds every quarantine here to four reads finds them by the name they
+#: travel under, so a `Quarantine` bound to a local from an index was outside
+#: it. A review harvested the sitting id and the boot medium identity out of
+#: this module through exactly that, with the whole suite green. Inverted,
+#: nothing that comes out of either index is a medium: this one answers with
+#: verdicts and the other with values.
+#:
+#: Weak on both sides: the medium is the key, so remembering something about it
+#: does not keep it alive, and the verdicts are held in a `WeakSet`.
 _JUDGED_BY: _WeakKeyDictionary = _WeakKeyDictionary()
+
+#: The verdicts `_mint` produced, which is to say the verdicts that judged some
+#: medium. `_MINTED_HERE` is the careless-caller list a caller can add to;
+#: this one is written only where a real `Quarantine` was supplied, so "this
+#: verdict judged no medium at all" stays answerable without asking the index
+#: above, which would mean walking media.
+_JUDGED_SOMETHING: _WeakSet = _WeakSet()
 
 #: And the four values the snapshot had **at the moment it was judged**.
 #: `note_snapshot_written` re-derived them from the descriptor it was handed,
@@ -390,25 +461,53 @@ _JUDGED_FIELDS: _WeakKeyDictionary = _WeakKeyDictionary()
 #: and recorded four writes for one judged snapshot — with the per-ledger list
 #: below satisfied every time, because each ledger was new.
 #:
-#: `(the medium, the snapshot's four values)` for every write recorded in this
-#: process. It was a `WeakSet` of descriptors, and both halves of that were
-#: wrong: dropping the last reference evaporated the entry, so a review
-#: recorded five writes for one snapshot value through the public API alone —
-#: and an entry for one sitting refused an unrelated later sitting's own write,
-#: because the key said nothing about whose medium it was.
+#: The snapshot values a write has been recorded for, **per medium**. It was a
+#: `WeakSet` of descriptors, and both halves of that were wrong: dropping the
+#: last reference evaporated the entry, so a review recorded five writes for
+#: one snapshot value through the public API alone — and an entry for one
+#: sitting refused an unrelated later sitting's own write, because the key said
+#: nothing about whose medium it was.
 #:
 #: The sitting id was the first attempt at "whose medium", and it is not one: a
 #: sitting has one `PersistenceSession` and can hold more than one quarantined
 #: medium, so two media in one boot collided and a genuine second write was
 #: refused with "a second write that did not happen" — the exact failure the
 #: paragraph above diagnoses, one level up. The key is the `Quarantine`
-#: **object**, compared with `is`, because that is what "this medium, in this
+#: **object**, compared by identity, because that is what "this medium, in this
 #: sitting" is.
 #:
-#: Strong, so "once" is a property of this module rather than of the garbage
-#: collector. The residue is one short tuple of immutable values and one
-#: reference per write actually recorded in a boot.
-_SNAPSHOTS_RECORDED: list[tuple[Quarantine, tuple[object, ...]]] = []
+#: It was a list of `(medium, values)` pairs, which meant iterating it bound a
+#: live `Quarantine` to a loop variable — a medium coming *out* of this
+#: module's own bookkeeping, where the walk that bounds every quarantine here
+#: cannot see it. Keyed by the medium instead, what comes out is a list of
+#: value tuples and nothing else.
+#:
+#: Weak, and that is not the garbage-collector dependence the earlier note
+#: rejected: the key is an object identity, so a medium nobody holds any more
+#: is a medium that cannot be presented again. What the collector takes is an
+#: answer to a question nobody can ask. What it leaves is that this module
+#: holds no medium alive, anywhere, for the life of the process.
+_SNAPSHOTS_RECORDED: _WeakKeyDictionary = _WeakKeyDictionary()
+
+#: The checks, in the order they are declared, **taken once at import**. The
+#: ledger's completeness rule used to build this fresh on every call, out of
+#: `tuple(PreflightCheck)`, on the argument that "the enum cannot be shortened
+#: by an assignment". That is false: `PreflightCheck._member_names_ = [...]` is
+#: accepted, and `tuple(PreflightCheck)` then returns whatever was left — so a
+#: review shortened the enum *and* `PREFLIGHT_ORDER` with two assignments and
+#: authorised a migration over a snapshot whose integrity had failed, to an
+#: unsupported schema, with no room and no binding, having asked one check of
+#: ten. Both operands resolved out of the same namespace; the guard had moved
+#: from one rebindable global to another.
+#:
+#: A tuple built at import is not shortened by a later rebind of the enum, and
+#: the two are compared on every use, so a rebind is **detected** rather than
+#: obeyed. This is not a capability boundary — the constant is a module global
+#: like any other, and this module says the same thing about
+#: `object.__setattr__`. What it buys is that the attack now needs two
+#: coordinated rebinds instead of one, and that the shortening leaves a
+#: refusal rather than a permission.
+_EVERY_CHECK = tuple(PreflightCheck)
 
 #: The order the gates are asked in, named once so that it is a contract rather
 #: than the order the lines happen to sit in. A review permuted eight adjacent
@@ -548,6 +647,34 @@ def _require_an_exact_str(name: str, value: object) -> None:
         raise TypeError(f"{name} must be a str exactly; a subclass may answer for itself")
 
 
+def _require_an_opaque_value(name: str, value: str) -> None:
+    """A fingerprint is opaque, and "opaque" was a word rather than a check.
+
+    `SnapshotAuditEntry.fingerprint` is the one caller-supplied string this
+    module writes into an audit — the object a log actually holds — and the
+    confidentiality claim around it is about the *fields* the entry has. A
+    review pointed out that the field's **contents** are whatever the caller
+    chose, and put `"capacity_available=17179869184 medium=usb-SN-AA11BB22
+    host=/dev/nvme0n1p3"` through `_require_an_exact_str` and into an audit
+    entry, where every other value is redacted.
+
+    This narrows rather than guarantees, and the difference is the point: a
+    path, a rendered `key=value` blob and a multi-line value are refused, and
+    a caller who puts a device serial in an opaque-looking token still can.
+    What a fingerprint means is the caller's to keep; what it may *look* like
+    is checkable, and an unbounded string in a log was not.
+    """
+
+    if len(value) > 128:
+        raise TypeError(f"{name} must be an opaque token, not a rendered record")
+    for forbidden in (" ", "\t", "\n", "\r", "/", "\\", "="):
+        if forbidden in value:
+            raise TypeError(
+                f"{name} must be an opaque token; a path, a rendered field or "
+                "a line of text is not one"
+            )
+
+
 def _require_real_observations(observations: object) -> None:
     """The one input to the gates that nothing pinned.
 
@@ -621,9 +748,18 @@ def _remember_the_medium(verdict: PreflightVerdict, quarantine: Quarantine) -> N
     reads and a short list of places it may travel to unread. Putting the
     write behind a name puts it on that list deliberately rather than as a
     shape the walk happens not to look at.
+
+    The medium is the **key**. Nothing this function or its readers hand back
+    is a `Quarantine`, so no later line can bind one to a local the walk does
+    not look at.
     """
 
-    _JUDGED_BY[verdict] = quarantine
+    judged = _JUDGED_BY.get(quarantine)
+    if judged is None:
+        judged = _WeakSet()
+        _JUDGED_BY[quarantine] = judged
+    judged.add(verdict)
+    _JUDGED_SOMETHING.add(verdict)
 
 
 def _a_medium_was_judged(verdict: PreflightVerdict) -> bool:
@@ -635,38 +771,48 @@ def _a_medium_was_judged(verdict: PreflightVerdict) -> bool:
     telling an operator "the medium moved since the preflight" about a call
     that never had a preflight is the misclassification this module refuses to
     make elsewhere.
+
+    Asked of its own list rather than of `_JUDGED_BY`, because asking that one
+    would mean walking media — which is the shape this module has just stopped
+    doing.
     """
 
-    return _JUDGED_BY.get(verdict) is not None
+    return verdict in _JUDGED_SOMETHING
 
 
 def _medium_was_judged(verdict: PreflightVerdict, quarantine: Quarantine) -> bool:
     """Whether this verdict's preflight judged **this** medium. By identity.
 
     Not "is not a different one": a verdict with no medium recorded answers
-    `False` here, where the `is not None` this replaces answered "fine".
+    `False` here, where the `is not None` this replaces answered "fine". The
+    identity is the dictionary's own key lookup, so nothing here holds a medium
+    or hands one back.
     """
 
-    return _JUDGED_BY.get(verdict) is quarantine
+    judged = _JUDGED_BY.get(quarantine)
+    return judged is not None and verdict in judged
 
 
 def _remember_a_write(quarantine: Quarantine, fields: tuple[object, ...]) -> None:
     """Record that a write was recorded over this medium, for this value."""
 
-    _SNAPSHOTS_RECORDED.append((quarantine, fields))
+    written = _SNAPSHOTS_RECORDED.get(quarantine)
+    if written is None:
+        written = []
+        _SNAPSHOTS_RECORDED[quarantine] = written
+    written.append(fields)
 
 
 def _a_write_is_recorded(quarantine: Quarantine, fields: tuple[object, ...]) -> bool:
     """Whether **this** medium already has a write recorded for these values.
 
-    `is` on the medium, `==` on the values: two media in one sitting are two
-    media, and the same snapshot value written over each is two writes.
+    The medium is the key, so its identity is the lookup; the values are
+    compared by equality, because two media in one sitting are two media and
+    the same snapshot value written over each is two writes.
     """
 
-    for medium, written in _SNAPSHOTS_RECORDED:
-        if medium is quarantine and written == fields:
-            return True
-    return False
+    written = _SNAPSHOTS_RECORDED.get(quarantine)
+    return written is not None and fields in written
 
 
 def _raise_already_spent() -> None:
@@ -1072,6 +1218,7 @@ class SnapshotAuditEntry:
             _require_an_exact_int("schema_version", self.schema_version)
         if self.fingerprint is not None:
             _require_an_exact_str("fingerprint", self.fingerprint)
+            _require_an_opaque_value("fingerprint", self.fingerprint)
 
     def __reduce__(self):
         raise TypeError("a SnapshotAuditEntry is not serialisable")
@@ -1145,6 +1292,24 @@ class RecoveryCandidate:
             "a RecoveryCandidate is fixed when it is minted; what it says was "
             "restored cannot be edited afterwards"
         )
+
+    def __delattr__(self, name: str) -> None:
+        """The seal's other door. `__setattr__` alone left it open.
+
+        Every seal in this package gates on `getattr(self, "_sealed", False)`,
+        and `_sealed` is an ordinary slot: `del x._sealed` removes it with
+        plain syntax, no dunder call and nothing for a static scan to see, and
+        every later assignment is then an ordinary one. A review deleted it and
+        wrote a stage, a candidate, a quarantine and a sitting onto a workflow
+        by assignment — reaching `COMMITTED` with a forged candidate and an
+        **empty audit**, past the moving-fields allowlist, the stage graph and
+        the clearance interlock at once. A defence is not deeper than its floor.
+
+        `azazel_boot.media.DeviceIdentity` already refused this; the idiom was
+        in the codebase and in one class of twelve.
+        """
+
+        raise AttributeError("a RecoveryCandidate is fixed when it is minted")
 
     def __reduce__(self):
         raise TypeError(
@@ -1232,6 +1397,24 @@ class RecoveryWorkflow:
                 "binding and the sitting cannot be replaced"
             )
         object.__setattr__(self, name, value)
+
+    def __delattr__(self, name: str) -> None:
+        """The seal's other door. `__setattr__` alone left it open.
+
+        Every seal in this package gates on `getattr(self, "_sealed", False)`,
+        and `_sealed` is an ordinary slot: `del x._sealed` removes it with
+        plain syntax, no dunder call and nothing for a static scan to see, and
+        every later assignment is then an ordinary one. A review deleted it and
+        wrote a stage, a candidate, a quarantine and a sitting onto a workflow
+        by assignment — reaching `COMMITTED` with a forged candidate and an
+        **empty audit**, past the moving-fields allowlist, the stage graph and
+        the clearance interlock at once. A defence is not deeper than its floor.
+
+        `azazel_boot.media.DeviceIdentity` already refused this; the idiom was
+        in the codebase and in one class of twelve.
+        """
+
+        raise AttributeError("a RecoveryWorkflow is sealed after construction")
 
     def __reduce__(self):
         raise TypeError("a RecoveryWorkflow is not serialisable")
@@ -1696,6 +1879,19 @@ class RecoveryWorkflow:
         # D8 gate 4, here rather than in `commit`, so that reaching this
         # function is reaching all of D8. `None` means "this stage does not ask
         # it"; `False` is an operator who declined.
+        #
+        # **And it is a `bool`.** Round 8 pinned the snapshot, the
+        # observations, the sitting and `media_binding_holds` inside this
+        # function precisely because `commit` is not the only way in — and
+        # left `confirmed` checked in `commit` alone. A review called this
+        # method directly with `confirmed="declined"`, which is truthy, took
+        # the **full-D8** clearance because `confirmed is not None`, and
+        # reached `COMMITTED` with a forged candidate and no
+        # `OPERATOR_CONFIRMATION` refusal anywhere. `"declined"` is this
+        # module's own worked example, in `_require_an_actual_bool`'s
+        # docstring, of the bug that function exists to remove.
+        if confirmed is not None:
+            _require_an_actual_bool("confirmed", confirmed)
         if confirmed is not None and not confirmed:
             self._refuse_gate(RecoveryGate.OPERATOR_CONFIRMATION)
 
@@ -1730,6 +1926,30 @@ class RecoveryWorkflow:
             self._refuse_gate(RecoveryGate.MEDIUM_FENCED)
 
     def _refuse_gate(self, gate: RecoveryGate) -> None:
+        """Refuse a gate — in this module's vocabulary, whatever the stage.
+
+        `attempt()` is caller code called mid-gate, and a review interrupted
+        the workflow from inside it. Round seven noticed that and re-checked
+        the stage in `commit`, **after** `_require_the_gates` had returned —
+        so the one row it drove (an operator who confirms, over an unfenced
+        medium) reached that re-check, and every other row reached this
+        function first: an operator who stops mid-prompt and then declines, or
+        stops and has the medium pulled, hit `_sealed_assign`'s terminal rule
+        and got an `AttributeError`. That is outside `RecoveryRefused` and
+        outside `Refused`, so the single `except` this package promises did not
+        catch it, and the unhandled traceback rendered `commit`'s own frame —
+        the acquisition object, the sitting and the descriptor included.
+
+        A guard that fixes one row of the input space is a guard over one row.
+        This is the same fix at the place every row passes through.
+        """
+
+        if self._stage in TERMINAL_STAGES:
+            self._refuse(
+                Refusal.WORKFLOW_ALREADY_FINISHED,
+                "this workflow has ended; a further attempt is a new workflow "
+                "that runs every gate again",
+            )
         self._sealed_assign("_stage", RecoveryStage.REFUSED)
         self._record(SnapshotAuditEvent.RECOVERY_REFUSED, gate=gate)
         _raise_gate_refused()
@@ -1917,6 +2137,24 @@ class MigrationLedger:
             raise AttributeError("a MigrationLedger is sealed after construction")
         object.__setattr__(self, name, value)
 
+    def __delattr__(self, name: str) -> None:
+        """The seal's other door. `__setattr__` alone left it open.
+
+        Every seal in this package gates on `getattr(self, "_sealed", False)`,
+        and `_sealed` is an ordinary slot: `del x._sealed` removes it with
+        plain syntax, no dunder call and nothing for a static scan to see, and
+        every later assignment is then an ordinary one. A review deleted it and
+        wrote a stage, a candidate, a quarantine and a sitting onto a workflow
+        by assignment — reaching `COMMITTED` with a forged candidate and an
+        **empty audit**, past the moving-fields allowlist, the stage graph and
+        the clearance interlock at once. A defence is not deeper than its floor.
+
+        `azazel_boot.media.DeviceIdentity` already refused this; the idiom was
+        in the codebase and in one class of twelve.
+        """
+
+        raise AttributeError("a MigrationLedger is sealed after construction")
+
     def __reduce__(self):
         raise TypeError("a MigrationLedger is not serialisable")
 
@@ -1993,7 +2231,17 @@ class MigrationLedger:
         # is the enum's own order, from the start, for as far as it got. A
         # pass got all the way; a refusal stopped at the check it names.
         asked = verdict.evaluated
-        canonical = tuple(PreflightCheck)
+        canonical = _EVERY_CHECK
+        # **And the vocabulary itself has not moved under us.** An enum whose
+        # members were removed at runtime is not the vocabulary this build was
+        # written against, and answering a completeness question from a
+        # shortened one is answering the attacker's question.
+        if tuple(PreflightCheck) != canonical:
+            raise RecoveryRefused(
+                Refusal.VERDICT_DID_NOT_ASK_EVERY_CHECK,
+                "the set of checks has changed inside this process; a verdict "
+                "is complete against the checks this build knows",
+            )
         prefix: list[PreflightCheck] = []
         for check in canonical:
             if len(prefix) < len(asked):

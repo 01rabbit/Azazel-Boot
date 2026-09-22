@@ -361,6 +361,12 @@ class Quarantine:
         "_fenced",
         "_volume_quarantined",
         "_sealed",
+        # So that another module can remember something **about** a medium
+        # without holding it. `azazel_boot.snapshot` keeps two indexes keyed by
+        # this object; keyed weakly, nothing it remembers keeps a quarantine
+        # alive and nothing it remembers hands one back. A weak reference is
+        # not a capability: making one needs the object already.
+        "__weakref__",
     )
 
     def __init__(self, session_id: str, boot_medium_identity: str) -> None:
@@ -419,6 +425,24 @@ class Quarantine:
                 "docstring"
             )
         object.__setattr__(self, name, value)
+
+    def __delattr__(self, name: str) -> None:
+        """The seal's other door. `__setattr__` alone left it open.
+
+        Every seal in this package gates on `getattr(self, "_sealed", False)`,
+        and `_sealed` is an ordinary slot: `del x._sealed` removes it with
+        plain syntax, no dunder call and nothing for a static scan to see, and
+        every later assignment is then an ordinary one. A review deleted it and
+        wrote a stage, a candidate, a quarantine and a sitting onto a workflow
+        by assignment — reaching `COMMITTED` with a forged candidate and an
+        **empty audit**, past the moving-fields allowlist, the stage graph and
+        the clearance interlock at once. A defence is not deeper than its floor.
+
+        `azazel_boot.media.DeviceIdentity` already refused this; the idiom was
+        in the codebase and in one class of twelve.
+        """
+
+        raise AttributeError("a Quarantine is sealed after construction")
 
     def __reduce__(self):
         """Refuse to pickle or copy, rather than handing over the session.

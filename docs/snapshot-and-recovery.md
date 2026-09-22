@@ -481,6 +481,21 @@ recovery while the candidate still applies. That is the same reach as
 `object.__setattr__`, and the same answer: careless-caller defence, not a
 capability boundary.
 
+It extends to this module's own globals. `_SNAPSHOTS_RECORDED` is what makes a
+write recordable once, and clearing it makes one recordable again — a container
+write by anything holding the module, no hook involved. The seals have one more
+door than they used to: `__delattr__` refuses `del x._sealed`, which was
+cheaper than everything built on top of it and let a plain assignment write a
+stage, a candidate, a quarantine and a sitting onto a workflow, reaching
+`COMMITTED` with a forged candidate and an empty audit.
+
+**"Once" counts judged snapshots, not write operations.** `may_migrate` is a
+question and answers it as often as it is asked; `note_snapshot_written`
+records once per `(medium, judged values)`. A caller that performs several
+writes under one verdict gets one record, because one preflight judged one
+snapshot — the contract is one write per judged snapshot, and this module
+cannot see how many the caller actually made.
+
 The refusal raised from `_raise_gate_refused` holds **nothing** in its frame —
 no gate, no snapshot, no binding, no sitting. A stage asked for another
 sitting is now **terminal and audited** (`recovery_foreign_sitting`) on the

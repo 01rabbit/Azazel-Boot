@@ -26,6 +26,7 @@ import pickle
 import subprocess
 import sys
 import textwrap
+import weakref as _weakref
 from collections import Counter
 from pathlib import Path
 
@@ -3641,11 +3642,39 @@ def _whole_quarantine_state(rule: Quarantine) -> dict[str, object]:
 
     state: dict[str, object] = {}
     for name in Quarantine.__slots__:
+        # `__weakref__` is not a field: it is CPython's own list of weak
+        # references to this object, and it is **not writable**, by plain
+        # assignment or by `object.__setattr__` — asserted below rather than
+        # assumed, because excluding a slot from this comparison is exactly the
+        # move that made the earlier `_flags` version worthless. It changes
+        # from `None` the moment anything takes a weak reference, which
+        # `azazel_boot.snapshot` now does to remember something *about* a
+        # medium without holding one, and a weak reference grants nothing: you
+        # need the object to make one.
+        if name == "__weakref__":
+            continue
         try:
             state[name] = copy.deepcopy(object.__getattribute__(rule, name))
         except AttributeError:
             state[name] = "<deleted>"
     return state
+
+
+def _the_weakref_slot_is_not_a_field(rule: Quarantine) -> bool:
+    """Why `_whole_quarantine_state` may skip it.
+
+    A slot excluded from the state comparison is a slot an attacker may use,
+    unless it cannot hold anything an attacker chose. This one cannot: CPython
+    makes `__weakref__` read-only on both paths.
+    """
+
+    for write in (setattr, object.__setattr__):
+        try:
+            write(rule, "__weakref__", "planted")
+        except AttributeError:
+            continue
+        return False
+    return True
 
 
 def _quarantine_defences_intact(rule: Quarantine) -> tuple[object, ...]:
@@ -3966,6 +3995,10 @@ def test_no_input_to_this_module_changes_anything_about_the_quarantine(
             f"room={room} reports_hold={reports_hold}"
         )
         assert _quarantine_defences_intact(rule) == (True,) * 7
+        # The one slot `_whole_quarantine_state` skips, asked rather than
+        # assumed: a slot excluded from a state comparison is a slot an
+        # attacker may use, unless it cannot hold anything an attacker chose.
+        assert _the_weakref_slot_is_not_a_field(rule) is True
 
     assert drives == 3 * 2 * 3 * 2 * 2 * 2 * 2 * 2 * 2 * 2 * len(AttemptOutcome)
     # **And it reached the thing it guards.** The drive was silently dead on
@@ -6445,6 +6478,46 @@ def test_no_parameter_that_holds_a_quarantine_is_spelled_anything_else() -> None
     assert len(holders) >= 8, holders
     assert not offenders, offenders
 
+    # **And the spelling of the type, too.** The rule matches the substring
+    # `"Quarantine"` in the rendered annotation, so `_Q = Quarantine` at module
+    # level and `def _note(medium: _Q, *rest: _Q, spare: _Q | None = None)`
+    # sits outside it — a review harvested the sitting id and the boot medium
+    # identity through exactly that, with the whole suite green, and the alias
+    # itself was invisible to the public-name allowlist because that one
+    # filters out every name beginning with an underscore. A guard keyed on a
+    # spelling is one rename wide, and this was the rename.
+    assert not [
+        target.id
+        for node in TREE.body
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Name)
+        for target in node.targets
+        if isinstance(target, ast.Name)
+    ], "this module binds no module-level alias of an imported name"
+
+    # **And every parameter is annotated**, so an unannotated one cannot be a
+    # `Quarantine` the rule above never examines. The rule reads annotations;
+    # a parameter without one is a parameter it does not see.
+    unannotated: list[tuple[str, str]] = []
+    for node in ast.walk(TREE):
+        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            continue
+        spec = node.args
+        for argument in (
+            *spec.posonlyargs,
+            *spec.args,
+            *spec.kwonlyargs,
+            spec.vararg,
+            spec.kwarg,
+        ):
+            if argument is not None and argument.annotation is None and argument.arg != "self":
+                unannotated.append((node.name, argument.arg))
+    assert not unannotated, unannotated
+
+    # And no `lambda`: `ast.Lambda` carries `args` and is never a `FunctionDef`,
+    # so its parameters are outside every rule above. The module has none, and
+    # the way to keep that true is to say so.
+    assert not [node for node in ast.walk(TREE) if isinstance(node, ast.Lambda)]
+
 
 def test_the_gates_check_their_own_inputs_when_they_are_reached_directly(
     observations,
@@ -6750,7 +6823,13 @@ def test_the_module_indexes_are_what_this_file_says_they_are() -> None:
 
     for name in _MODULE_INDEXES:
         assert hasattr(module, name), name
-    assert isinstance(module._SNAPSHOTS_RECORDED, list)
+    # **Both are keyed by the medium**, which is what makes "nothing that
+    # comes out of an index is a `Quarantine`" true. A review harvested the
+    # sitting id and the boot medium identity out of this module through a
+    # `for medium, written in …` over the record, which bound a live
+    # `Quarantine` to a local — and the walk that bounds every quarantine here
+    # finds them by the name they travel under.
+    assert type(module._SNAPSHOTS_RECORDED).__name__ == "WeakKeyDictionary"
     assert type(module._JUDGED_BY).__name__ == "WeakKeyDictionary"
 
 
@@ -7022,3 +7101,203 @@ def test_a_candidate_is_held_only_by_a_workflow_that_committed(observations) -> 
     assert flow.stage is RecoveryStage.TRIAL_OPEN
     assert flow.holds(minted) is False
     assert candidate_applies_to(flow, minted) is False
+
+
+def _media_reachable_from(root: object, *, indexes: set[int], depth: int = 6) -> list[str]:
+    """Every `Quarantine` reachable from `root`, with the path that found it.
+
+    Deliberately not "every object": it walks the shapes module state actually
+    takes — plain containers, the fields of objects this package defines, and
+    the closures and defaults of its functions. A medium stashed somewhere this
+    does not walk is a limit, and the limit is named rather than assumed away.
+    """
+
+    found: list[str] = []
+    seen: set[int] = set()
+
+    def walk(value: object, path: str, left: int) -> None:
+        if left <= 0 or id(value) in seen:
+            return
+        seen.add(id(value))
+        if isinstance(value, Quarantine):
+            found.append(path)
+            return
+        if isinstance(value, dict | _weakref.WeakKeyDictionary):
+            # **By location, not by identity.** Exempting the medium *objects*
+            # the indexes hold would exempt them everywhere, and the review's
+            # harvester harvested exactly the media the indexes hold — so the
+            # one permitted place is a key of one of these two dictionaries,
+            # and nowhere else the same object appears is permitted by it.
+            for key in list(value.keys()):
+                if id(value) not in indexes:
+                    walk(key, f"{path}.<key>", left - 1)
+                walk(value[key], f"{path}[{type(key).__name__}]", left - 1)
+            return
+        if isinstance(value, list | tuple | set | frozenset | _weakref.WeakSet):
+            for index, item in enumerate(list(value)):
+                walk(item, f"{path}[{index}]", left - 1)
+            return
+        if inspect.isfunction(value):
+            for cell in value.__closure__ or ():
+                walk(cell.cell_contents, f"{path}.<closure>", left - 1)
+            for default in value.__defaults__ or ():
+                walk(default, f"{path}.<default>", left - 1)
+            return
+        if type(value).__module__.startswith("azazel_boot"):
+            for name in getattr(type(value), "__slots__", ()):
+                if name == "__weakref__":
+                    continue
+                walk(getattr(value, name, None), f"{path}.{name}", left - 1)
+            for name, held in vars(value).items() if hasattr(value, "__dict__") else ():
+                walk(held, f"{path}.{name}", left - 1)
+
+    walk(root, "module", depth)
+    return found
+
+
+def test_no_module_level_state_in_this_module_holds_a_medium(observations) -> None:
+    """R9: the travel walk finds a quarantine by the name it travels under.
+
+    A review added a module-level list and appended `(quarantine, session_id,
+    boot_medium_identity)` to it from inside this module's own index helpers,
+    where a medium arrives as a **local** — a parameter of nothing and an
+    annotation of nothing, so neither
+    `test_this_module_never_calls_anything_that_would_change_a_quarantine` nor
+    `test_no_parameter_that_holds_a_quarantine_is_spelled_anything_else` looked
+    at it. The whole suite stayed green, and the live `Quarantine`, the sitting
+    id and the boot medium identity were readable from `azazel_boot.snapshot`
+    by anything in the process. The module's own bookkeeping was the leak.
+
+    A spelling rule cannot see a local, so this asks the running module a
+    different question: after a full drive, is a medium reachable from this
+    module's globals at all? The two indexes are keyed by the medium and hold
+    it **weakly**, which is named here as the one permitted place — and a weak
+    key hands nothing back, because reaching it needs the object already.
+    """
+
+    from azazel_boot import snapshot as module
+
+    rule = a_quarantine(quarantined=False)
+    snapshot = descriptor(fingerprint="snapshot-fingerprint-reachability")
+    verdict = preflight(
+        rule,
+        snapshot=snapshot,
+        capacity=capacity(),
+        current_schema=1,
+        target_schema=2,
+        binding_holds=True,
+        generation_holds=True,
+        image_digest_holds=True,
+    )
+    ledger = MigrationLedger()
+    assert ledger.may_migrate(verdict, quarantine=rule) is True
+    ledger.note_snapshot_written(verdict, snapshot, quarantine=rule)
+
+    recovered = workflow(observations)
+    run_to_commit(recovered, observations, snapshot=descriptor(fingerprint="snapshot-reach-2"))
+
+    # The one permitted place: a weak key of either index. Both are keyed by
+    # the medium, so this is where a medium legitimately appears.
+    indexes = {id(module._JUDGED_BY), id(module._SNAPSHOTS_RECORDED)}
+    assert list(module._JUDGED_BY.keys()), "the drive was expected to key an index by a medium"
+    assert list(module._SNAPSHOTS_RECORDED.keys()), "the drive was expected to record a write"
+
+    escaped = _media_reachable_from(vars(module), indexes=indexes)
+    assert not escaped, escaped
+
+    # And the guard is not vacuous. Both shapes the review could take: a
+    # module-level container holding a medium, and the **same** medium an
+    # index legitimately holds, harvested elsewhere — the second is why the
+    # exemption is a place rather than an object.
+    module._a_harvester_for_this_test = [rule]
+    try:
+        assert _media_reachable_from(vars(module), indexes=indexes)
+    finally:
+        del module._a_harvester_for_this_test
+
+    module._a_harvester_for_this_test = [a_quarantine()]
+    try:
+        assert _media_reachable_from(vars(module), indexes=indexes)
+    finally:
+        del module._a_harvester_for_this_test
+
+
+def test_a_fingerprint_is_an_opaque_token_and_not_a_rendered_record() -> None:
+    """R9: the audit's one caller-supplied string was type-pinned, not shaped.
+
+    `SnapshotAuditEntry.fingerprint` is the object a log actually holds, and
+    the confidentiality claim around it is about which **fields** the entry
+    has. A review put a rendered record — a capacity figure, a device serial
+    and a host path — through `_require_an_exact_str` and into an audit entry,
+    where every other value is redacted.
+
+    This narrows and does not guarantee: a caller who hides a serial inside an
+    opaque-looking token still can, and the docstring says so. What it removes
+    is the shape that turns one field into a log line.
+    """
+
+    for rejected in (
+        "capacity_available=17179869184 medium=usb-SN-AA11BB22 host=/dev/nvme0n1p3",
+        "/dev/nvme0n1p3",
+        "snapshot fingerprint",
+        "two\nlines",
+        "a" * 129,
+    ):
+        with pytest.raises(TypeError, match="opaque"):
+            descriptor(fingerprint=rejected)
+
+    # And an actually opaque one is accepted, so this is not refusing
+    # everything.
+    assert descriptor(fingerprint="b3c1d9e07f2a4856").fingerprint == "b3c1d9e07f2a4856"
+
+
+def test_the_seals_other_door_is_shut_on_every_class_that_has_one() -> None:
+    """R9: `del x._sealed` cost less than everything built on top of it.
+
+    Every seal in this package gates on `getattr(self, "_sealed", False)`, and
+    `_sealed` is an ordinary slot. A review deleted it with plain syntax — no
+    dunder call, nothing for a static scan to see — and then wrote a stage, a
+    candidate, a quarantine and a sitting onto a workflow **by assignment**,
+    reaching `COMMITTED` with a forged candidate and an empty audit, past the
+    moving-fields allowlist, the stage graph and the clearance interlock at
+    once. The same `del` turned the volume quarantine off on a `Quarantine`
+    and forged a `MigrationLedger`'s audit.
+
+    Derived from the source rather than listed, because a thirteenth sealed
+    class should inherit this on the day it is written.
+    """
+
+    import azazel_boot
+
+    package = Path(azazel_boot.__file__).parent
+    sealed: list[tuple[str, str]] = []
+    for path in sorted(package.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            defined = {body.name for body in node.body if isinstance(body, ast.FunctionDef)}
+            if "__setattr__" in defined:
+                sealed.append((path.name, node.name, "__delattr__" in defined))
+
+    assert len(sealed) >= 12, sealed
+    assert not [(name, cls) for name, cls, has in sealed if not has]
+
+    # And it refuses, rather than merely existing.
+    rule = a_quarantine()
+    flow = RecoveryWorkflow(
+        rule,
+        SessionBinding(host_fingerprint="0" * 64, session_id=SESSION),
+        session_id=SESSION,
+    )
+    for target in (rule, flow, MigrationLedger()):
+        with pytest.raises(AttributeError):
+            del target._sealed
+        assert object.__getattribute__(target, "_sealed") is True
+
+    # The route the seal existed to stop, still stopped: the `del` refused, so
+    # the plain assignment behind it never happens.
+    with pytest.raises(AttributeError):
+        flow._stage = RecoveryStage.COMMITTED
+    assert flow.stage is RecoveryStage.NOT_STARTED
+    assert rule.volume_is_quarantined is True
