@@ -192,7 +192,7 @@ class PreflightVerdict:
     `verdict_was_minted_here` is what a consumer asks.
     """
 
-    __slots__ = ("_refused_by", "_token")
+    __slots__ = ("_refused_by", "_token", "_snapshot")
 
     def __init__(self, refused_by: PreflightCheck | None) -> None:
         """No `token` parameter. It used to take one, and that was the hole.
@@ -210,6 +210,7 @@ class PreflightVerdict:
 
         object.__setattr__(self, "_refused_by", refused_by)
         object.__setattr__(self, "_token", None)
+        object.__setattr__(self, "_snapshot", None)
 
     def __setattr__(self, name: str, value: object) -> None:
         raise AttributeError("a PreflightVerdict is fixed when it is minted")
@@ -239,17 +240,86 @@ class PreflightVerdict:
         return ()
 
 
-#: The token `_mint` stamps into the verdicts this module produces. A
-#: module-private object with no constructor a caller can reach: identity is
+#: The token `_mint` stamps into the verdicts this module produces. Identity is
 #: the whole of it.
+#:
+#: **This is careless-caller defence, not a capability boundary.** An earlier
+#: comment here said "no constructor a caller can reach", which claimed more
+#: than Python can give: `_mint` and this object are both importable, and
+#: `object.__setattr__(PreflightVerdict(None), "_token", _MINTED_HERE)`
+#: produces a verdict `verdict_was_minted_here` accepts. `azazel_boot.quarantine`
+#: states the same limit about its own seal, in the same words, and the honest
+#: sentence is that one.
 _MINTED_HERE = object()
 
 
-def _mint(refused_by: PreflightCheck | None) -> PreflightVerdict:
-    """Build a verdict and stamp it. The only thing that writes `_token`."""
+def _require_a_real_quarantine(quarantine: object) -> None:
+    """`type(...) is`, not `isinstance`.
+
+    `isinstance` was the fix for a two-attribute stand-in, and a re-review
+    then subclassed `Quarantine` and overrode `is_fenced` and
+    `volume_is_quarantined` as properties: the object genuinely *was* fenced
+    (`Quarantine.is_fenced.fget(q)` answered True) and the whole workflow ran
+    to a minted candidate over it. The same stand-in, wearing the class the
+    `isinstance` was added to demand.
+
+    `PreflightVerdict` and `RecoveryCandidate` are already checked this way.
+    The quarantine is the input the two gates before D8's four read, so it gets
+    the same treatment.
+    """
+
+    if type(quarantine) is not Quarantine:
+        raise TypeError(
+            "quarantine must be a Quarantine exactly; a stand-in and a "
+            "subclass that overrides its answers are both refused"
+        )
+
+
+def _require_a_real_snapshot(snapshot: object) -> None:
+    """The workflow never checked this, and the pin depended on it.
+
+    A stand-in with three class attributes satisfied both integrity gates, and
+    an `__eq__` returning `True` walked through the substitution check this
+    module calls "the substitution this whole design exists to notice". So a
+    workflow started on a real descriptor could be trialled and committed on a
+    substitute, with no `RECOVERY_SNAPSHOT_SUBSTITUTED` recorded.
+    """
+
+    if type(snapshot) is not SnapshotDescriptor:
+        raise TypeError(
+            "snapshot must be a SnapshotDescriptor exactly; a stand-in whose "
+            "__eq__ decides the substitution check is not one"
+        )
+
+
+def _require_an_actual_bool(name: str, value: object) -> None:
+    """D8's two operator gates took any truthy object.
+
+    `preflight` checks its three flags with the comment "a truthy object is not
+    a check", and the two flags the whole operator-started doctrine rests on
+    were not checked at all: a recovery reached `COMMITTED` and minted a
+    candidate with `started_by_operator="no"` and `confirmed="declined"`.
+    """
+
+    if not isinstance(value, bool):
+        raise TypeError(f"{name} must be a bool; a truthy object is not a check")
+
+
+def _mint(
+    refused_by: PreflightCheck | None, snapshot: SnapshotDescriptor | None = None
+) -> PreflightVerdict:
+    """Build a verdict, stamp it, and record **which snapshot it judged**.
+
+    The verdict named no snapshot, so `note_snapshot_written` could only
+    re-check that *some* passing verdict existed: a re-review recorded
+    `SNAPSHOT_WRITTEN` against a snapshot whose integrity was `FAILED`, on a
+    verdict minted for a different, verified one. Both objects were real and
+    the verdict was legitimately minted; nothing tied them together.
+    """
 
     verdict = PreflightVerdict(refused_by)
     object.__setattr__(verdict, "_token", _MINTED_HERE)
+    object.__setattr__(verdict, "_snapshot", snapshot)
     return verdict
 
 
@@ -315,8 +385,7 @@ def preflight(
     # nothing checked at all: a re-review passed a two-attribute stand-in
     # (`is_fenced = False`, `volume_is_quarantined = True`) and both gates that
     # precede D8's four were satisfied by class attributes.
-    if not isinstance(quarantine, Quarantine):
-        raise TypeError("quarantine must be a Quarantine; a stand-in is not one")
+    _require_a_real_quarantine(quarantine)
     for name, value in (
         ("binding_holds", binding_holds),
         ("generation_holds", generation_holds),
@@ -324,10 +393,21 @@ def preflight(
     ):
         if not isinstance(value, bool):
             raise TypeError(f"{name} must be a bool; a truthy object is not a check")
-    if not isinstance(capacity, CapacityReport):
-        raise TypeError("capacity must be a CapacityReport")
-    if snapshot is not None and not isinstance(snapshot, SnapshotDescriptor):
-        raise TypeError("snapshot must be a SnapshotDescriptor or None")
+    # The two schema versions were annotated and unchecked, so an object whose
+    # `__eq__`/`__gt__` always answer True produced a **legitimately minted**
+    # passing verdict for a step that is in no supported set — and `True`
+    # passed as version 1, the exact case `SnapshotDescriptor.__post_init__`
+    # goes out of its way to refuse.
+    for name, value in (
+        ("current_schema", current_schema),
+        ("target_schema", target_schema),
+    ):
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise TypeError(f"{name} must be an int that is not a bool")
+    if type(capacity) is not CapacityReport:
+        raise TypeError("capacity must be a CapacityReport exactly")
+    if snapshot is not None:
+        _require_a_real_snapshot(snapshot)
 
     if quarantine.is_fenced:
         return _mint(PreflightCheck.MEDIUM_FENCED)
@@ -365,7 +445,7 @@ def preflight(
     if not image_digest_holds:
         return _mint(PreflightCheck.IMAGE_DIGEST)
 
-    return _mint(None)
+    return _mint(None, snapshot)
 
 
 class RecoveryStage(Enum):
@@ -470,6 +550,31 @@ class SnapshotAuditEntry:
     gate: RecoveryGate | None = None
     schema_version: int | None = None
     fingerprint: str | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        """Checked here, because the repr renders what it is handed.
+
+        A re-review reached this through a snapshot stand-in whose
+        `schema_version` was the string
+        `"capacity_available=… medium=usb-SN-…"` — a capacity figure and a
+        medium identity, the two things ADR-0010 D10 names specifically,
+        rendered into the object this module's own docstring calls "the object
+        destined for a log". Fixing the reachability is `_require_a_real_snapshot`;
+        this removes the class of it.
+        """
+
+        if not isinstance(self.event, SnapshotAuditEvent):
+            raise TypeError("event must be a SnapshotAuditEvent")
+        if self.check is not None and not isinstance(self.check, PreflightCheck):
+            raise TypeError("check must be a PreflightCheck or None")
+        if self.gate is not None and not isinstance(self.gate, RecoveryGate):
+            raise TypeError("gate must be a RecoveryGate or None")
+        if self.schema_version is not None and (
+            not isinstance(self.schema_version, int) or isinstance(self.schema_version, bool)
+        ):
+            raise TypeError("schema_version must be an int that is not a bool, or None")
+        if self.fingerprint is not None and not isinstance(self.fingerprint, str):
+            raise TypeError("fingerprint must be a str or None")
 
     def __repr__(self) -> str:
         """Redacting, because **this** is the object destined for a log.
@@ -594,9 +699,8 @@ class RecoveryWorkflow:
     def __init__(
         self, quarantine: Quarantine, binding: SessionBinding, *, session_id: str
     ) -> None:
-        if not isinstance(quarantine, Quarantine):
-            raise TypeError("quarantine must be a Quarantine; a stand-in is not one")
-        if not isinstance(binding, SessionBinding):
+        _require_a_real_quarantine(quarantine)
+        if type(binding) is not SessionBinding:
             raise TypeError("binding must be a SessionBinding")
         if not isinstance(session_id, str) or not session_id.strip():
             raise TypeError("session_id must be a non-empty string")
@@ -655,6 +759,8 @@ class RecoveryWorkflow:
         reads a screen.
         """
 
+        _require_a_real_snapshot(snapshot)
+        _require_an_actual_bool("started_by_operator", started_by_operator)
         self._require_stage(RecoveryStage.NOT_STARTED)
         self._require_this_sitting(session_id)
         if not started_by_operator:
@@ -697,6 +803,7 @@ class RecoveryWorkflow:
         the trial is the substitution this whole design exists to notice.
         """
 
+        _require_a_real_snapshot(snapshot)
         self._require_stage(RecoveryStage.PREFLIGHT_PASSED)
         self._require_this_sitting(session_id)
         self._require_the_same_snapshot(snapshot)
@@ -726,6 +833,8 @@ class RecoveryWorkflow:
         confirmation.
         """
 
+        _require_a_real_snapshot(snapshot)
+        _require_an_actual_bool("confirmed", confirmed)
         self._require_stage(RecoveryStage.TRIAL_OPEN)
         self._require_this_sitting(session_id)
         self._require_the_same_snapshot(snapshot)
@@ -815,7 +924,17 @@ class RecoveryWorkflow:
         exists to notice", and nothing was left that had noticed it.
         """
 
-        if self._snapshot is None or snapshot != self._snapshot:
+        # Field by field, so a hostile `__ne__` cannot answer for it. The
+        # type is already pinned by `_require_a_real_snapshot`; this is the
+        # second line, because the comparison is the whole of the check.
+        held = self._snapshot
+        same = held is not None and (
+            snapshot.container_version == held.container_version
+            and snapshot.schema_version == held.schema_version
+            and snapshot.integrity is held.integrity
+            and snapshot.fingerprint == held.fingerprint
+        )
+        if not same:
             self._sealed_assign("_stage", RecoveryStage.REFUSED)
             self._record(SnapshotAuditEvent.RECOVERY_SNAPSHOT_SUBSTITUTED)
             self._refuse(
@@ -1013,14 +1132,18 @@ class MigrationLedger:
         re-checked here so that this cannot be reached without one.
         """
 
-        if not verdict_was_minted_here(verdict) or not verdict.may_migrate:
+        _require_a_real_snapshot(snapshot)
+        if (
+            not verdict_was_minted_here(verdict)
+            or not verdict.may_migrate
+            or verdict._snapshot is not snapshot
+        ):
             raise RecoveryRefused(
                 Refusal.VERDICT_NOT_MINTED_BY_A_PREFLIGHT,
-                "a snapshot is recorded against the preflight that permitted "
-                "it; there is no way to record one without a passed verdict",
+                "a snapshot is recorded against the preflight that judged "
+                "that snapshot; a passing verdict for a different one is not "
+                "permission to record this one",
             )
-        if not isinstance(snapshot, SnapshotDescriptor):
-            raise TypeError("note_snapshot_written takes a SnapshotDescriptor")
 
         self._audit.append(
             SnapshotAuditEntry(

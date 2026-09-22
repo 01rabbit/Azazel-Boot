@@ -42,9 +42,18 @@ So it is checked structurally, not trusted as prose:
 - no method on either acting class whose name contains `unquarantine`, `clear`,
   `lift`, `restore`, `reopen`, `release`, `trust`, `permit`, `enable`, `mount`,
   `fsck`, `repair`, `export`, `download` or `upload`;
+- **`self._quarantine` may appear only as the receiver of `is_fenced` or
+  `volume_is_quarantined`.** The object never escapes those two expressions.
+  That is the load-bearing rule, and it replaces a shape match on
+  `self._quarantine.<attr>`, which a third review defeated by aliasing the
+  quarantine to a local first — `q = self._quarantine; q._audit.clear()` —
+  emptying the audit and the dispositions with neither flag moving;
 - no *call* to `fence`, `quarantine_volume`, `approve_export`, `withdraw_export`
-  or `observe`, and no assignment to `_fenced` or `_volume_quarantined` — the
-  indirect route, which a method-name check would miss entirely;
+  or `observe`, no assignment to `_fenced` or `_volume_quarantined`, and no
+  `object.__setattr__` except on a function's **own first parameter** or on an
+  object it constructed in that same function. The exemption used to be by
+  parameter *name*, so a module-level `def _settle(self, key, value)`
+  inherited it and wrote the flags through it;
 - `is_fenced` and `volume_is_quarantined` **are** read, which is the point.
 
 ## The snapshot (D6)
@@ -109,17 +118,29 @@ than a degraded one — driven by unlocking on the old schema afterwards.
 
 Operator-started, one-way, and every stage entered explicitly.
 
-`started_by_operator` is a **required keyword with no default**. A default of
-`True` would make the automatic start D8 refuses the easiest thing to write; a
-default of `False` would make it a flag somebody flips. There is no `retry`, no
+`started_by_operator` is a **required keyword with no default**, and it must be
+an actual `bool`. A default of `True` would make the automatic start D8 refuses
+the easiest thing to write; a default of `False` would make it a flag somebody
+flips; and accepting any truthy object made both moot — a third review reached
+`COMMITTED` and minted a candidate with `started_by_operator="no"` and
+`confirmed="declined"`. `preflight` had been checking its three flags with the
+comment *"a truthy object is not a check"* while the two flags carrying D8's
+operator gates were not checked at all. There is no `retry`, no
 `resume`, no `auto`, no `background` and no `schedule` anywhere on the surface,
 and no `RecoveryStage` member meaning automatic.
 
 ```
 NOT_STARTED → PREFLIGHT_PASSED → TRIAL_OPEN → COMMITTED
-                     ↘                ↘
-                    REFUSED       INTERRUPTED
+     ↓               ↓               ↓
+  REFUSED /      REFUSED /       REFUSED /
+ INTERRUPTED    INTERRUPTED     INTERRUPTED
 ```
+
+Every non-terminal stage reaches either terminal one: a refused automatic start
+ends at `REFUSED` from `NOT_STARTED`, and an interruption is available
+throughout. An earlier version of this diagram showed `REFUSED` branching only
+from `PREFLIGHT_PASSED` and `INTERRUPTED` only from `TRIAL_OPEN`, which was
+narrower than the code and than the tests.
 
 `COMMITTED`, `REFUSED` and `INTERRUPTED` are **terminal**. There is no call
 that restarts a finished workflow, because restarting is a new workflow that
@@ -163,9 +184,17 @@ same moment. A re-review found that the helper written to contest that pair was
 The helper is deleted rather than wired up, because wiring it up would not have
 worked either; what is pinned instead is the fact that makes it untestable.
 
-**A snapshot swapped under the workflow is refused.** The workflow holds what
-it started on and compares; an older fingerprint, a lower schema version or a
-weakened integrity verdict presented at the trial is refused rather than used.
+**A snapshot swapped under the workflow is refused**, at the trial and at the
+commit, and the refusal is terminal and audited. The workflow type-checks the
+descriptor **exactly** and compares it **field by field**: it used to accept
+any object and compare with `!=`, so a third review passed a stand-in with
+three class attributes — satisfying both integrity gates — whose `__eq__`
+returned `True`, and walked straight through the check this module calls "the
+substitution this whole design exists to notice", committing on a substitute
+with no `RECOVERY_SNAPSHOT_SUBSTITUTED` recorded.
+
+An older fingerprint, a lower schema version or a weakened integrity verdict
+presented at either stage is refused rather than used.
 
 ## What never leaves, and what the audit may hold
 

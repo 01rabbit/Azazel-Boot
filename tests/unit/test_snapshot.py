@@ -336,14 +336,28 @@ def test_this_module_never_calls_anything_that_would_change_a_quarantine() -> No
     # down. This module reads exactly two things from the quarantine, so that
     # is what it is held to. (`_audit` as a bare name is *this* object's own
     # slot, which is why the check is on the receiver rather than the name.)
-    on_the_quarantine = {
-        node.attr
-        for node in ast.walk(TREE)
-        if isinstance(node, ast.Attribute)
-        and isinstance(node.value, ast.Attribute)
-        and node.value.attr == "_quarantine"
-    }
-    assert on_the_quarantine == {"is_fenced", "volume_is_quarantined"}, on_the_quarantine
+    # **`self._quarantine` may appear only as the receiver of those two
+    # reads.** The first version matched `self._quarantine.<attr>` as a shape,
+    # so aliasing it to a local first — `q = self._quarantine; q._audit.clear()`
+    # — made the receiver a plain `Name` that the comprehension never looked
+    # at. A re-review emptied the audit and the dispositions that way, with the
+    # flags never moving and the whole suite green.
+    #
+    # Checking the *use* rather than the shape closes the alias, the argument,
+    # the tuple unpack and everything else at once: the object never escapes
+    # those two expressions, so there is nothing to alias.
+    for node in ast.walk(TREE):
+        if not (isinstance(node, ast.Attribute) and node.attr == "_quarantine"):
+            continue
+        if not isinstance(node.ctx, ast.Load):
+            continue  # `self._quarantine = quarantine` in __init__, the one write
+        reader = [
+            outer
+            for outer in ast.walk(TREE)
+            if isinstance(outer, ast.Attribute) and outer.value is node
+        ]
+        assert reader, "self._quarantine is used other than as a receiver"
+        assert reader[0].attr in {"is_fenced", "volume_is_quarantined"}, reader[0].attr
 
     assigned = {
         target.attr
@@ -364,20 +378,63 @@ def test_this_module_never_calls_anything_that_would_change_a_quarantine() -> No
     # constructed on the line above — an object that cannot be anyone else's.
     # It is named per function, not allowed as a general shape, so a second
     # place doing this has to be added here deliberately.
+    # **Positional, not by name.** The exemption used to be `{"self"}` plus
+    # `"verdict"` inside `_mint`, which meant any helper whose first parameter
+    # was *spelled* `self` inherited it, whatever was passed in. A re-review
+    # added `def _settle(self, key, value)` at module level and wrote the
+    # quarantine's flags through it.
+    #
+    # The rule is now: the target must be **that function's own first
+    # parameter**, and the function must be one of the four named here. Both
+    # `FunctionDef` and `AsyncFunctionDef`, because `async def` is a different
+    # node and the first version walked neither it nor a module-level lambda.
+    permitted_functions = {"_mint", "__init__", "__setattr__", "_sealed_assign"}
+    seen: set[int] = set()
     for function in ast.walk(TREE):
-        if not isinstance(function, ast.FunctionDef):
+        if not isinstance(function, ast.FunctionDef | ast.AsyncFunctionDef):
             continue
-        permitted = {"self"} | ({"verdict"} if function.name == "_mint" else set())
+        own = function.args.args[0].arg if function.args.args else None
+
+        # A name this function constructed itself, from a class defined in
+        # this module, on a line above. `_mint` stamps a `PreflightVerdict` it
+        # just built; that object cannot be anyone else's, and requiring the
+        # construction to be *in the same function* is what makes it safe —
+        # unlike the parameter-name exemption this replaces, which any helper
+        # could inherit by spelling its first parameter `self`.
+        built_here = {
+            target.id
+            for statement in ast.walk(function)
+            if isinstance(statement, ast.Assign)
+            and isinstance(statement.value, ast.Call)
+            and isinstance(statement.value.func, ast.Name)
+            and statement.value.func.id in {"PreflightVerdict", "RecoveryCandidate"}
+            for target in statement.targets
+            if isinstance(target, ast.Name)
+        }
+
         for node in ast.walk(function):
             if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
                 continue
             if node.func.attr not in {"__setattr__", "__delattr__"}:
                 continue
+            seen.add(id(node))
+            assert function.name in permitted_functions, function.name
             assert node.args, "a bare __setattr__ call"
             first = node.args[0]
-            assert isinstance(first, ast.Name) and first.id in permitted, (
-                f"__setattr__ in {function.name} targets something unexpected"
+            assert isinstance(first, ast.Name) and first.id in (
+                {own} | built_here
+            ) - {None}, (
+                f"__setattr__ in {function.name} targets neither its own first "
+                f"parameter nor an object it constructed"
             )
+
+    # And a flat pass, so nothing can sit outside a function — a module-level
+    # lambda is inside no `FunctionDef` at all.
+    for node in ast.walk(TREE):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+            continue
+        if node.func.attr in {"__setattr__", "__delattr__"}:
+            assert id(node) in seen, "a __setattr__ call outside any function"
     for node in ast.walk(TREE):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
             assert node.func.id not in {"setattr", "delattr"}
@@ -1125,7 +1182,7 @@ def test_this_module_cannot_reach_a_host_a_network_a_vm_or_a_second_partition() 
     docstrings = {
         id(node.body[0].value)
         for node in ast.walk(TREE)
-        if isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef)
+        if isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef)
         and node.body
         and isinstance(node.body[0], ast.Expr)
         and isinstance(node.body[0].value, ast.Constant)
@@ -1621,9 +1678,10 @@ def test_a_snapshot_is_recorded_as_written_only_after_the_caller_acted() -> None
     """
 
     ledger = MigrationLedger()
+    judged = descriptor()
     minted = preflight(
         a_quarantine(quarantined=False),
-        snapshot=descriptor(),
+        snapshot=judged,
         capacity=capacity(),
         current_schema=1,
         target_schema=2,
@@ -1635,8 +1693,24 @@ def test_a_snapshot_is_recorded_as_written_only_after_the_caller_acted() -> None
     assert ledger.may_migrate(minted) is True
     assert ledger.audit() == ()  # permission granted; nothing written yet
 
-    ledger.note_snapshot_written(minted, descriptor())
+    ledger.note_snapshot_written(minted, judged)
     assert ledger.audit()[-1].event is SnapshotAuditEvent.SNAPSHOT_WRITTEN
+
+    # **The verdict names the snapshot it judged.** It used to name none, so
+    # this method could only re-check that *some* passing verdict existed: a
+    # re-review recorded `SNAPSHOT_WRITTEN` against a snapshot whose integrity
+    # was `FAILED`, on a verdict minted for a different, verified one. Both
+    # objects were real and the verdict legitimately minted; nothing tied them.
+    other = descriptor(integrity=SnapshotIntegrity.FAILED, schema_version=2)
+    with pytest.raises(RecoveryRefused) as refused:
+        ledger.note_snapshot_written(minted, other)
+    assert refused.value.refusal is Refusal.VERDICT_NOT_MINTED_BY_A_PREFLIGHT
+
+    # An equal-but-distinct descriptor is not the one that was judged either:
+    # the tie is identity, because the point is *which* snapshot the preflight
+    # actually looked at.
+    with pytest.raises(RecoveryRefused):
+        ledger.note_snapshot_written(minted, descriptor())
 
     # And both methods exist, which the class docstring used to claim while
     # shipping neither.
