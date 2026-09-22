@@ -164,17 +164,22 @@ console and a log on media that travels through uncontrolled hands.
 ### What refusing assembly everywhere costs
 
 `lvm_assembly`, `md_assembly` and `zfs_import` are refused before disposition is
-consulted, and no approval unblocks them. Nothing in Azazel-Boot conflicts with
-that today: [ADR-0008](adr/0008-debian-13-live-baseline.md) D4 specifies
-persistence as USB-side with optional LUKS2, and no document mentions a volume
-manager. But LVM-on-LUKS is a common Debian layout, and this decision means the
-**medium** may never use one either.
+consulted, and no approval unblocks them. LUKS2's `dm-crypt` mapping is the one
+exception, and it exists to open persistence.
 
-That consequence belongs in ADR-0008 D4 rather than only in a decision module,
-and this document does not put it there: amending an accepted ADR is its own
-change. It is recorded here so a future persistence design meets it as a stated
-constraint rather than as an unappealable refusal from a file nobody thought to
-consult.
+That is now recorded where it belongs:
+[ADR-0008](adr/0008-debian-13-live-baseline.md) **D4.1** fixes the medium's
+block layout — GPT, an ESP, the signed read-only root, and an optional LUKS2
+partition holding a filesystem formatted directly on it — and states the cost in
+the same place: LVM-on-LUKS is a common Debian layout, and under this constraint
+Boot's own persistence may not use one. Relaxing it needs hardware-in-the-loop
+evidence and its own ADR.
+
+This module is the enforcement half of that record. Refusing assembly
+**everywhere**, medium included, is what makes it enforceable at all: assembly is
+the one operation in [the threat model](threat-model.md) section 3's list that is
+not per-device, and `evaluate(device, action)` cannot express a volume group
+that spans the medium and a host disk.
 
 ## 5. What is excluded from the zero-write claim
 
