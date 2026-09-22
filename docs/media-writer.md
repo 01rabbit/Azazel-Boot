@@ -86,31 +86,51 @@ every check the writer performs. That is why the enumeration is in the code.
 
 `MediaCandidate` has **no model field and no serial field**: the model cannot
 hold them, so no rendering can leak them. The stable identity *is* a field — the
-writer needs it — and it is held in an opaque `DeviceIdentity` whose `repr` and
-`str` are redacted and whose value is reachable only by asking for it. A
-redacted `__repr__` alone was not enough: `dataclasses.asdict`, which is how a
-`--json` output or an audit line is actually built, walked straight past it.
-`json.dumps` now refuses the object loudly instead of serialising the value
-quietly. The operator screen carries capacity, bus path, physical label,
-eligibility and the code.
+writer needs it — and it is held in an opaque `DeviceIdentity`: `repr` and `str`
+are redacted, the value is reachable only through `disclose()`, and pickling is
+refused outright. A redacted `__repr__` alone was not enough, because
+`dataclasses.asdict` — how a `--json` output or an audit line is actually built
+— walked straight past it.
+
+A `DeviceIdentity` is also **immutable**, and that is a safety property rather
+than a confidentiality one. The writer hands the same identity to the unmounter
+and then to the raw writer; when it was mutable, a port that assigned to it
+between those two calls changed what was opened **after** every refusal had been
+evaluated. A review used that to write the host's internal disk while the medium
+was reported valid. A write target that can change under the checks is not a
+target.
+
+The operator screen carries capacity, bus path, physical label, eligibility and
+the code.
 
 ## 3. The write
 
-An authorisation is **an object the authority issued**, not a value a caller
-holds. A `WriteAuthority` owns the enumeration session, claims the target
-itself, re-measures the artifact, and keeps the plans it made; `execute` checks
-**object identity** against that set and removes the plan on entry, so neither a
-success nor a refusal leaves an authorisation usable again.
+**Every step is issued by the authority.** `plan`, `confirm_target`,
+`confirm_destruction` and `execute` are all methods on a `WriteAuthority` that
+owns the enumeration session. Each accepts only the object it issued at the
+previous step and retires that object as it goes, so a step cannot be
+constructed, skipped, repeated, or retried after a refusal. There is no `force`
+and no `yes`.
 
-Two rounds of adversarial review produced that shape. The first version let
-`execute` trust any value it was handed, and one line built an authorisation
-around an unverified artifact. The second minted a nonce — and a nonce is a
-bearer token, so a single `dataclasses.replace` carried it onto a plan naming a
-different artifact and a different device, with the same outcome. A token can be
-copied; being the object cannot.
+Three rounds of adversarial review produced that shape, and each round found the
+same class of defect. The first version let `execute` trust any value it was
+handed. The second minted a nonce — a bearer token, so one `dataclasses.replace`
+carried it onto a plan naming a different artifact and a different device. The
+third sealed the plan and left the two confirmations constructible, so a caller
+could wrap a genuine plan and write with **neither the target code nor the
+destructive phrase ever typed**. Securing the token was never the point;
+securing the sequence is.
 
-The two confirmations remain separate steps: `plan`, `confirm_target`,
-`confirm_destruction`, `execute`. There is no `force` and no `yes`.
+**Any refusal during the write ends the authorisation.** A device that
+disappeared, a substitution, a device that became ineligible, an unmount that
+failed — each means re-running `list-media`, re-typing the code and re-typing
+the phrase. That is deliberate: a substitution is "refused, not a warning and
+not a prompt", and an authorisation that survives its own refusal is a prompt.
+
+**The record binding is re-asserted before the write**, not only at plan time.
+The record's fingerprint is stored on the plan and recomputed in `execute`: a
+review edited a record after the verification had been bound to it, and a
+binding checked once is a ceremony.
 
 At write time, before anything is touched, the writer re-reads the device and
 compares identity, removability, capacity, partition table, **bus path and

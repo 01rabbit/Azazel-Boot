@@ -10,16 +10,19 @@ block device for writing.
 Two rounds of adversarial review shaped what is here, and each round found the
 previous version's safety to be a story rather than an enforcement:
 
-**An authorisation is an object the authority issued, not a value a caller
-holds.** The first version let `execute` trust any `Authorised` it was handed.
-The second minted a nonce — and a nonce is a bearer token, so one
-`dataclasses.replace` carried it onto a `Planned` naming a different artifact
-and a different device, with the same result: an unverified image on the medium,
-reported valid. So there is no token at all now. The authority keeps the
-`Planned` objects it issued and `execute` checks **object identity**, which
-nothing a caller constructs can satisfy. An authorisation is removed from that
-set the moment `execute` accepts it, so neither a success nor a refusal leaves
-it usable again.
+**Every step is an object the authority issued, not a value a caller holds.**
+The first version let `execute` trust any `Authorised` it was handed. The second
+minted a nonce — a bearer token, so one `dataclasses.replace` carried it onto a
+plan naming a different artifact and a different device. The third sealed the
+plan and left the two confirmations constructible, so a caller could wrap a
+genuine plan in an `Authorised` and write with neither the target code nor the
+destructive phrase ever typed.
+
+So the authority issues all four states. `plan`, `confirm_target` and
+`confirm_destruction` are its methods; each accepts only the object it issued at
+the previous step and retires that object as it goes, and `execute` accepts only
+an `Authorised` it issued, retiring it on entry. A caller cannot construct a
+step, skip a step, repeat a step, or retry a refused one.
 
 **A verification names its subject — the whole record.** The first version
 passed the record, the `Verification` and the path as three unrelated arguments.
@@ -75,6 +78,7 @@ class Refusal(Enum):
     VERIFICATION_IS_ABOUT_SOMETHING_ELSE = "verification_is_about_something_else"
     TARGET_NOT_ELIGIBLE = "target_not_eligible"
     TARGET_CODE_MISMATCH = "target_code_mismatch"
+    RECORD_CHANGED_AFTER_VERIFICATION = "record_changed_after_verification"
     DESTRUCTION_NOT_CONFIRMED = "destruction_not_confirmed"
     AUTHORISATION_NOT_ISSUED = "authorisation_not_issued"
     AUTHORISATION_ALREADY_SPENT = "authorisation_already_spent"
@@ -110,6 +114,11 @@ class DeviceProbe(Protocol):
     The contract a real implementation must meet: `reread(identity)` resolves
     the **same object** `RawWriter.write(identity)` will open, or returns None.
     This module cannot check that, and says so rather than implying otherwise.
+
+    No port may alter the identity it is handed. It cannot: `DeviceIdentity` is
+    immutable, because a review used a mutable one to change the write target
+    between the last refusal and the write, and the host's internal disk was
+    written.
     """
 
     def reread(self, identity: DeviceIdentity) -> MediaCandidate | None: ...
@@ -153,6 +162,10 @@ class Planned:
     artifact_path: str
     artifact_bytes: int
     artifact_digest: str
+    #: The record's fingerprint as it was when the verification was checked.
+    #: Re-asserted in `execute`: a binding checked only at plan time is a
+    #: ceremony, and a review edited the record afterwards.
+    record_fingerprint: str
 
     def __repr__(self) -> str:
         """Redacted: the enumerated device's identity and the host path stay out."""
@@ -225,10 +238,20 @@ class WriteAuthority:
     def __init__(self, session: MediaSession, *, artifact_reader: ArtifactReader) -> None:
         self._session = session
         self._artifact_reader = artifact_reader
-        #: The `Planned` objects this authority made. Membership is tested by
-        #: identity, never by equality: `__eq__` is generated over the fields,
-        #: and a caller who controls the fields controls equality.
-        self._issued: list[Planned] = []
+        #: The states this authority issued, at whatever step they have reached.
+        #: Membership is tested by object identity, never by equality: `__eq__`
+        #: is generated over the fields, and a caller who controls the fields
+        #: controls equality.
+        self._issued: list[object] = []
+
+    def _retire(self, state: object) -> bool:
+        """Remove a state this authority issued, or report that it did not."""
+
+        for index, issued in enumerate(self._issued):
+            if issued is state:
+                del self._issued[index]
+                return True
+        return False
 
     def plan(
         self,
@@ -271,9 +294,47 @@ class WriteAuthority:
             artifact_path=artifact_path,
             artifact_bytes=size,
             artifact_digest=digest,
+            record_fingerprint=record.fingerprint(),
         )
         self._issued.append(planned)
         return planned
+
+    def confirm_target(self, planned: Planned, typed_code: str) -> TargetConfirmed:
+        """The operator retypes the code. Compared exactly; nothing is normalised."""
+
+        if not self._retire(planned):
+            raise WriteRefused(
+                Refusal.AUTHORISATION_NOT_ISSUED,
+                "this plan was not issued by this authority, or has already been "
+                "confirmed",
+            )
+        if typed_code != planned.target_code:
+            raise WriteRefused(
+                Refusal.TARGET_CODE_MISMATCH, "the code typed back did not match"
+            )
+        confirmed = TargetConfirmed(plan=planned)
+        self._issued.append(confirmed)
+        return confirmed
+
+    def confirm_destruction(
+        self, confirmed: TargetConfirmed, typed_phrase: str
+    ) -> Authorised:
+        """A second, separate confirmation of the destructive act itself."""
+
+        if not self._retire(confirmed):
+            raise WriteRefused(
+                Refusal.AUTHORISATION_NOT_ISSUED,
+                "this confirmation was not issued by this authority, or has "
+                "already been used",
+            )
+        if typed_phrase != DESTRUCTIVE_CONFIRMATION:
+            raise WriteRefused(
+                Refusal.DESTRUCTION_NOT_CONFIRMED,
+                "the destruction was not confirmed in the required words",
+            )
+        authorised = Authorised(confirmed=confirmed)
+        self._issued.append(authorised)
+        return authorised
 
     def execute(
         self,
@@ -286,20 +347,22 @@ class WriteAuthority:
     ) -> WriteResult:
         """Re-verify, unmount, write, read back. Refuses before writing, never after."""
 
-        planned = authorised.confirmed.plan
-        for index, issued in enumerate(self._issued):
-            if issued is planned:
-                # Spent on entry: a refusal below must not leave an
-                # authorisation that succeeds on a retry. A substitution is
-                # "refused, not a warning and not a prompt" (contract 7.2), and
-                # an authorisation that survives the refusal is a prompt.
-                del self._issued[index]
-                break
-        else:
+        # Retired on entry: a refusal below must not leave an authorisation that
+        # succeeds on a retry. A substitution is "refused, not a warning and not
+        # a prompt" (contract 7.2), and an authorisation that survives its own
+        # refusal is a prompt.
+        if not self._retire(authorised):
             raise WriteRefused(
                 Refusal.AUTHORISATION_NOT_ISSUED,
-                "this authorisation was not issued by this authority; a plan is "
-                "made by plan(), never constructed or copied by a caller",
+                "this authorisation was not issued by this authority; every step "
+                "is issued, never constructed or copied by a caller",
+            )
+        planned = authorised.confirmed.plan
+
+        if planned.record.fingerprint() != planned.record_fingerprint:
+            raise WriteRefused(
+                Refusal.RECORD_CHANGED_AFTER_VERIFICATION,
+                "the record is not the one the verification was about",
             )
 
         current = probe.reread(planned.enumerated.identity)
@@ -344,25 +407,6 @@ class WriteAuthority:
             expected_bytes=planned.artifact_bytes,
             written_bytes=written,
         )
-
-
-def confirm_target(planned: Planned, typed_code: str) -> TargetConfirmed:
-    """The operator retypes the code. Compared exactly; nothing is normalised."""
-
-    if typed_code != planned.target_code:
-        raise WriteRefused(Refusal.TARGET_CODE_MISMATCH, "the code typed back did not match")
-    return TargetConfirmed(plan=planned)
-
-
-def confirm_destruction(confirmed: TargetConfirmed, typed_phrase: str) -> Authorised:
-    """A second, separate confirmation of the destructive act itself."""
-
-    if typed_phrase != DESTRUCTIVE_CONFIRMATION:
-        raise WriteRefused(
-            Refusal.DESTRUCTION_NOT_CONFIRMED,
-            "the destruction was not confirmed in the required words",
-        )
-    return Authorised(confirmed=confirmed)
 
 
 def inspect(

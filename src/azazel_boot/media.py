@@ -84,7 +84,39 @@ class DeviceIdentity:
     __slots__ = ("_value",)
 
     def __init__(self, value: str) -> None:
-        self._value = value
+        object.__setattr__(self, "_value", value)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        """Immutable after construction.
+
+        A review made this object mutable's consequence concrete: the writer
+        hands the same identity to the unmounter and then to the raw writer, so
+        a port that assigned to it between those two calls changed what was
+        opened **after** every refusal had been evaluated. The host's internal
+        disk was written and the medium was reported valid. A write target that
+        can change under the checks is not a target.
+        """
+
+        raise AttributeError("a DeviceIdentity is immutable once constructed")
+
+    def __delattr__(self, name: str) -> None:
+        raise AttributeError("a DeviceIdentity is immutable once constructed")
+
+    def __copy__(self) -> DeviceIdentity:
+        """Immutable, so a copy is itself. Copying is not a leak; pickling is."""
+
+        return self
+
+    def __deepcopy__(self, memo: dict) -> DeviceIdentity:
+        return self
+
+    def __reduce__(self):
+        """Refuse to pickle, rather than writing the value into a file or a queue."""
+
+        raise TypeError(
+            "a DeviceIdentity is not serialisable; ask for the value explicitly "
+            "if a component genuinely needs it"
+        )
 
     def disclose(self) -> str:
         """The raw value, for the one component that must open the device."""
@@ -98,6 +130,14 @@ class DeviceIdentity:
         return "<redacted>"
 
     def __eq__(self, other: object) -> bool:
+        """Deliberate, and it costs something.
+
+        The writer compares identities to detect a substitution, so equality has
+        to work — which also makes any holder of a candidate an oracle for a
+        guessed identity. That trade is taken knowingly: without it the
+        re-verification cannot exist at all.
+        """
+
         return isinstance(other, DeviceIdentity) and other._value == self._value
 
     def __hash__(self) -> int:

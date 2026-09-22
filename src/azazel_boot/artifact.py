@@ -30,9 +30,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
+from types import MappingProxyType
 
 from .refusals import Refused
 
@@ -69,8 +70,16 @@ OPTIONAL_FIELDS = ("signed_artifact_digest", "signature")
 COMPATIBILITY_CLAIMS = ("candidate", "hardware_verified")
 
 
+#: A record field is a JSON scalar. Constraining this is what keeps
+#: `fingerprint()` total (an unserialisable value used to escape as a bare
+#: `TypeError`, past the one `except` this package's refusals exist for) and
+#: what stops a list and a tuple canonicalising to the same bytes.
+SCALAR_TYPES = (str, int, bool, type(None))
+
+
 class Refusal(Enum):
     NOT_AN_OBJECT = "not_an_object"
+    NOT_A_SCALAR = "not_a_scalar"
     UNKNOWN_FIELD = "unknown_field"
     MISSING_FIELD = "missing_field"
     EMPTY_FIELD = "empty_field"
@@ -111,7 +120,10 @@ class VerificationRefusal(Enum):
 class ArtifactRecord:
     """One build's record, parsed. Field access is by name, never by position."""
 
-    fields: dict[str, object]
+    #: A read-only mapping. A review mutated a record *after* the write
+    #: authority had bound a verification to it, and nothing re-checked — so the
+    #: binding held over an object the caller could still edit.
+    fields: Mapping[str, object]
 
     def __getitem__(self, name: str) -> object:
         return self.fields[name]
@@ -127,7 +139,7 @@ class ArtifactRecord:
         """
 
         canonical = json.dumps(
-            self.fields, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            dict(self.fields), sort_keys=True, separators=(",", ":"), ensure_ascii=True
         )
         return "sha256:" + hashlib.sha256(canonical.encode("ascii")).hexdigest()
 
@@ -200,6 +212,10 @@ def parse(document: object) -> ArtifactRecord:
     if unknown:
         raise RecordRefused(Refusal.UNKNOWN_FIELD, _bounded(str(unknown)))
 
+    for name, value in document.items():
+        if not isinstance(value, SCALAR_TYPES):
+            raise RecordRefused(Refusal.NOT_A_SCALAR, f"{name}: {type(value).__name__}")
+
     for name in RECORD_FIELDS:
         if name in OPTIONAL_FIELDS:
             # Absent is a valid value here. Present and not a non-empty string
@@ -227,7 +243,7 @@ def parse(document: object) -> ArtifactRecord:
             "it attests to",
         )
 
-    return ArtifactRecord(fields=dict(document))
+    return ArtifactRecord(fields=MappingProxyType(dict(document)))
 
 
 def parse_json(text: str) -> ArtifactRecord:

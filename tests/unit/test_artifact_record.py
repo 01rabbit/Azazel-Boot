@@ -228,13 +228,39 @@ def test_a_verification_is_about_the_whole_record_not_just_the_payload() -> None
         assert result.is_about(impostor, DIGEST) is False
 
 
-@pytest.mark.parametrize("value", [False, 0, [], {}, 1])
-def test_a_signature_that_is_not_a_string_is_refused(value) -> None:
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (False, Refusal.EMPTY_FIELD),
+        (0, Refusal.EMPTY_FIELD),
+        (1, Refusal.EMPTY_FIELD),
+        ([], Refusal.NOT_A_SCALAR),
+        ({}, Refusal.NOT_A_SCALAR),
+    ],
+)
+def test_a_signature_that_is_not_a_string_is_refused(value, expected) -> None:
     """`str(False)` is not blank, so a looser check let all of these read as signed."""
 
     with pytest.raises(RecordRefused) as refused:
         parse(a_record(signature=value, signed_artifact_digest="sha256:" + "8" * 64))
-    assert refused.value.refusal is Refusal.EMPTY_FIELD
+    assert refused.value.refusal is expected
+
+
+def test_a_field_that_is_not_a_scalar_is_refused() -> None:
+    """`fingerprint()` must be total: an unserialisable value used to escape as
+    a bare `TypeError`, past the one `except` this package's refusals exist for."""
+
+    with pytest.raises(RecordRefused) as refused:
+        parse(a_record(package_manifest={"a", "b"}))
+    assert refused.value.refusal is Refusal.NOT_A_SCALAR
+
+
+def test_a_record_cannot_be_edited_after_it_is_parsed() -> None:
+    """A review mutated a record after a verification had been bound to it."""
+
+    record = parse(a_record())
+    with pytest.raises(TypeError):
+        record.fields["compatibility_claim"] = "hardware_verified"  # type: ignore[index]
 
 
 def test_every_refusal_in_these_modules_shares_one_base() -> None:

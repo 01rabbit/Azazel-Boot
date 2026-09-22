@@ -22,6 +22,7 @@ from __future__ import annotations
 import ast
 import dataclasses
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -40,8 +41,6 @@ from azazel_boot.writer import (
     WriteAuthority,
     WriteOutcome,
     WriteRefused,
-    confirm_destruction,
-    confirm_target,
     inspect,
 )
 
@@ -172,7 +171,9 @@ def authorised_write(artifact: Path, authority: WriteAuthority, code: str) -> Au
         verification=verified_for(rec, artifact),
         artifact_path=str(artifact),
     )
-    return confirm_destruction(confirm_target(planned, code), DESTRUCTIVE_CONFIRMATION)
+    return authority.confirm_destruction(
+        authority.confirm_target(planned, code), DESTRUCTIVE_CONFIRMATION
+    )
 
 
 # --- the happy path -------------------------------------------------------
@@ -212,6 +213,7 @@ def test_an_authorisation_built_by_hand_is_refused(tmp_path: Path, artifact: Pat
                 artifact_path=str(artifact),
                 artifact_bytes=len(PAYLOAD),
                 artifact_digest=DIGEST,
+                record_fingerprint=record().fingerprint(),
             )
         )
     )
@@ -250,13 +252,7 @@ def test_a_copy_of_an_issued_plan_is_refused(tmp_path: Path, artifact: Path) -> 
     )
     device = Device(tmp_path / "device")
     with pytest.raises(WriteRefused) as refused:
-        authority.execute(
-            confirm_destruction(confirm_target(retargeted, code), DESTRUCTIVE_CONFIRMATION),
-            probe=Probe(),
-            unmounter=Unmounter(),
-            raw_writer=device,
-            reader=device,
-        )
+        authority.confirm_target(retargeted, code)
     assert refused.value.refusal is Refusal.AUTHORISATION_NOT_ISSUED
     assert device.written == b""
 
@@ -489,7 +485,7 @@ def test_a_target_code_typed_back_wrongly_refuses(artifact: Path, typed: str) ->
         artifact_path=str(artifact),
     )
     with pytest.raises(WriteRefused) as refused:
-        confirm_target(planned, typed)
+        authority.confirm_target(planned, typed)
     assert refused.value.refusal is Refusal.TARGET_CODE_MISMATCH
 
 
@@ -506,7 +502,7 @@ def test_the_destruction_must_be_confirmed_in_the_required_words(
         artifact_path=str(artifact),
     )
     with pytest.raises(WriteRefused) as refused:
-        confirm_destruction(confirm_target(planned, code), typed)
+        authority.confirm_destruction(authority.confirm_target(planned, code), typed)
     assert refused.value.refusal is Refusal.DESTRUCTION_NOT_CONFIRMED
 
 
@@ -563,6 +559,107 @@ def test_a_probe_that_answers_with_another_device_is_refused(
             reader=device,
         )
     assert refused.value.refusal is Refusal.TARGET_SUBSTITUTED
+    assert device.written == b""
+
+
+def test_neither_confirmation_can_be_skipped(tmp_path: Path, artifact: Path) -> None:
+    """A review wrapped a genuine plan and wrote with neither confirmation typed."""
+
+    authority, code = an_authority()
+    rec = record()
+    planned = authority.plan(
+        target_code=code,
+        record=rec,
+        verification=verified_for(rec, artifact),
+        artifact_path=str(artifact),
+    )
+    device = Device(tmp_path / "device")
+    with pytest.raises(WriteRefused) as refused:
+        authority.execute(
+            Authorised(confirmed=TargetConfirmed(plan=planned)),
+            probe=Probe(),
+            unmounter=Unmounter(),
+            raw_writer=device,
+            reader=device,
+        )
+    assert refused.value.refusal is Refusal.AUTHORISATION_NOT_ISSUED
+    assert device.written == b""
+
+
+def test_a_confirmation_cannot_be_used_twice(artifact: Path) -> None:
+    authority, code = an_authority()
+    rec = record()
+    planned = authority.plan(
+        target_code=code,
+        record=rec,
+        verification=verified_for(rec, artifact),
+        artifact_path=str(artifact),
+    )
+    confirmed = authority.confirm_target(planned, code)
+    authority.confirm_destruction(confirmed, DESTRUCTIVE_CONFIRMATION)
+    with pytest.raises(WriteRefused) as refused:
+        authority.confirm_destruction(confirmed, DESTRUCTIVE_CONFIRMATION)
+    assert refused.value.refusal is Refusal.AUTHORISATION_NOT_ISSUED
+
+
+def test_a_plan_whose_record_changed_after_verification_is_refused(
+    tmp_path: Path, artifact: Path
+) -> None:
+    """The binding is re-asserted at the point of use, not only at plan time."""
+
+    authority, code = an_authority()
+    rec = record()
+    planned = authority.plan(
+        target_code=code,
+        record=rec,
+        verification=verified_for(rec, artifact),
+        artifact_path=str(artifact),
+    )
+    authorisation = authority.confirm_destruction(
+        authority.confirm_target(planned, code), DESTRUCTIVE_CONFIRMATION
+    )
+    forged = dataclasses.replace(
+        planned, record_fingerprint="sha256:" + "0" * 64
+    )
+    # The plan object inside the authorisation is the issued one; this asserts
+    # the check itself rather than the record's immutability.
+    device = Device(tmp_path / "device")
+    with pytest.raises(WriteRefused) as refused:
+        authority.execute(
+            Authorised(confirmed=TargetConfirmed(plan=forged)),
+            probe=Probe(),
+            unmounter=Unmounter(),
+            raw_writer=device,
+            reader=device,
+        )
+    assert refused.value.refusal is Refusal.AUTHORISATION_NOT_ISSUED
+    assert device.written == b""
+    # And the genuine one still works, so the check is not simply refusing all.
+    assert authority.execute(
+        authorisation, probe=Probe(), unmounter=Unmounter(), raw_writer=device, reader=device
+    ).medium_is_valid is True
+
+
+def test_a_port_cannot_change_the_write_target_it_was_handed(
+    tmp_path: Path, artifact: Path
+) -> None:
+    """The regression a review found: the internal disk was written, medium valid."""
+
+    class MutatingUnmounter:
+        def unmount(self, identity) -> bool:
+            identity._value = "a-different-device"  # noqa: SLF001 - the attack
+            return True
+
+    authority, code = an_authority()
+    device = Device(tmp_path / "device")
+    with pytest.raises(AttributeError):
+        authority.execute(
+            authorised_write(artifact, authority, code),
+            probe=Probe(),
+            unmounter=MutatingUnmounter(),
+            raw_writer=device,
+            reader=device,
+        )
     assert device.written == b""
 
 
@@ -718,8 +815,8 @@ def test_no_rendering_of_a_plan_or_a_candidate_prints_the_identity(
         verification=verified_for(rec, artifact),
         artifact_path=str(artifact),
     )
-    confirmed = confirm_target(planned, offers[0].target_code)
-    authorisation = confirm_destruction(confirmed, DESTRUCTIVE_CONFIRMATION)
+    confirmed = authority.confirm_target(planned, offers[0].target_code)
+    authorisation = authority.confirm_destruction(confirmed, DESTRUCTIVE_CONFIRMATION)
 
     for rendered in (
         repr(candidate()),
@@ -749,13 +846,14 @@ def test_serialising_a_candidate_or_a_plan_does_not_yield_the_raw_identity(
         verification=verified_for(rec, artifact),
         artifact_path=str(artifact),
     )
-    for structure in (
-        dataclasses.asdict(offers[0]),
-        dataclasses.asdict(candidate()),
-        dataclasses.asdict(planned),
-    ):
+    for structure in (dataclasses.asdict(offers[0]), dataclasses.asdict(candidate())):
         assert IDENTITY_VALUE not in repr(structure)
+        assert IDENTITY_VALUE not in json.dumps(structure, default=str)
     assert IDENTITY_VALUE not in repr(dataclasses.astuple(candidate()))
+    # A plan is not serialisable at all: its record is a read-only mapping, and
+    # refusing loudly beats writing a plan into a queue or a cache.
+    with pytest.raises(TypeError):
+        dataclasses.asdict(planned)
 
 
 # --- what this module is allowed to touch ----------------------------------

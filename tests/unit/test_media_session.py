@@ -9,7 +9,10 @@ reached a screen and then a screenshot.
 
 from __future__ import annotations
 
+import copy
 import dataclasses
+import json
+import pickle
 
 import pytest
 
@@ -178,6 +181,21 @@ def test_no_default_rendering_prints_the_identity() -> None:
     for rendered in (repr(offers[0]), repr(offers[0].candidate), f"{offers[0]}"):
         assert "WWN-0x5001234" not in rendered
     assert "WWN-0x5001234" not in repr(dataclasses.asdict(offers[0]))
+    assert "WWN-0x5001234" not in json.dumps(
+        dataclasses.asdict(offers[0]), default=str
+    )
+
+
+def test_an_identity_is_immutable_and_refuses_to_be_pickled() -> None:
+    """A mutable write target let a port change what was opened after the checks."""
+
+    identity = DeviceIdentity("WWN-0x5001234")
+    with pytest.raises(AttributeError):
+        identity._value = "something-else"  # noqa: SLF001 - the point of the test
+    with pytest.raises(TypeError):
+        pickle.dumps(identity)
+    assert copy.deepcopy(identity) is identity
+    assert identity.disclose() == "WWN-0x5001234"
 
 
 def test_the_screen_carries_what_a_human_needs_to_pick_the_right_object() -> None:
