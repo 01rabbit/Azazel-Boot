@@ -1,9 +1,11 @@
 # ADR-0008: Boot adopts the Debian 13 Live / amd64 platform baseline
 
-Status: **accepted (2026-09-22)**, **revised (2026-09-22)** — D4 gained the
-block-layer consequence recorded below, at the owner's decision, after an
-adversarial review of the quarantine established that volume assembly cannot be
-adjudicated per device. Records a program-level decision; decides nothing Boot
+Status: **accepted (2026-09-22)**, **revised twice (2026-09-22)** — D4 gained
+the block-layer consequence recorded below (D4.1), at the owner's decision,
+after an adversarial review of the quarantine established that volume assembly
+cannot be adjudicated per device; and D4.1 then gained D4.1.1, the bound media
+identity persistence opens against, at the owner's decision, after a review
+showed the host binding alone could be supplied by an adversary's USB NIC. Records a program-level decision; decides nothing Boot
 was free to decide. **No builder is selected** — [ADR-0002](0002-image-builder.md)'s
 selection conditions are untouched.
 
@@ -127,6 +129,58 @@ the same refusal as the host.
 The cost is stated rather than discovered: LVM-on-LUKS is a common Debian
 layout, and under this constraint Boot's own persistence may not use one.
 Relaxing it needs hardware-in-the-loop evidence and its own ADR.
+
+##### D4.1.1 — Persistence opens only against a bound media identity
+
+Added 2026-09-22, after an adversarial review defeated the host binding alone.
+`commissioning.host_fingerprint` is taken over commissionable interfaces, so a
+laptop whose onboard NICs cannot be identified takes its whole identity from
+whatever identifiable NIC is present. When that is a USB dongle, the adversary
+supplying the dongle supplies the host identity: three different laptops
+sharing one dongle produced one identical fingerprint, and a binding made on
+the first applied to the other two.
+
+**Opening the LUKS2 persistence partition therefore requires a hardware-provided
+stable media identity in addition to the host binding.** The v1 binding is a
+key-protected HMAC over four inputs:
+
+```
+stable media hardware identity   (USB serial descriptor, SCSI VPD WWN,
+                                  NVMe EUI-64 / NGUID, or ATA serial)
++ LUKS persistence UUID
++ signed Boot image digest
++ commissioning generation
+```
+
+Four rules follow, and each is enforced by test rather than by convention:
+
+1. **Topology is never identity.** A bus path, a device node, a port, a hub
+   position or an enumeration order says where a medium is plugged in, not what
+   it is, and all of them move when the operator uses a different socket. The
+   accepted-source vocabulary has no value for any of them.
+2. **The binding is key-protected, not a plain digest.** The key is derived by
+   the caller from the TPM or the commissioning secret and is supplied per act;
+   nothing stores it. A caller with no key has no binding and opens nothing.
+3. **A medium whose stable identity cannot be read, that has changed, or whose
+   HMAC does not match is `refused`** — persistence does not open. A changed
+   identity and a forged binding are deliberately the same refusal, because one
+   that names which input was wrong is an oracle.
+4. **The raw serial, WWN or device identity lives in the encrypted commissioning
+   record and nowhere else.** Not the audit, not a journal, not a terminal, not
+   an issue or a pull request, not an external report. No such encrypted record
+   exists yet; the discipline that makes one possible does.
+
+**This is not a claim to defeat cloning.** A byte-for-byte copy of the medium
+made together with its hardware identity, and a programmable enclosure
+reporting an identity of the adversary's choosing, both defeat it. Those are
+hardware substitution, which [the threat model](../threat-model.md) §9 already
+excludes and §2.1 now states for this mechanism specifically. What this closes
+is the ordinary case, which was open: a different medium, a re-created volume,
+a rolled-back generation, a different Boot image.
+
+Nothing here has run on hardware. No medium has reported an identity to Boot,
+no key has been derived from any TPM, and no volume has been opened or refused
+on a real device.
 
 ### D5 — Nothing here is built, and nothing here is measured
 

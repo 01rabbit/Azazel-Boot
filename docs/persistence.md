@@ -52,6 +52,59 @@ including for a record carried in already holding the empty digest. The
 consequence is a safe degradation — no binding, so nothing that needs one runs,
 which is the state `assess` already calls `COMMISSIONING_REQUIRED`.
 
+**The medium has an identity of its own, and it is checked before anything
+else.** The host binding above is necessary and was not sufficient: a review
+showed that a laptop whose onboard NICs cannot be identified takes its whole
+fingerprint from whatever identifiable NIC is present, so an adversary
+supplying a USB dongle supplied the host identity — three laptops sharing one
+dongle shared one fingerprint. At the owner's decision
+([ADR-0008 D4.1.1](adr/0008-debian-13-live-baseline.md)), opening persistence
+now requires a **hardware-provided stable media identity** as well, bound under
+a **key-protected HMAC** together with three other things:
+
+```
+stable media hardware identity   (USB serial descriptor, SCSI VPD WWN,
+                                  NVMe EUI-64 / NGUID, ATA serial)
++ LUKS persistence UUID
++ signed Boot image digest
++ commissioning generation
+```
+
+| Refusal | Cause |
+| --- | --- |
+| `media_binding_key_unavailable` | no key from the platform or the commissioning secret; a plain digest anyone can recompute is not a binding |
+| `media_identity_unavailable` | the medium reported no hardware identity |
+| `media_identity_not_stable` | it reported one every device of its kind reports — blank, uniform, or a known bridge placeholder |
+| `media_binding_incomplete` | the volume UUID or the image digest is missing |
+| `media_binding_mismatch` | a different medium, a re-created volume, a different image, a rolled-back generation, or a forged binding |
+
+The last row is **one refusal for five causes, deliberately**. A refusal that
+says which of the four inputs was wrong is an oracle: it tells an attacker
+holding three of them which one to keep working on.
+
+*Topology is never identity.* `MediaIdentitySource` has no value for a bus
+path, a device node, a port, a hub position or an enumeration order. Those say
+where a medium is plugged in, they move when the operator uses another socket,
+and the medium does not report them. This is the same discipline that keeps the
+kernel name out of an interface's identity.
+
+*The raw identity and the key are never rendered.* `MediaIdentity` and
+`BindingKey` hand their values out only through `disclose()`, redact their
+`__repr__`, and refuse to be pickled or copied. `MediaBinding` carries the HMAC
+and has no field that could hold an identity or a key. The digest is computed
+in a frame that returns before anything can raise, so no traceback taken later
+in the act holds the disclosed values — the lesson from the host binding, where
+making the check real put the values it was derived from into every refusal.
+The raw value belongs in the encrypted commissioning record and nowhere else;
+**no such record exists in this repository yet**, and what exists is the
+discipline that makes one possible.
+
+*What this does not claim.* It does not defeat a byte-for-byte clone of the
+medium made together with its hardware identity, nor a programmable enclosure
+reporting an identity of the adversary's choosing. Both are hardware
+substitution, which [the threat model](threat-model.md) §9 excludes and §2.1
+now states for this mechanism. What it closes is the ordinary case.
+
 **The session is hard to edit by accident, and is not sealed.** It is not a
 dataclass, its fields are private, plain assignment to the quarantine, the
 binding or the fence raises, and it refuses to be pickled. A review substituted

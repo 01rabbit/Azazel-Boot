@@ -68,6 +68,8 @@ or quarantined on any hardware.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 from dataclasses import dataclass, fields
 from enum import Enum
 from types import MappingProxyType
@@ -191,6 +193,11 @@ class Refusal(Enum):
     QUARANTINE_FROM_ANOTHER_SESSION = "quarantine_from_another_session"
     NOT_THIS_HOST_OR_SESSION = "not_this_host_or_session"
     SESSION_FENCED = "session_fenced"
+    MEDIA_IDENTITY_UNAVAILABLE = "media_identity_unavailable"
+    MEDIA_IDENTITY_NOT_STABLE = "media_identity_not_stable"
+    MEDIA_BINDING_KEY_UNAVAILABLE = "media_binding_key_unavailable"
+    MEDIA_BINDING_INCOMPLETE = "media_binding_incomplete"
+    MEDIA_BINDING_MISMATCH = "media_binding_mismatch"
 
 
 class UnlockOutcome(Enum):
@@ -375,6 +382,387 @@ def check_layout(layout: MediumLayout) -> None:
                 )
 
 
+# ---------------------------------------------------------------------------
+# The medium's own identity, and the binding that has to match before a volume
+# is opened
+#
+# Added after an adversarial review showed what the host binding alone could
+# not do. `commissioning.host_fingerprint` is taken over commissionable
+# interfaces, so a laptop whose onboard NICs cannot be identified takes its
+# whole identity from whatever identifiable NIC is present — and if that is a
+# USB dongle, the adversary who supplies the dongle supplies the host identity.
+# Three laptops sharing one dongle shared one fingerprint.
+#
+# The owner's decision (F32, option b) is that opening persistence requires a
+# **hardware-provided stable media identity** as well, and that the binding
+# covers four things at once under a key-protected HMAC: that identity, the
+# LUKS persistence UUID, the signed Boot image digest, and the commissioning
+# generation. Any of them changing is a refusal.
+#
+# Three properties follow, and each is a rule rather than a preference.
+#
+# *The identity is hardware-provided and topology-free.* A bus path, a device
+# node, a port or an enumeration order says where a thing is plugged in, not
+# what it is, and all four move when the operator uses a different socket.
+# `MediaIdentitySource` has no value for any of them — the same discipline
+# `azazel_boot.quarantine.Device` applies by having no `kernel_name` field.
+#
+# *The raw identity never leaves this process in the clear.* A serial, a WWN or
+# an EUI-64 is the owner's hardware, and the standing rule is that it lives in
+# the encrypted commissioning record and nowhere else: not in the audit, not in
+# a journal, not on a terminal, not in an issue or a pull request, not in an
+# external report. **No such encrypted record exists in this repository yet.**
+# What exists here is the discipline that makes one possible: the value is
+# wrapped in a type that will not render it, every refusal message names the
+# rule rather than the value, and nothing stores it.
+#
+# *The key is never held by anything that persists.* It is supplied per act,
+# derived by the caller from the TPM or the commissioning secret, and this
+# module keeps no reference to it after the call returns.
+#
+# **What this does not claim.** It does not defeat a full byte-for-byte clone
+# of the medium made together with its hardware identity, and it does not
+# defeat an enclosure or bridge that reports an identity of the adversary's
+# choosing. Those are hardware substitution, which
+# [the threat model](../../docs/threat-model.md) §9 already says Boot does not
+# defend against, and §2.1 now says so for this specific mechanism. What it
+# does is make *the ordinary case* — a different medium, a re-created volume, a
+# rolled-back generation, a different Boot image — refuse instead of open.
+
+
+class MediaIdentitySource(Enum):
+    """Where a stable media identity was read from. All hardware-provided.
+
+    There is deliberately **no value** for a bus path, a device node, a port, a
+    hub position or an enumeration order. A value the type cannot hold is a
+    value a caller cannot smuggle in, which is the same reason
+    `azazel_boot.quarantine.Device` has no `kernel_name` field and
+    `azazel_boot.inventory.InterfaceObservation` keeps the kernel name out of
+    identity.
+    """
+
+    USB_SERIAL_DESCRIPTOR = "usb_serial_descriptor"
+    SCSI_VPD_WWN = "scsi_vpd_wwn"
+    NVME_EUI64 = "nvme_eui64"
+    NVME_NGUID = "nvme_nguid"
+    ATA_SERIAL = "ata_serial"
+
+
+#: The shortest identity that is allowed to count as one. A shorter value is
+#: not rejected because it is weak; it is rejected because every device that
+#: reports one reports the same one.
+MINIMUM_IDENTITY_LENGTH = 8
+
+#: Identities that are not identities. Cheap USB-SATA and USB-NVMe bridges ship
+#: with these in the serial descriptor, so a whole production run presents one
+#: value — the same failure as `inventory._NULL_MAC`, which is an absence a
+#: driver reports rather than an address.
+#:
+#: This list is a floor and is not a guarantee: a bridge can report anything,
+#: and one that reports a plausible unique string is indistinguishable from a
+#: real one here. `docs/threat-model.md` §2.1 states that limit.
+KNOWN_PLACEHOLDER_IDENTITIES = frozenset(
+    {
+        "0123456789abcdef",
+        "123456789012",
+        "000000000000",
+        "0000000000000000",
+        "deadbeef",
+        "123456789abc",
+        "012345678901",
+        "aaaaaaaaaaaa",
+        "20170101",
+        "usb",
+        "generic",
+        "none",
+        "null",
+        "n/a",
+        "unknown",
+        "default",
+        "serial",
+        "noserial",
+        "0",
+    }
+)
+
+
+def identity_is_stable(raw: str | None) -> bool:
+    """Whether a value may be used as a medium's identity at all.
+
+    Not a judgement about how good it is. It rejects the three shapes that are
+    certainly shared between devices: absent, uniform (all zeroes, all `F`s),
+    and a known bridge placeholder. Everything else is accepted, and
+    `docs/threat-model.md` §2.1 records that accepting it is not a claim that it
+    is unique.
+    """
+
+    if raw is None:
+        return False
+    value = raw.strip().lower()
+    if len(value) < MINIMUM_IDENTITY_LENGTH:
+        return False
+    if len(set(value)) == 1:
+        return False
+    return value not in KNOWN_PLACEHOLDER_IDENTITIES
+
+
+class MediaIdentity:
+    """A medium's hardware identity, in a wrapper that will not render it.
+
+    The value is the owner's hardware. It reaches the encrypted commissioning
+    record and nothing else, so this type has a redacting `__repr__`, refuses
+    to be pickled or copied, and hands the value out only through
+    :meth:`disclose` — a name a reader cannot mistake for a getter.
+
+    `azazel_boot.media.DeviceIdentity` is the same shape for the same reason,
+    and this follows it deliberately rather than inventing a second one.
+    """
+
+    __slots__ = ("_value", "_source", "_sealed")
+
+    def __init__(self, value: str, source: MediaIdentitySource) -> None:
+        object.__setattr__(self, "_sealed", False)
+        self._value = value
+        self._source = source
+        object.__setattr__(self, "_sealed", True)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if getattr(self, "_sealed", False):
+            raise AttributeError(
+                "a MediaIdentity is fixed once read; a binding derived from one "
+                "value must not be checked against another"
+            )
+        object.__setattr__(self, name, value)
+
+    def __reduce__(self):
+        raise TypeError(
+            "a MediaIdentity is not serialisable; the raw value belongs in the "
+            "encrypted commissioning record and nowhere else"
+        )
+
+    def __repr__(self) -> str:
+        return f"MediaIdentity(source={self._source.value}, value=<redacted>)"
+
+    @property
+    def source(self) -> MediaIdentitySource:
+        return self._source
+
+    @property
+    def is_stable(self) -> bool:
+        return identity_is_stable(self._value)
+
+    def disclose(self) -> str:
+        """The raw value. Every caller of this is a disclosure decision."""
+
+        return self._value
+
+
+class BindingKey:
+    """The HMAC key, derived by the caller from the TPM or the commissioning secret.
+
+    A plain hash would let anyone who learns the four inputs recompute the
+    binding, which is why the standing rule is a **key-protected** HMAC rather
+    than a digest. The key material is never written to the audit, a journal, a
+    terminal, an issue, a pull request or an external report, so this type
+    cannot render itself and cannot be serialised.
+
+    Nothing stores one. It is supplied per act and this module keeps no
+    reference after the call returns.
+    """
+
+    __slots__ = ("_key",)
+
+    def __init__(self, key: bytes) -> None:
+        object.__setattr__(self, "_key", bytes(key))
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError("a BindingKey is fixed at construction")
+
+    def __reduce__(self):
+        raise TypeError("a BindingKey is not serialisable")
+
+    def __repr__(self) -> str:
+        return "BindingKey(<redacted>)"
+
+    @property
+    def is_usable(self) -> bool:
+        return len(self._key) >= MINIMUM_KEY_BYTES
+
+    def disclose(self) -> bytes:
+        return self._key
+
+
+#: Below this, the key is not protecting anything. A caller with no TPM and no
+#: commissioning secret has no key, and the refusal for that is the same one:
+#: persistence does not open.
+MINIMUM_KEY_BYTES = 16
+
+#: Domain separation, so a digest computed here can never be confused with one
+#: computed over the same fields for another purpose.
+_BINDING_DOMAIN = b"azazel-boot/media-binding/v1"
+
+
+@dataclass(frozen=True)
+class MediaBinding:
+    """The HMAC, and nothing else.
+
+    There is no `media_identity`, `serial`, `wwn`, `key` or `key_material`
+    field. The four inputs are not recoverable from it, which is what lets the
+    caller store it beside the volume.
+    """
+
+    digest: str
+
+    def __repr__(self) -> str:
+        return "MediaBinding(digest=<redacted>)"
+
+
+@dataclass(frozen=True)
+class MediaClaim:
+    """What the caller says this medium is, this boot.
+
+    The identity is wrapped; the other three are not secret — a volume UUID, a
+    signed image digest and a counter say nothing about the owner's hardware.
+    """
+
+    identity: MediaIdentity
+    persistence_uuid: str
+    boot_image_digest: str
+    commissioning_generation: int
+
+    def __repr__(self) -> str:
+        return (
+            f"MediaClaim(identity={self.identity!r}, "
+            f"persistence_uuid=<redacted>, boot_image_digest=<redacted>, "
+            f"commissioning_generation={self.commissioning_generation!r})"
+        )
+
+
+@dataclass(frozen=True)
+class MediaAssertion:
+    """A claim and the binding it is checked against, for one act."""
+
+    claim: MediaClaim
+    binding: MediaBinding
+
+
+def _canonical(*parts: str) -> bytes:
+    """Length-prefixed, so no two different field sets share an encoding.
+
+    Concatenating `a|b` and `ab|` would otherwise give one digest for two
+    different media. The domain prefix keeps this digest distinct from any
+    other HMAC the product computes over the same values.
+    """
+
+    encoded = [part.encode("utf-8") for part in parts]
+    return _BINDING_DOMAIN + b"".join(
+        str(len(item)).encode("ascii") + b":" + item for item in encoded
+    )
+
+
+def _digest(claim: MediaClaim, key: BindingKey) -> str:
+    """Compute, and never raise.
+
+    It returns before anything can fail, so no traceback taken later in the act
+    holds this frame — which is where the disclosed identity and the disclosed
+    key are locals. That is the lesson from the host binding, where making the
+    check real put the values it was derived from into every refusal.
+    """
+
+    message = _canonical(
+        claim.identity.source.value,
+        claim.identity.disclose(),
+        claim.persistence_uuid,
+        claim.boot_image_digest,
+        str(claim.commissioning_generation),
+    )
+    return hmac.new(key.disclose(), message, hashlib.sha256).hexdigest()
+
+
+def bind_media(claim: MediaClaim, key: BindingKey) -> MediaBinding:
+    """Mint the binding for this medium, this volume, this image, this generation.
+
+    Refuses rather than minting a binding over an identity that is certainly
+    shared, or with a key that is not one. A medium whose hardware identity
+    cannot be read gets no binding, and therefore no persistence — the same
+    discipline `commissioning.UnidentifiedHost` applies to the host.
+    """
+
+    _require_bindable(
+        identity_present=claim.identity.disclose().strip() != "",
+        identity_stable=claim.identity.is_stable,
+        key_usable=key.is_usable,
+        uuid_present=claim.persistence_uuid.strip() != "",
+        image_digest_present=claim.boot_image_digest.strip() != "",
+    )
+    _require_generation(claim.commissioning_generation)
+    return MediaBinding(digest=_digest(claim, key))
+
+
+def media_binding_applies(
+    binding: MediaBinding, claim: MediaClaim, key: BindingKey
+) -> bool:
+    """Re-derive and compare in constant time.
+
+    Re-derived, not re-compared: the digest is recomputed from the claim the
+    caller presents now, so a binding minted for another medium, another
+    volume, another image or an earlier generation does not match. A changed
+    identity and a forged binding are **the same refusal** — distinguishing
+    them would make the refusal an oracle that tells an attacker which of the
+    four inputs they got wrong.
+    """
+
+    try:
+        recomputed = bind_media(claim, key)
+    except PersistenceRefused:
+        return False
+    return hmac.compare_digest(recomputed.digest, binding.digest)
+
+
+def _require_bindable(
+    *,
+    identity_present: bool,
+    identity_stable: bool,
+    key_usable: bool,
+    uuid_present: bool,
+    image_digest_present: bool,
+) -> None:
+    """Raise from a frame holding five booleans and nothing else.
+
+    None of the values is in scope here, so a captured-locals traceback of any
+    refusal below carries no hardware identity and no key material.
+    """
+
+    if not key_usable:
+        raise PersistenceRefused(
+            Refusal.MEDIA_BINDING_KEY_UNAVAILABLE,
+            "a key-protected binding needs a key from the platform or the "
+            "commissioning secret; without one persistence does not open",
+        )
+    if not identity_present:
+        raise PersistenceRefused(
+            Refusal.MEDIA_IDENTITY_UNAVAILABLE,
+            "the medium reported no hardware identity; a medium that cannot say "
+            "what it is does not carry persistence",
+        )
+    if not identity_stable:
+        raise PersistenceRefused(
+            Refusal.MEDIA_IDENTITY_NOT_STABLE,
+            "the reported identity is one every device of its kind reports; it "
+            "is an absence with a value, not an identity",
+        )
+    if not uuid_present:
+        raise PersistenceRefused(
+            Refusal.MEDIA_BINDING_INCOMPLETE,
+            "the binding covers the persistence volume as well as the medium",
+        )
+    if not image_digest_present:
+        raise PersistenceRefused(
+            Refusal.MEDIA_BINDING_INCOMPLETE,
+            "the binding covers the signed Boot image as well as the medium",
+        )
+
+
 def has_persistence(layout: MediumLayout) -> bool:
     return any(partition.role == "persistence" for partition in layout.partitions)
 
@@ -504,15 +892,24 @@ class PersistenceSession:
         device: Device,
         layout: MediumLayout,
         observations: tuple[InterfaceObservation, ...],
+        *,
+        media: MediaAssertion,
+        binding_key: BindingKey,
     ) -> PersistenceStatus:
         """Decide whether persistence may be created here, now, on this medium.
 
         Creation is a separate explicit act. Nothing implies it: not a boot, not
         a successful write, not an operator confirming a NIC role.
+
+        The caller mints the binding with `bind_media` and passes it. It is
+        checked rather than trusted: a binding minted for another medium,
+        another volume, another image or another generation does not match the
+        claim presented here.
         """
 
         self._require_open_session(observations)
         self._require_the_medium(device)
+        self._require_the_media_binding(media, binding_key)
         check_layout(layout)
         return self._settle(
             PersistenceState.LOCKED,
@@ -527,6 +924,8 @@ class PersistenceSession:
         layout: MediumLayout,
         observations: tuple[InterfaceObservation, ...],
         *,
+        media: MediaAssertion,
+        binding_key: BindingKey,
         unlocked: bool,
         integrity_verified: bool,
         stored_generation: int,
@@ -545,6 +944,7 @@ class PersistenceSession:
 
         self._require_open_session(observations)
         self._require_the_medium(device)
+        self._require_the_media_binding(media, binding_key)
         check_layout(layout)
         if not has_persistence(layout):
             raise PersistenceRefused(
@@ -644,6 +1044,34 @@ class PersistenceSession:
                 "created on, mounted, repaired or written back to",
             )
 
+    def _require_the_media_binding(
+        self, media: MediaAssertion, binding_key: BindingKey
+    ) -> None:
+        """The medium's own identity, checked before the layout is even read.
+
+        The quarantine answers "is this the booted medium" from the identity the
+        initramfs marked, which is a value this session assigned. This answers a
+        different question — "is this the medium the volume was bound to" — from
+        a hardware-provided identity the medium reports, under a key the caller
+        derives from the platform or the commissioning secret.
+
+        Both are needed. The host binding was defeated by a USB NIC supplying
+        the host's whole identity; a medium binding that rested on the session's
+        own labelling would be defeated the same way.
+
+        `bind_media` raises the specific refusal for a missing key, an absent
+        identity, a placeholder identity or an incomplete binding.
+        `media_binding_applies` collapses everything else — a different medium, a
+        re-created volume, a different image, a rolled-back generation, a forged
+        binding — into one refusal on purpose: a refusal that says *which* input
+        was wrong is an oracle.
+        """
+
+        recomputed = bind_media(media.claim, binding_key)
+        _refuse_media_binding(
+            matches=hmac.compare_digest(recomputed.digest, media.binding.digest)
+        )
+
     def _settle(
         self,
         state: PersistenceState,
@@ -738,6 +1166,17 @@ def _refuse_binding(*, applies: bool) -> None:
             Refusal.NOT_THIS_HOST_OR_SESSION,
             "this record was bound to another machine or another session; a "
             "medium carried to a different laptop starts from nothing",
+        )
+
+
+def _refuse_media_binding(*, matches: bool) -> None:
+    """Raise from a frame holding one boolean, for the reason `_refuse_binding` does."""
+
+    if not matches:
+        raise PersistenceRefused(
+            Refusal.MEDIA_BINDING_MISMATCH,
+            "this volume was bound to another medium, another image or another "
+            "generation; a medium whose identity changed is the same refusal",
         )
 
 

@@ -37,7 +37,13 @@ from azazel_boot.persistence import (
     RECOVERY_OPTIONS,
     VOLUME_MANAGER_MEMBERS,
     VOLUME_MANAGERS,
+    BindingKey,
     Capability,
+    MediaAssertion,
+    MediaBinding,
+    MediaClaim,
+    MediaIdentity,
+    MediaIdentitySource,
     MediumLayout,
     Partition,
     PersistenceRefused,
@@ -46,7 +52,10 @@ from azazel_boot.persistence import (
     PersistenceStatus,
     Refusal,
     UnlockOutcome,
+    bind_media,
     check_layout,
+    identity_is_stable,
+    media_binding_applies,
     status_field_names,
 )
 from azazel_boot.quarantine import Device, DeviceClass, Quarantine
@@ -73,6 +82,47 @@ CONFIDENTIAL_NAMES = (
 ESP = Partition(role="esp", filesystem="vfat")
 ROOT = Partition(role="boot_root", filesystem="squashfs", read_only=True)
 PERSISTENCE = Partition(role="persistence", filesystem="ext4", mappings=("dm-crypt",))
+
+
+#: The medium's own identity, and the key the binding is protected with.
+#:
+#: Synthetic, like everything else here. A real one is read from the device's
+#: USB serial descriptor, SCSI VPD page or NVMe identify data by a component
+#: permitted to query hardware, and a real key is derived from the TPM or the
+#: commissioning secret. `azazel_boot.persistence` reads neither.
+MEDIA_IDENTITY = MediaIdentity(
+    "SYNTHETIC-MEDIA-0001", MediaIdentitySource.USB_SERIAL_DESCRIPTOR
+)
+BINDING_KEY = BindingKey(b"synthetic-test-key-not-a-real-one")
+PERSISTENCE_UUID = "9f2a41c8-0000-4000-8000-synthetic01"
+BOOT_IMAGE_DIGEST = "sha256:" + "a" * 64
+COMMISSIONING_GENERATION = 3
+
+
+def claim(**overrides) -> MediaClaim:
+    return MediaClaim(
+        identity=overrides.pop("identity", MEDIA_IDENTITY),
+        persistence_uuid=overrides.pop("persistence_uuid", PERSISTENCE_UUID),
+        boot_image_digest=overrides.pop("boot_image_digest", BOOT_IMAGE_DIGEST),
+        commissioning_generation=overrides.pop(
+            "commissioning_generation", COMMISSIONING_GENERATION
+        ),
+    )
+
+
+def assertion(**overrides) -> MediaAssertion:
+    """A claim and a binding minted for it. The honest, matching pair."""
+
+    made = claim(**overrides)
+    return MediaAssertion(claim=made, binding=bind_media(made, BINDING_KEY))
+
+
+MEDIA = assertion()
+
+#: The two arguments every act now requires, for the call sites whose subject is
+#: something else. The tests that are *about* the media binding pass them
+#: explicitly, which is where naming them earns its space.
+MEDIA_ARGS = {"media": MEDIA, "binding_key": BINDING_KEY}
 
 
 def layout(*partitions: Partition, table: str = "gpt") -> MediumLayout:
@@ -141,7 +191,7 @@ def unlock_arguments(**overrides) -> dict:
 
 
 def test_persistence_is_created_only_on_the_booted_medium(observations) -> None:
-    status = session(observations).create(MEDIUM, layout(), observations)
+    status = session(observations).create(MEDIUM, layout(), observations, **MEDIA_ARGS)
     assert status.state is PersistenceState.LOCKED
 
 
@@ -152,9 +202,9 @@ def test_host_storage_is_never_a_persistence_target(act: str, observations) -> N
     live = session(observations)
     with pytest.raises(PersistenceRefused) as refused:
         if act == "create":
-            live.create(HOST_DISK, layout(), observations)
+            live.create(HOST_DISK, layout(), observations, **MEDIA_ARGS)
         else:
-            live.unlock(HOST_DISK, layout(), observations, **unlock_arguments())
+            live.unlock(HOST_DISK, layout(), observations, **MEDIA_ARGS, **unlock_arguments())
     assert refused.value.refusal is Refusal.NOT_THE_BOOT_MEDIUM
 
 
@@ -163,9 +213,9 @@ def test_an_unobserved_target_is_refused_rather_than_assumed(act: str, observati
     live = session(observations)
     with pytest.raises(PersistenceRefused) as refused:
         if act == "create":
-            live.create(NEVER_SEEN, layout(), observations)
+            live.create(NEVER_SEEN, layout(), observations, **MEDIA_ARGS)
         else:
-            live.unlock(NEVER_SEEN, layout(), observations, **unlock_arguments())
+            live.unlock(NEVER_SEEN, layout(), observations, **MEDIA_ARGS, **unlock_arguments())
     assert refused.value.refusal is Refusal.UNOBSERVED_TARGET
 
 
@@ -185,12 +235,12 @@ def test_the_session_asks_the_quarantine_rather_than_taking_a_disposition() -> N
 
 def test_a_medium_demoted_by_the_quarantine_stops_being_a_target(observations) -> None:
     live = session(observations)
-    live.create(MEDIUM, layout(), observations)
+    live.create(MEDIUM, layout(), observations, **MEDIA_ARGS)
     live.quarantine._dispositions[MEDIUM_ID] = __import__(
         "azazel_boot.quarantine", fromlist=["Disposition"]
     ).Disposition.QUARANTINED  # noqa: SLF001 - forcing the state the quarantine owns
     with pytest.raises(PersistenceRefused) as refused:
-        live.unlock(MEDIUM, layout(), observations, **unlock_arguments())
+        live.unlock(MEDIUM, layout(), observations, **MEDIA_ARGS, **unlock_arguments())
     assert refused.value.refusal is Refusal.NOT_THE_BOOT_MEDIUM
 
 
@@ -205,9 +255,9 @@ def test_both_acts_apply_the_layout_check(act: str, observations) -> None:
     bad = layout(ESP, ROOT, Partition("persistence", "ext4", mappings=("dm-crypt", "lvm")))
     with pytest.raises(PersistenceRefused) as refused:
         if act == "create":
-            live.create(MEDIUM, bad, observations)
+            live.create(MEDIUM, bad, observations, **MEDIA_ARGS)
         else:
-            live.unlock(MEDIUM, bad, observations, **unlock_arguments())
+            live.unlock(MEDIUM, bad, observations, **MEDIA_ARGS, **unlock_arguments())
     assert refused.value.refusal is Refusal.VOLUME_MANAGER_PRESENT
 
 
@@ -304,9 +354,10 @@ def test_persistence_is_optional_but_cannot_be_unlocked_when_absent(observations
 
     check_layout(layout(ESP, ROOT))
     live = session(observations)
-    assert live.create(MEDIUM, layout(ESP, ROOT), observations).state is PersistenceState.LOCKED
+    created = live.create(MEDIUM, layout(ESP, ROOT), observations, **MEDIA_ARGS)
+    assert created.state is PersistenceState.LOCKED
     with pytest.raises(PersistenceRefused) as refused:
-        live.unlock(MEDIUM, layout(ESP, ROOT), observations, **unlock_arguments())
+        live.unlock(MEDIUM, layout(ESP, ROOT), observations, **MEDIA_ARGS, **unlock_arguments())
     assert refused.value.refusal is Refusal.NO_PERSISTENCE_PARTITION
 
 
@@ -341,9 +392,9 @@ def test_a_binding_that_does_not_apply_refuses_every_act(
     live = session(observations, **overrides)
     with pytest.raises(PersistenceRefused) as refused:
         if act == "create":
-            live.create(MEDIUM, layout(), observations)
+            live.create(MEDIUM, layout(), observations, **MEDIA_ARGS)
         else:
-            live.unlock(MEDIUM, layout(), observations, **unlock_arguments())
+            live.unlock(MEDIUM, layout(), observations, **MEDIA_ARGS, **unlock_arguments())
     assert refused.value.refusal is Refusal.NOT_THIS_HOST_OR_SESSION
 
 
@@ -362,9 +413,15 @@ def test_the_same_session_on_a_different_laptop_is_refused(
     live = session(observations)
     with pytest.raises(PersistenceRefused) as refused:
         if act == "create":
-            live.create(MEDIUM, layout(), another_laptop)
+            live.create(MEDIUM, layout(), another_laptop, **MEDIA_ARGS)
         else:
-            live.unlock(MEDIUM, layout(), another_laptop, **unlock_arguments())
+            live.unlock(
+                MEDIUM,
+                layout(),
+                another_laptop,
+                **MEDIA_ARGS,
+                **unlock_arguments(),
+            )
     assert refused.value.refusal is Refusal.NOT_THIS_HOST_OR_SESSION
 
 
@@ -372,7 +429,9 @@ def test_the_same_session_on_a_different_laptop_is_refused(
 
 
 def test_a_verified_volume_opens(observations) -> None:
-    status = session(observations).unlock(MEDIUM, layout(), observations, **unlock_arguments())
+    status = session(observations).unlock(
+        MEDIUM, layout(), observations, **MEDIA_ARGS, **unlock_arguments()
+    )
     assert status.state is PersistenceState.OPEN
     assert status.outcome is UnlockOutcome.OPENED
     assert status.writable is True
@@ -396,7 +455,7 @@ def test_every_failure_quarantines_rather_than_repairs_into_use(
     overrides, expected, observations
 ) -> None:
     status = session(observations).unlock(
-        MEDIUM, layout(), observations, **unlock_arguments(**overrides)
+        MEDIUM, layout(), observations, **MEDIA_ARGS, **unlock_arguments(**overrides)
     )
     assert status.state is PersistenceState.QUARANTINED
     assert status.outcome is expected
@@ -434,7 +493,7 @@ def test_the_first_fault_in_the_fixed_order_is_the_one_reported(
     overrides, expected, observations
 ) -> None:
     status = session(observations).unlock(
-        MEDIUM, layout(), observations, **unlock_arguments(**overrides)
+        MEDIUM, layout(), observations, **MEDIA_ARGS, **unlock_arguments(**overrides)
     )
     assert status.outcome is expected
 
@@ -443,7 +502,11 @@ def test_a_repaired_volume_is_distinguishable_from_a_verified_one(observations) 
     """The earlier version returned plain `opened`, identical but for a string."""
 
     status = session(observations).unlock(
-        MEDIUM, layout(), observations, **unlock_arguments(dirty=True, reverified_after_repair=True)
+        MEDIUM,
+        layout(),
+        observations,
+        **MEDIA_ARGS,
+        **unlock_arguments(dirty=True, reverified_after_repair=True),
     )
     assert status.state is PersistenceState.OPEN
     assert status.outcome is UnlockOutcome.OPENED_AFTER_REPAIR
@@ -458,7 +521,11 @@ def test_a_generation_that_is_not_a_count_is_refused(value, observations) -> Non
 
     with pytest.raises(PersistenceRefused) as refused:
         session(observations).unlock(
-            MEDIUM, layout(), observations, **unlock_arguments(stored_generation=value)
+            MEDIUM,
+            layout(),
+            observations,
+            **MEDIA_ARGS,
+            **unlock_arguments(stored_generation=value),
         )
     assert refused.value.refusal is Refusal.GENERATION_NOT_A_COUNT
 
@@ -489,15 +556,15 @@ def test_a_fence_revokes_the_session_rather_than_returning_a_new_value(observati
     """A component holding the earlier status used to keep reading `open`."""
 
     live = session(observations)
-    live.unlock(MEDIUM, layout(), observations, **unlock_arguments())
+    live.unlock(MEDIUM, layout(), observations, **MEDIA_ARGS, **unlock_arguments())
     assert live.status().writable is True
 
     live.fence_after_removal()
     assert live.status().state is PersistenceState.FENCED
     assert live.status().writable is False
     for act in (
-        lambda: live.create(MEDIUM, layout(), observations),
-        lambda: live.unlock(MEDIUM, layout(), observations, **unlock_arguments()),
+        lambda: live.create(MEDIUM, layout(), observations, **MEDIA_ARGS),
+        lambda: live.unlock(MEDIUM, layout(), observations, **MEDIA_ARGS, **unlock_arguments()),
     ):
         with pytest.raises(PersistenceRefused) as refused:
             act()
@@ -518,18 +585,27 @@ def test_capability_is_an_enum_with_two_members() -> None:
     [
         (lambda live, seen: live.status(), PersistenceState.UNEXAMINED, Capability.CORE),
         (
-            lambda live, seen: live.create(MEDIUM, layout(), seen),
+            lambda live, seen: live.create(
+                MEDIUM, layout(), seen, **MEDIA_ARGS
+            ),
             PersistenceState.LOCKED,
             Capability.CORE,
         ),
         (
-            lambda live, seen: live.unlock(MEDIUM, layout(), seen, **unlock_arguments()),
+            lambda live, seen: live.unlock(
+                MEDIUM, layout(), seen, **MEDIA_ARGS,
+                **unlock_arguments(),
+            ),
             PersistenceState.OPEN,
             Capability.LITE,
         ),
         (
             lambda live, seen: live.unlock(
-                MEDIUM, layout(), seen, **unlock_arguments(integrity_verified=False)
+                MEDIUM,
+                layout(),
+                seen,
+                **MEDIA_ARGS,
+                **unlock_arguments(integrity_verified=False),
             ),
             PersistenceState.QUARANTINED,
             Capability.CORE,
@@ -553,8 +629,11 @@ def test_each_state_carries_exactly_its_capability_and_no_authority(
 def test_only_an_open_volume_is_writable(observations) -> None:
     live = session(observations)
     assert live.status().writable is False
-    assert live.create(MEDIUM, layout(), observations).writable is False
-    assert live.unlock(MEDIUM, layout(), observations, **unlock_arguments()).writable is True
+    assert live.create(MEDIUM, layout(), observations, **MEDIA_ARGS).writable is False
+    opened = live.unlock(
+        MEDIUM, layout(), observations, **MEDIA_ARGS, **unlock_arguments()
+    )
+    assert opened.writable is True
 
 
 # --- recovery never touches the host ---------------------------------------
@@ -594,7 +673,7 @@ def test_recovery_options_read_the_current_state_not_a_held_snapshot(
     """A caller holding `unlock`'s return value got no reboot instruction."""
 
     live = session(observations)
-    live.unlock(MEDIUM, layout(), observations, **unlock_arguments())
+    live.unlock(MEDIUM, layout(), observations, **MEDIA_ARGS, **unlock_arguments())
     live.fence_after_removal()
     assert live.recovery_options() == ("reboot; the session cannot continue",)
 
@@ -633,7 +712,7 @@ def test_no_traceback_of_a_binding_refusal_carries_the_binding(observations) -> 
         observations, session_id="s-secret-99", host_fingerprint="sha256:" + "b" * 64
     )
     try:
-        live.create(MEDIUM, layout(), observations)
+        live.create(MEDIUM, layout(), observations, **MEDIA_ARGS)
     except PersistenceRefused as error:
         captured = "".join(
             traceback.TracebackException.from_exception(
@@ -654,7 +733,7 @@ def test_no_traceback_of_any_refusal_carries_the_device_or_the_layout(
     live = session(observations)
     hostile = Partition(role="/dev/nvme0n1p3 SERIAL=S4EVNF0N", filesystem="ext4")
     try:
-        live.create(MEDIUM, layout(ESP, ROOT, hostile), observations)
+        live.create(MEDIUM, layout(ESP, ROOT, hostile), observations, **MEDIA_ARGS)
     except PersistenceRefused as error:
         captured = "".join(
             traceback.TracebackException.from_exception(
@@ -667,7 +746,9 @@ def test_no_traceback_of_any_refusal_carries_the_device_or_the_layout(
 
 
 def test_a_status_renders_and_serialises_without_a_secret(observations) -> None:
-    status = session(observations).unlock(MEDIUM, layout(), observations, **unlock_arguments())
+    status = session(observations).unlock(
+        MEDIUM, layout(), observations, **MEDIA_ARGS, **unlock_arguments()
+    )
     document = dataclasses.asdict(status)
     document["state"] = status.state.value
     document["outcome"] = status.outcome.value
@@ -682,7 +763,7 @@ def test_the_session_is_sealed_and_the_fence_is_one_way(observations) -> None:
     the fence with one assignment."""
 
     live = session(observations)
-    live.unlock(MEDIUM, layout(), observations, **unlock_arguments())
+    live.unlock(MEDIUM, layout(), observations, **MEDIA_ARGS, **unlock_arguments())
     live.fence_after_removal()
 
     with pytest.raises(AttributeError):
@@ -730,7 +811,7 @@ def test_an_unobserved_device_claiming_to_be_the_medium_is_refused(observations)
 
     impostor = Device(identity="another-usb", device_class=DeviceClass.BOOT_MEDIUM)
     with pytest.raises(PersistenceRefused) as refused:
-        session(observations).create(impostor, layout(), observations)
+        session(observations).create(impostor, layout(), observations, **MEDIA_ARGS)
     assert refused.value.refusal is Refusal.UNOBSERVED_TARGET
 
 
@@ -787,7 +868,7 @@ def test_each_role_carries_one_of_a_named_set_of_filesystems() -> None:
 
 
 def test_a_status_is_immutable(observations) -> None:
-    status = session(observations).create(MEDIUM, layout(), observations)
+    status = session(observations).create(MEDIUM, layout(), observations, **MEDIA_ARGS)
     with pytest.raises(dataclasses.FrozenInstanceError):
         status.state = PersistenceState.OPEN  # type: ignore[misc]
     assert isinstance(status, PersistenceStatus)
@@ -868,7 +949,9 @@ def test_a_record_carrying_the_empty_digest_applies_to_nothing(
 
     live = session(observations, host_fingerprint=EMPTY_DIGEST)
     with pytest.raises(PersistenceRefused) as refused:
-        live.create(MEDIUM, layout(), unidentifiable)
+        live.create(
+            MEDIUM, layout(), unidentifiable, **MEDIA_ARGS
+        )
     assert refused.value.refusal is Refusal.NOT_THIS_HOST_OR_SESSION
 
 
@@ -887,7 +970,7 @@ def test_no_traceback_carries_the_host_identities_the_fingerprint_is_taken_over(
 
     live = session(observations, session_id="s-secret-99")
     try:
-        live.create(MEDIUM, layout(), observations)
+        live.create(MEDIUM, layout(), observations, **MEDIA_ARGS)
     except PersistenceRefused as error:
         captured = "".join(
             traceback.TracebackException.from_exception(
@@ -922,14 +1005,14 @@ def test_rebuilding_a_session_over_a_fenced_medium_does_not_unfence_it(
         host_fingerprint=host_fingerprint(observations), session_id=SESSION
     )
     first = session(observations, quarantine=quarantine)
-    first.unlock(MEDIUM, layout(), observations, **unlock_arguments())
+    first.unlock(MEDIUM, layout(), observations, **MEDIA_ARGS, **unlock_arguments())
     first.fence_after_removal()
 
     second = PersistenceSession(
         quarantine=quarantine, binding=binding, session_id=SESSION
     )
     with pytest.raises(PersistenceRefused) as refused:
-        second.unlock(MEDIUM, layout(), observations, **unlock_arguments())
+        second.unlock(MEDIUM, layout(), observations, **MEDIA_ARGS, **unlock_arguments())
     assert refused.value.refusal is Refusal.SESSION_FENCED
     assert second.status().state is PersistenceState.FENCED
     assert second.recovery_options() == ("reboot; the session cannot continue",)
@@ -940,13 +1023,13 @@ def test_the_fence_survives_the_seal_being_bypassed(observations) -> None:
     """`object.__setattr__` clears the slot; the fence must not depend on it."""
 
     live = session(observations)
-    live.unlock(MEDIUM, layout(), observations, **unlock_arguments())
+    live.unlock(MEDIUM, layout(), observations, **MEDIA_ARGS, **unlock_arguments())
     live.fence_after_removal()
 
     object.__setattr__(live, "_fenced", False)
     assert live.status().state is PersistenceState.FENCED
     with pytest.raises(PersistenceRefused) as refused:
-        live.create(MEDIUM, layout(), observations)
+        live.create(MEDIUM, layout(), observations, **MEDIA_ARGS)
     assert refused.value.refusal is Refusal.SESSION_FENCED
 
 
@@ -1026,3 +1109,352 @@ def test_the_two_constant_tables_cannot_be_widened_by_assignment() -> None:
         PERMITTED_FILESYSTEMS["persistence"] = ("btrfs",)  # type: ignore[index]
     with pytest.raises(TypeError):
         RECOVERY_OPTIONS[PersistenceState.FENCED] = ()  # type: ignore[index]
+
+
+# --------------------------------------------------------------------------
+# The medium's own identity (F32, option b)
+#
+# The host binding alone was defeated: a laptop whose onboard NICs cannot be
+# identified takes its whole fingerprint from whatever identifiable NIC is
+# present, so an adversary supplying a USB dongle supplied the host identity,
+# and three laptops sharing one dongle shared one fingerprint. Opening
+# persistence now requires a hardware-provided stable media identity as well,
+# bound under a key-protected HMAC together with the LUKS volume UUID, the
+# signed Boot image digest and the commissioning generation.
+# --------------------------------------------------------------------------
+
+
+def test_the_identity_source_vocabulary_has_no_word_for_where_it_is_plugged_in() -> None:
+    """Topology is not identity, and the type cannot express it.
+
+    A bus path, a device node, a port or an enumeration order says where a
+    thing is plugged in. All four change when the operator uses a different
+    socket, and none of them is reported by the device. The same discipline as
+    `Device` having no `kernel_name` and the interface key excluding it.
+    """
+
+    values = {source.value for source in MediaIdentitySource}
+    assert values == {
+        "usb_serial_descriptor",
+        "scsi_vpd_wwn",
+        "nvme_eui64",
+        "nvme_nguid",
+        "ata_serial",
+    }
+    for forbidden in ("bus", "path", "port", "node", "slot", "hub", "index", "order"):
+        assert not any(forbidden in value for value in values)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        "",
+        "   ",
+        "0000000000000000",
+        "aaaaaaaaaaaa",
+        "0123456789abcdef",
+        "123456789012",
+        "unknown",
+        "short",
+    ],
+)
+def test_an_identity_every_device_of_its_kind_reports_is_not_an_identity(value) -> None:
+    """The `_NULL_MAC` rule, for media.
+
+    Cheap USB-SATA and USB-NVMe bridges ship a whole production run with one
+    serial descriptor. Treating that as an identity gives every medium of that
+    model the same one — which is the failure this whole change exists to
+    close, arrived at from the other direction.
+    """
+
+    assert not identity_is_stable(value)
+
+
+def test_a_medium_with_no_usable_identity_gets_no_binding_and_no_persistence(
+    observations,
+) -> None:
+    unusable = MediaIdentity("", MediaIdentitySource.USB_SERIAL_DESCRIPTOR)
+    with pytest.raises(PersistenceRefused) as refused:
+        bind_media(claim(identity=unusable), BINDING_KEY)
+    assert refused.value.refusal is Refusal.MEDIA_IDENTITY_UNAVAILABLE
+
+    placeholder = MediaIdentity("0123456789abcdef", MediaIdentitySource.SCSI_VPD_WWN)
+    with pytest.raises(PersistenceRefused) as refused:
+        bind_media(claim(identity=placeholder), BINDING_KEY)
+    assert refused.value.refusal is Refusal.MEDIA_IDENTITY_NOT_STABLE
+
+
+def test_without_a_key_there_is_no_binding_and_therefore_no_persistence() -> None:
+    """A plain digest is recomputable by anyone who learns the four inputs.
+
+    The standing rule is a key-protected HMAC bound to the platform or the
+    commissioning secret. A caller with neither has no key, and the answer is
+    a refusal rather than a weaker binding.
+    """
+
+    with pytest.raises(PersistenceRefused) as refused:
+        bind_media(claim(), BindingKey(b"tooshort"))
+    assert refused.value.refusal is Refusal.MEDIA_BINDING_KEY_UNAVAILABLE
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        {"identity": MediaIdentity("ANOTHER-MEDIUM-0002", MediaIdentitySource.NVME_EUI64)},
+        {"persistence_uuid": "00000000-1111-4000-8000-recreated01"},
+        {"boot_image_digest": "sha256:" + "b" * 64},
+        {"commissioning_generation": COMMISSIONING_GENERATION - 1},
+    ],
+)
+def test_any_of_the_four_bound_inputs_changing_refuses(changed, observations) -> None:
+    """A different medium, a re-created volume, a different image, a rollback.
+
+    All four are one refusal on purpose. A refusal naming *which* input was
+    wrong is an oracle: it tells an attacker holding three of them which one to
+    keep working on.
+    """
+
+    live = session(observations)
+    tampered = MediaAssertion(claim=claim(**changed), binding=MEDIA.binding)
+
+    assert not media_binding_applies(MEDIA.binding, claim(**changed), BINDING_KEY)
+    with pytest.raises(PersistenceRefused) as refused:
+        live.unlock(
+            MEDIUM,
+            layout(),
+            observations,
+            media=tampered,
+            binding_key=BINDING_KEY,
+            **unlock_arguments(),
+        )
+    assert refused.value.refusal is Refusal.MEDIA_BINDING_MISMATCH
+
+
+def test_a_binding_minted_under_another_key_does_not_match() -> None:
+    """Key-protected means the key is what makes it unforgeable."""
+
+    other = BindingKey(b"a-different-synthetic-test-key!!")
+    minted = bind_media(claim(), other)
+    assert minted.digest != MEDIA.binding.digest
+    assert not media_binding_applies(minted, claim(), BINDING_KEY)
+    assert media_binding_applies(minted, claim(), other)
+
+
+def test_persistence_does_not_open_when_the_media_binding_is_absent_or_wrong(
+    observations,
+) -> None:
+    """The check runs in both acts, before the layout is even read.
+
+    A review deleted the layout call from both entry points once and every
+    layout test stayed green because they all called the checker directly. The
+    same shape of mistake is possible here, so both acts are exercised.
+    """
+
+    live = session(observations)
+    forged = MediaAssertion(claim=claim(), binding=MediaBinding(digest="0" * 64))
+
+    for act in ("create", "unlock"):
+        with pytest.raises(PersistenceRefused) as refused:
+            if act == "create":
+                live.create(
+                    MEDIUM,
+                    layout(),
+                    observations,
+                    media=forged,
+                    binding_key=BINDING_KEY,
+                )
+            else:
+                live.unlock(
+                    MEDIUM,
+                    layout(),
+                    observations,
+                    media=forged,
+                    binding_key=BINDING_KEY,
+                    **unlock_arguments(),
+                )
+        assert refused.value.refusal is Refusal.MEDIA_BINDING_MISMATCH
+    assert live.status().state is PersistenceState.UNEXAMINED
+
+
+def test_the_media_binding_is_checked_before_the_layout_is_read(observations) -> None:
+    """A medium that is not ours is refused without parsing what it presents.
+
+    A partition table is attacker-supplied input, and reading it to decide
+    whether to refuse a medium we have already failed to recognise is work done
+    on the adversary's behalf.
+    """
+
+    live = session(observations)
+    hostile = Partition(role="/dev/nvme0n1p3 SERIAL=S4EVNF0N", filesystem="ext4")
+    forged = MediaAssertion(claim=claim(), binding=MediaBinding(digest="0" * 64))
+
+    with pytest.raises(PersistenceRefused) as refused:
+        live.create(
+            MEDIUM,
+            layout(ESP, ROOT, hostile),
+            observations,
+            media=forged,
+            binding_key=BINDING_KEY,
+        )
+    assert refused.value.refusal is Refusal.MEDIA_BINDING_MISMATCH
+
+
+def _tampered_media() -> tuple[MediaAssertion, BindingKey]:
+    """A claim whose identity does not match `MEDIA.binding`, and a key.
+
+    The raw strings live only here. This frame has returned by the time any
+    refusal is raised, so they are in no traceback the caller captures.
+    """
+
+    return (
+        MediaAssertion(
+            claim=claim(
+                identity=MediaIdentity(
+                    "S4EVNF0NSECRET999", MediaIdentitySource.USB_SERIAL_DESCRIPTOR
+                )
+            ),
+            binding=MEDIA.binding,
+        ),
+        BindingKey(b"the-key-material-must-never-render"),
+    )
+
+
+def test_nothing_renders_the_raw_media_identity_or_the_key(observations) -> None:
+    """The owner's hardware, and key material. Neither may be rendered anywhere.
+
+    The standing rule is that a raw serial, WWN or EUI-64 lives in the
+    encrypted commissioning record and nowhere else — not the audit, not a
+    journal, not a terminal, not an issue or a pull request, not an external
+    report. Key material goes nowhere at all.
+
+    A captured-locals traceback is every one of those at once, so it is what is
+    measured.
+    """
+
+    # Built in a helper so the raw values are **not locals of this frame** when
+    # the refusal is raised. The first version bound them here and the test
+    # failed on its own scaffolding — which is the measurement working: a
+    # captured-locals traceback renders every frame on the stack, the test's
+    # included.
+    tampered, secret_key_holder = _tampered_media()
+    live = session(observations)
+
+    try:
+        live.unlock(
+            MEDIUM,
+            layout(),
+            observations,
+            media=tampered,
+            binding_key=secret_key_holder,
+            **unlock_arguments(),
+        )
+    except PersistenceRefused as error:
+        captured = "".join(
+            traceback.TracebackException.from_exception(
+                error, capture_locals=True
+            ).format()
+        )
+
+    # Disclosed only now, after the traceback has been rendered.
+    secret_identity = tampered.claim.identity.disclose()
+    secret_key = secret_key_holder.disclose().decode()
+
+    assert secret_identity not in captured
+    assert secret_key not in captured
+    assert MEDIA.binding.digest not in captured
+    assert PERSISTENCE_UUID not in captured
+
+    for rendered in (
+        repr(tampered),
+        repr(tampered.claim),
+        repr(MEDIA.binding),
+        repr(secret_key_holder),
+        str(tampered.claim.identity),
+    ):
+        assert secret_identity not in rendered
+        assert secret_key not in rendered
+
+
+def test_neither_the_identity_nor_the_key_can_be_serialised_or_reassigned() -> None:
+    """A redacted repr is not a redacted object; both lessons already learned."""
+
+    import copy
+    import pickle
+
+    identity = MediaIdentity("SYNTHETIC-MEDIA-0001", MediaIdentitySource.ATA_SERIAL)
+    key = BindingKey(b"synthetic-test-key-not-a-real-one")
+
+    for held in (identity, key):
+        for attempt in (pickle.dumps, copy.copy, copy.deepcopy):
+            with pytest.raises(TypeError):
+                attempt(held)
+
+    with pytest.raises(AttributeError):
+        identity._value = "SOMETHING-ELSE-0002"  # noqa: SLF001 - the attack
+    with pytest.raises(AttributeError):
+        key._key = b"another-key"  # noqa: SLF001 - the attack
+    assert identity.disclose() == "SYNTHETIC-MEDIA-0001"
+
+
+def test_the_binding_carries_no_field_that_could_hold_the_identity_or_a_key() -> None:
+    """Absent vocabulary: what the model cannot hold, it cannot leak."""
+
+    names = {field_.name for field_ in dataclasses.fields(MediaBinding)}
+    assert names == {"digest"}
+    for forbidden in (
+        "media_identity",
+        "identity",
+        "serial",
+        "wwn",
+        "key",
+        "key_material",
+        "secret",
+        "passphrase",
+    ):
+        assert forbidden not in names
+
+
+def test_the_canonical_encoding_cannot_confuse_two_different_media() -> None:
+    """Length-prefixed, so field boundaries are not a matter of luck.
+
+    Plain concatenation gives `a|b` and `ab|` one digest. These two claims
+    differ only in where the boundary falls between the volume UUID and the
+    image digest.
+    """
+
+    left = bind_media(
+        claim(persistence_uuid="aaaa", boot_image_digest="bbbbbb"), BINDING_KEY
+    )
+    right = bind_media(
+        claim(persistence_uuid="aaaabb", boot_image_digest="bbbb"), BINDING_KEY
+    )
+    assert left.digest != right.digest
+
+
+def test_a_negative_or_non_integer_commissioning_generation_is_refused() -> None:
+    for bad in (-1, 1.5, float("nan"), True, "3"):
+        with pytest.raises(PersistenceRefused) as refused:
+            bind_media(claim(commissioning_generation=bad), BINDING_KEY)
+        assert refused.value.refusal is Refusal.GENERATION_NOT_A_COUNT
+
+
+def test_the_limit_of_the_media_binding_is_stated_rather_than_implied() -> None:
+    """It does not defeat a clone made together with the hardware identity.
+
+    Nor an enclosure that reports an identity of the adversary's choosing.
+    Those are hardware substitution, which the threat model already excludes —
+    and the escalation that produced this change rested on the limit being
+    written down, so the statement gets an assertion of its own.
+    """
+
+    from pathlib import Path
+
+    from azazel_boot import persistence as module
+
+    source = " ".join(Path(module.__file__).read_text(encoding="utf-8").split())
+    assert "does not defeat a full byte-for-byte clone" in source
+
+    threat_model = Path(__file__).resolve().parents[2] / "docs" / "threat-model.md"
+    text = " ".join(threat_model.read_text(encoding="utf-8").split())
+    assert "hardware-provided stable media identity" in text
