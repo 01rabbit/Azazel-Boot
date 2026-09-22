@@ -7,7 +7,16 @@ session that built this instrument. No image exists, no initramfs has been
 inspected, and **no builder is selected** — [ADR-0002](adr/0002-image-builder.md)
 D2/D3/D4 stand and [#4](https://github.com/01rabbit/Azazel-Boot/issues/4) is open.
 
-Related: [ADR-0002](adr/0002-image-builder.md) C5 and D4 ·
+The build host is now decided: a **disposable Debian 13 / amd64 VM**, on Linux
+or macOS. A chroot was rejected — it shares the host kernel, so a measurement
+taken in one is evidence about that kernel's environment rather than about an
+isolated build host. The operations that would create such a VM are written out
+in [the P2 host bootstrap plan](p2-host-bootstrap-plan.md) and **have not been
+performed**; the three that create a host, download externally, or escalate
+privilege are named individually there, which is what `doctor` shows before any
+of them runs.
+
+Related: [P2 host bootstrap plan](p2-host-bootstrap-plan.md) · [ADR-0002](adr/0002-image-builder.md) C5 and D4 ·
 [ADR-0008](adr/0008-debian-13-live-baseline.md) D2 ·
 [ADR-0009](adr/0009-builder-and-writer-contract.md) D8 P2 ·
 [Build environment](build-environment.md) · [Quarantine policy](quarantine-policy.md)
