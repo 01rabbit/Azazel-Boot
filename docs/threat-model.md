@@ -6,6 +6,7 @@ been run. Every mitigation below states an intended design, not an observed
 property.
 
 Related: [Architecture](architecture.md) · [Compatibility](compatibility.md) ·
+[Quarantine policy](quarantine-policy.md) ·
 [Security policy](../SECURITY.md) ·
 [Program plan](https://github.com/01rabbit/Azazel/blob/main/docs/roadmaps/nexus-boot-program-plan.md)
 §5 R7
