@@ -170,11 +170,14 @@ def workflow(observations, *, quarantine=None) -> RecoveryWorkflow:
 
 def run_to_commit(flow, observations, *, snapshot=None, acquisition=None):
     snap = snapshot if snapshot is not None else descriptor()
-    flow.start(snap, observations, session_id=SESSION, started_by_operator=True)
-    flow.open_trial(snap, observations, session_id=SESSION)
+    flow.start(
+        snap, observations, media_binding_holds=True, session_id=SESSION, started_by_operator=True
+    )
+    flow.open_trial(snap, observations, media_binding_holds=True, session_id=SESSION)
     return flow.commit(
         snap,
         observations,
+        media_binding_holds=True,
         session_id=SESSION,
         acquisition=acquisition if acquisition is not None else Opens(),
         confirmed=True,
@@ -452,9 +455,7 @@ def test_this_module_never_calls_anything_that_would_change_a_quarantine() -> No
             assert function.name in permitted_functions, function.name
             assert node.args, "a bare __setattr__ call"
             first = node.args[0]
-            assert isinstance(first, ast.Name) and first.id in (
-                {own} | built_here
-            ) - {None}, (
+            assert isinstance(first, ast.Name) and first.id in ({own} | built_here) - {None}, (
                 f"__setattr__ in {function.name} targets neither its own first "
                 f"parameter nor an object it constructed"
             )
@@ -704,7 +705,13 @@ def test_no_recovery_starts_by_itself(observations) -> None:
 
     flow = workflow(observations)
     with pytest.raises(RecoveryRefused) as refused:
-        flow.start(descriptor(), observations, session_id=SESSION, started_by_operator=False)
+        flow.start(
+            descriptor(),
+            observations,
+            media_binding_holds=True,
+            session_id=SESSION,
+            started_by_operator=False,
+        )
     assert refused.value.refusal is Refusal.RECOVERY_NOT_STARTED_BY_AN_OPERATOR
 
     parameter = inspect.signature(RecoveryWorkflow.start).parameters["started_by_operator"]
@@ -720,9 +727,16 @@ def test_no_recovery_starts_by_itself(observations) -> None:
 @pytest.mark.parametrize(
     "skip",
     [
-        lambda flow, snap, obs: flow.open_trial(snap, obs, session_id=SESSION),
+        lambda flow, snap, obs: flow.open_trial(
+            snap, obs, media_binding_holds=True, session_id=SESSION
+        ),
         lambda flow, snap, obs: flow.commit(
-            snap, obs, session_id=SESSION, acquisition=Opens(), confirmed=True
+            snap,
+            obs,
+            media_binding_holds=True,
+            session_id=SESSION,
+            acquisition=Opens(),
+            confirmed=True,
         ),
     ],
 )
@@ -738,11 +752,20 @@ def test_the_stages_advance_one_at_a_time_and_end(observations) -> None:
     flow = workflow(observations)
     snap = descriptor()
 
-    flow.start(snap, observations, session_id=SESSION, started_by_operator=True)
+    flow.start(
+        snap, observations, media_binding_holds=True, session_id=SESSION, started_by_operator=True
+    )
     assert flow.stage is RecoveryStage.PREFLIGHT_PASSED
-    flow.open_trial(snap, observations, session_id=SESSION)
+    flow.open_trial(snap, observations, media_binding_holds=True, session_id=SESSION)
     assert flow.stage is RecoveryStage.TRIAL_OPEN
-    flow.commit(snap, observations, session_id=SESSION, acquisition=Opens(), confirmed=True)
+    flow.commit(
+        snap,
+        observations,
+        media_binding_holds=True,
+        session_id=SESSION,
+        acquisition=Opens(),
+        confirmed=True,
+    )
     assert flow.stage is RecoveryStage.COMMITTED
     assert flow.stage in TERMINAL_STAGES
 
@@ -755,7 +778,12 @@ def test_a_second_commit_is_refused(observations) -> None:
 
     with pytest.raises(RecoveryRefused) as refused:
         flow.commit(
-            descriptor(), observations, session_id=SESSION, acquisition=Opens(), confirmed=True
+            descriptor(),
+            observations,
+            media_binding_holds=True,
+            session_id=SESSION,
+            acquisition=Opens(),
+            confirmed=True,
         )
     assert refused.value.refusal is Refusal.WORKFLOW_ALREADY_FINISHED
     assert flow.stage is RecoveryStage.COMMITTED
@@ -764,16 +792,23 @@ def test_a_second_commit_is_refused(observations) -> None:
 def test_an_interruption_is_terminal_and_restores_nothing(observations) -> None:
     flow = workflow(observations)
     snap = descriptor()
-    flow.start(snap, observations, session_id=SESSION, started_by_operator=True)
-    flow.open_trial(snap, observations, session_id=SESSION)
+    flow.start(
+        snap, observations, media_binding_holds=True, session_id=SESSION, started_by_operator=True
+    )
+    flow.open_trial(snap, observations, media_binding_holds=True, session_id=SESSION)
 
     flow.interrupt(session_id=SESSION)
     assert flow.stage is RecoveryStage.INTERRUPTED
 
     for attempt in (
-        lambda: flow.open_trial(snap, observations, session_id=SESSION),
+        lambda: flow.open_trial(snap, observations, media_binding_holds=True, session_id=SESSION),
         lambda: flow.commit(
-            snap, observations, session_id=SESSION, acquisition=Opens(), confirmed=True
+            snap,
+            observations,
+            media_binding_holds=True,
+            session_id=SESSION,
+            acquisition=Opens(),
+            confirmed=True,
         ),
         lambda: flow.interrupt(session_id=SESSION),
     ):
@@ -799,7 +834,13 @@ def test_the_two_gates_before_the_four(build, expected, observations) -> None:
 
     flow = workflow(observations, quarantine=build())
     with pytest.raises(RecoveryRefused) as refused:
-        flow.start(descriptor(), observations, session_id=SESSION, started_by_operator=True)
+        flow.start(
+            descriptor(),
+            observations,
+            media_binding_holds=True,
+            session_id=SESSION,
+            started_by_operator=True,
+        )
     assert refused.value.refusal is Refusal.GATE_REFUSED
     assert flow.audit()[-1].gate is expected
     assert flow.stage is RecoveryStage.REFUSED
@@ -812,13 +853,20 @@ def test_a_binding_from_another_machine_refuses_before_a_key_is_asked_for(
 
     flow = workflow(observations)
     acquisition = Opens()
-    flow.start(descriptor(), observations, session_id=SESSION, started_by_operator=True)
-    flow.open_trial(descriptor(), observations, session_id=SESSION)
+    flow.start(
+        descriptor(),
+        observations,
+        media_binding_holds=True,
+        session_id=SESSION,
+        started_by_operator=True,
+    )
+    flow.open_trial(descriptor(), observations, media_binding_holds=True, session_id=SESSION)
 
     with pytest.raises(RecoveryRefused):
         flow.commit(
             descriptor(),
             elsewhere,
+            media_binding_holds=True,
             session_id=SESSION,
             acquisition=acquisition,
             confirmed=True,
@@ -849,12 +897,19 @@ def test_key_acquisition_refuses_before_integrity_is_judged(
     acquisition = build_acquisition()
     flow = workflow(observations)
     snap = descriptor()
-    flow.start(snap, observations, session_id=SESSION, started_by_operator=True)
-    flow.open_trial(snap, observations, session_id=SESSION)
+    flow.start(
+        snap, observations, media_binding_holds=True, session_id=SESSION, started_by_operator=True
+    )
+    flow.open_trial(snap, observations, media_binding_holds=True, session_id=SESSION)
 
     with pytest.raises(RecoveryRefused):
         flow.commit(
-            snap, observations, session_id=SESSION, acquisition=acquisition, confirmed=True
+            snap,
+            observations,
+            media_binding_holds=True,
+            session_id=SESSION,
+            acquisition=acquisition,
+            confirmed=True,
         )
     assert flow.audit()[-1].gate is RecoveryGate.KEY_ACQUISITION
 
@@ -865,12 +920,19 @@ def test_a_confirmation_that_was_not_given_refuses_last(observations) -> None:
 
     flow = workflow(observations)
     snap = descriptor()
-    flow.start(snap, observations, session_id=SESSION, started_by_operator=True)
-    flow.open_trial(snap, observations, session_id=SESSION)
+    flow.start(
+        snap, observations, media_binding_holds=True, session_id=SESSION, started_by_operator=True
+    )
+    flow.open_trial(snap, observations, media_binding_holds=True, session_id=SESSION)
 
     with pytest.raises(RecoveryRefused):
         flow.commit(
-            snap, observations, session_id=SESSION, acquisition=Opens(), confirmed=False
+            snap,
+            observations,
+            media_binding_holds=True,
+            session_id=SESSION,
+            acquisition=Opens(),
+            confirmed=False,
         )
     assert flow.audit()[-1].gate is RecoveryGate.OPERATOR_CONFIRMATION
 
@@ -884,10 +946,21 @@ def test_a_snapshot_swapped_under_the_workflow_is_refused(observations) -> None:
     """
 
     flow = workflow(observations)
-    flow.start(descriptor(), observations, session_id=SESSION, started_by_operator=True)
+    flow.start(
+        descriptor(),
+        observations,
+        media_binding_holds=True,
+        session_id=SESSION,
+        started_by_operator=True,
+    )
 
     with pytest.raises(RecoveryRefused) as refused:
-        flow.open_trial(descriptor(fingerprint=OLD_FINGERPRINT), observations, session_id=SESSION)
+        flow.open_trial(
+            descriptor(fingerprint=OLD_FINGERPRINT),
+            observations,
+            media_binding_holds=True,
+            session_id=SESSION,
+        )
     assert refused.value.refusal is Refusal.SNAPSHOT_CHANGED_UNDER_THE_WORKFLOW
 
     # **Terminal and audited.** It used to raise and leave no trace, so a
@@ -898,7 +971,7 @@ def test_a_snapshot_swapped_under_the_workflow_is_refused(observations) -> None:
     assert flow.stage is RecoveryStage.REFUSED
     assert flow.audit()[-1].event is SnapshotAuditEvent.RECOVERY_SNAPSHOT_SUBSTITUTED
     with pytest.raises(RecoveryRefused) as retried:
-        flow.open_trial(descriptor(), observations, session_id=SESSION)
+        flow.open_trial(descriptor(), observations, media_binding_holds=True, session_id=SESSION)
     assert retried.value.refusal is Refusal.WORKFLOW_ALREADY_FINISHED
 
     # And each shape of substitution, on its own fresh workflow.
@@ -908,19 +981,31 @@ def test_a_snapshot_swapped_under_the_workflow_is_refused(observations) -> None:
         descriptor(container_version=99),
     ):
         fresh = workflow(observations)
-        fresh.start(descriptor(), observations, session_id=SESSION, started_by_operator=True)
+        fresh.start(
+            descriptor(),
+            observations,
+            media_binding_holds=True,
+            session_id=SESSION,
+            started_by_operator=True,
+        )
         with pytest.raises(RecoveryRefused) as refused:
-            fresh.open_trial(swapped, observations, session_id=SESSION)
+            fresh.open_trial(swapped, observations, media_binding_holds=True, session_id=SESSION)
         assert refused.value.refusal is Refusal.SNAPSHOT_CHANGED_UNDER_THE_WORKFLOW
         assert fresh.stage is RecoveryStage.REFUSED
 
     # L17: the comparison is by **value**, and the prose no longer implies
     # otherwise. An equal-but-distinct descriptor is the same report.
     twin = workflow(observations)
-    twin.start(descriptor(), observations, session_id=SESSION, started_by_operator=True)
+    twin.start(
+        descriptor(),
+        observations,
+        media_binding_holds=True,
+        session_id=SESSION,
+        started_by_operator=True,
+    )
     equal_but_distinct = descriptor()
     assert equal_but_distinct is not twin._snapshot
-    twin.open_trial(equal_but_distinct, observations, session_id=SESSION)
+    twin.open_trial(equal_but_distinct, observations, media_binding_holds=True, session_id=SESSION)
     assert twin.stage is RecoveryStage.TRIAL_OPEN
 
     # And the swap is refused at **commit** too, not only at the trial.
@@ -928,6 +1013,7 @@ def test_a_snapshot_swapped_under_the_workflow_is_refused(observations) -> None:
         twin.commit(
             descriptor(fingerprint=OLD_FINGERPRINT),
             observations,
+            media_binding_holds=True,
             session_id=SESSION,
             acquisition=Opens(),
             confirmed=True,
@@ -943,13 +1029,22 @@ def test_the_gates_are_rechecked_before_the_commit_not_only_at_the_start(
     quarantine = a_quarantine()
     flow = workflow(observations, quarantine=quarantine)
     snap = descriptor()
-    flow.start(snap, observations, session_id=SESSION, started_by_operator=True)
-    flow.open_trial(snap, observations, session_id=SESSION)
+    flow.start(
+        snap, observations, media_binding_holds=True, session_id=SESSION, started_by_operator=True
+    )
+    flow.open_trial(snap, observations, media_binding_holds=True, session_id=SESSION)
 
     quarantine.fence()
 
     with pytest.raises(RecoveryRefused):
-        flow.commit(snap, observations, session_id=SESSION, acquisition=Opens(), confirmed=True)
+        flow.commit(
+            snap,
+            observations,
+            media_binding_holds=True,
+            session_id=SESSION,
+            acquisition=Opens(),
+            confirmed=True,
+        )
     assert flow.audit()[-1].gate is RecoveryGate.MEDIUM_FENCED
     assert flow.stage is RecoveryStage.REFUSED
 
@@ -970,7 +1065,7 @@ def test_a_workflow_rebuilt_over_the_same_medium_starts_at_the_beginning(
     assert quarantine.volume_is_quarantined
 
     with pytest.raises(RecoveryRefused) as refused:
-        second.open_trial(descriptor(), observations, session_id=SESSION)
+        second.open_trial(descriptor(), observations, media_binding_holds=True, session_id=SESSION)
     assert refused.value.refusal is Refusal.STAGE_SKIPPED
 
 
@@ -991,11 +1086,35 @@ def test_no_audit_entry_can_carry_contents_a_figure_or_an_identity() -> None:
     # with an assertion's syntax, and is labelled as such rather than counted
     # as a second check.
     for bad in (
-        "content", "contents", "payload", "data", "bytes", "block", "record",
-        "offset", "size", "length", "capacity", "free", "space", "required",
-        "available", "count", "time", "timestamp", "device", "identity",
-        "serial", "path", "key", "passphrase", "operator", "detail", "message",
-        "reason", "error",
+        "content",
+        "contents",
+        "payload",
+        "data",
+        "bytes",
+        "block",
+        "record",
+        "offset",
+        "size",
+        "length",
+        "capacity",
+        "free",
+        "space",
+        "required",
+        "available",
+        "count",
+        "time",
+        "timestamp",
+        "device",
+        "identity",
+        "serial",
+        "path",
+        "key",
+        "passphrase",
+        "operator",
+        "detail",
+        "message",
+        "reason",
+        "error",
     ):
         assert not any(bad in name for name in names), bad
 
@@ -1070,11 +1189,22 @@ def test_nothing_rendered_carries_the_fingerprint_a_secret_or_an_identity(
 
     refused = workflow(observations, quarantine=a_quarantine(fenced=True))
     with pytest.raises(RecoveryRefused) as error:
-        refused.start(snap, observations, session_id=SESSION, started_by_operator=True)
+        refused.start(
+            snap,
+            observations,
+            media_binding_holds=True,
+            session_id=SESSION,
+            started_by_operator=True,
+        )
 
     message = str(error.value) + error.value.detail
-    for value in (FINGERPRINT, acquisition.secret, MEDIUM.identity, SESSION,
-                  host_fingerprint(observations)):
+    for value in (
+        FINGERPRINT,
+        acquisition.secret,
+        MEDIUM.identity,
+        SESSION,
+        host_fingerprint(observations),
+    ):
         assert value not in message
     assert not any(character.isdigit() for character in message)
 
@@ -1502,12 +1632,16 @@ def test_no_public_method_ever_turns_either_flag_off(observations, elsewhere) ->
     # suite stayed green. This asserts first that the driven set *is* the
     # public surface, so a new method fails here until it is driven.
     driven = {
-        "start", "open_trial", "commit", "interrupt", "audit", "stage", "holds",
+        "start",
+        "open_trial",
+        "commit",
+        "interrupt",
+        "audit",
+        "stage",
+        "holds",
     }
     assert driven == {
-        name
-        for name, _ in inspect.getmembers(RecoveryWorkflow)
-        if not name.startswith("_")
+        name for name, _ in inspect.getmembers(RecoveryWorkflow) if not name.startswith("_")
     }, "a public method of RecoveryWorkflow is not driven below"
     assert {"audit", "may_migrate", "note_snapshot_written"} == {
         name for name, _ in inspect.getmembers(MigrationLedger) if not name.startswith("_")
@@ -1516,14 +1650,29 @@ def test_no_public_method_ever_turns_either_flag_off(observations, elsewhere) ->
     snap = descriptor()
     for build in (
         lambda flow, q: flow.start(
-            snap, observations, session_id=SESSION, started_by_operator=True
+            snap,
+            observations,
+            media_binding_holds=True,
+            session_id=SESSION,
+            started_by_operator=True,
         ),
         lambda flow, q: flow.start(
-            snap, observations, session_id=SESSION, started_by_operator=False
+            snap,
+            observations,
+            media_binding_holds=True,
+            session_id=SESSION,
+            started_by_operator=False,
         ),
-        lambda flow, q: flow.open_trial(snap, observations, session_id=SESSION),
+        lambda flow, q: flow.open_trial(
+            snap, observations, media_binding_holds=True, session_id=SESSION
+        ),
         lambda flow, q: flow.commit(
-            snap, observations, session_id=SESSION, acquisition=Opens(), confirmed=True
+            snap,
+            observations,
+            media_binding_holds=True,
+            session_id=SESSION,
+            acquisition=Opens(),
+            confirmed=True,
         ),
         lambda flow, q: flow.interrupt(session_id=SESSION),
         lambda flow, q: flow.audit(),
@@ -1561,12 +1710,19 @@ def test_no_public_method_ever_turns_either_flag_off(observations, elsewhere) ->
         good = descriptor()
         try:
             if where != "start":
-                flow.start(good, observations, session_id=SESSION, started_by_operator=True)
+                flow.start(
+                    good,
+                    observations,
+                    media_binding_holds=True,
+                    session_id=SESSION,
+                    started_by_operator=True,
+                )
             if where == "commit":
-                flow.open_trial(good, observations, session_id=SESSION)
+                flow.open_trial(good, observations, media_binding_holds=True, session_id=SESSION)
                 flow.commit(
                     good,
                     elsewhere if options.get("elsewhere") else observations,
+                    media_binding_holds=True,
                     session_id=SESSION,
                     acquisition=Opens(channel=NOT_A_CHANNEL)
                     if options.get("bad_channel")
@@ -1575,7 +1731,10 @@ def test_no_public_method_ever_turns_either_flag_off(observations, elsewhere) ->
                 )
             elif where == "open_trial":
                 flow.open_trial(
-                    descriptor(fingerprint=OLD_FINGERPRINT), observations, session_id=SESSION
+                    descriptor(fingerprint=OLD_FINGERPRINT),
+                    observations,
+                    media_binding_holds=True,
+                    session_id=SESSION,
                 )
             else:
                 flow.start(
@@ -1583,6 +1742,7 @@ def test_no_public_method_ever_turns_either_flag_off(observations, elsewhere) ->
                     if options.get("bad_snapshot")
                     else good,
                     observations,
+                    media_binding_holds=True,
                     session_id="another" if options.get("other_sitting") else SESSION,
                     started_by_operator=not options.get("not_operator"),
                 )
@@ -1606,7 +1766,9 @@ def test_no_public_method_ever_turns_either_flag_off(observations, elsewhere) ->
     unchanged = _flags(quarantine)
     for act in (
         lambda: ledger.may_migrate(verdict, quarantine=a_quarantine(quarantined=False)),
-        lambda: ledger.note_snapshot_written(verdict, snap,
+        lambda: ledger.note_snapshot_written(
+            verdict,
+            snap,
             quarantine=a_quarantine(quarantined=False),
         ),
         lambda: ledger.audit(),
@@ -1686,19 +1848,27 @@ def test_a_migration_is_refused_over_a_quarantined_volume() -> None:
     [
         (
             RecoveryGate.MEDIUM_FENCED,
-            lambda: {"quarantine": a_quarantine(fenced=True),
-                     "bad_acquisition": True, "confirmed": False, "elsewhere": True},
+            lambda: {
+                "quarantine": a_quarantine(fenced=True),
+                "bad_acquisition": True,
+                "confirmed": False,
+                "elsewhere": True,
+            },
         ),
         (
             RecoveryGate.NOTHING_TO_RECOVER,
-            lambda: {"quarantine": a_quarantine(quarantined=False),
-                     "bad_acquisition": True, "confirmed": False, "elsewhere": True},
+            lambda: {
+                "quarantine": a_quarantine(quarantined=False),
+                "bad_acquisition": True,
+                "confirmed": False,
+                "elsewhere": True,
+            },
         ),
         # D8 gate 1, the **target**: a quarantine that never saw the medium.
         # This used to be the host binding wearing gate 1's name, so a recovery
         # committed over a quarantine that had observed no device at all.
         (
-            RecoveryGate.TARGET_BINDING,
+            RecoveryGate.MEDIUM_NOT_RECOGNISED,
             lambda: {
                 "quarantine": _a_quarantine_that_never_saw_the_medium(),
                 "elsewhere": True,
@@ -1749,11 +1919,17 @@ def test_each_gate_refuses_with_every_later_gate_also_failing(
     refused_at_start = (
         RecoveryGate.MEDIUM_FENCED,
         RecoveryGate.NOTHING_TO_RECOVER,
-        RecoveryGate.TARGET_BINDING,
+        RecoveryGate.MEDIUM_NOT_RECOGNISED,
     )
     if gate not in refused_at_start:
-        flow.start(good, observations, session_id=SESSION, started_by_operator=True)
-        flow.open_trial(good, observations, session_id=SESSION)
+        flow.start(
+            good,
+            observations,
+            media_binding_holds=True,
+            session_id=SESSION,
+            started_by_operator=True,
+        )
+        flow.open_trial(good, observations, media_binding_holds=True, session_id=SESSION)
 
     snapshot_now = good
 
@@ -1762,12 +1938,19 @@ def test_each_gate_refuses_with_every_later_gate_also_failing(
 
     if gate in refused_at_start:
         with pytest.raises(RecoveryRefused) as refused:
-            flow.start(good, inventory, session_id=SESSION, started_by_operator=True)
+            flow.start(
+                good,
+                inventory,
+                media_binding_holds=True,
+                session_id=SESSION,
+                started_by_operator=True,
+            )
     else:
         with pytest.raises(RecoveryRefused) as refused:
             flow.commit(
                 snapshot_now,
                 inventory,
+                media_binding_holds=True,
                 session_id=SESSION,
                 acquisition=acquisition,
                 confirmed=options.get("confirmed", True),
@@ -1798,7 +1981,11 @@ def test_the_integrity_gate_is_reached_and_refuses(broken, observations) -> None
     flow = workflow(observations)
     with pytest.raises(RecoveryRefused) as refused:
         flow.start(
-            descriptor(**broken), observations, session_id=SESSION, started_by_operator=True
+            descriptor(**broken),
+            observations,
+            media_binding_holds=True,
+            session_id=SESSION,
+            started_by_operator=True,
         )
     assert refused.value.refusal is Refusal.GATE_REFUSED
     assert flow.audit()[-1].gate is RecoveryGate.INTEGRITY_VERIFICATION
@@ -1815,12 +2002,14 @@ def test_the_gates_are_rechecked_before_the_trial_too(observations) -> None:
     quarantine = a_quarantine()
     flow = workflow(observations, quarantine=quarantine)
     snap = descriptor()
-    flow.start(snap, observations, session_id=SESSION, started_by_operator=True)
+    flow.start(
+        snap, observations, media_binding_holds=True, session_id=SESSION, started_by_operator=True
+    )
 
     quarantine.fence()
 
     with pytest.raises(RecoveryRefused):
-        flow.open_trial(snap, observations, session_id=SESSION)
+        flow.open_trial(snap, observations, media_binding_holds=True, session_id=SESSION)
     assert flow.audit()[-1].gate is RecoveryGate.MEDIUM_FENCED
     assert flow.stage is RecoveryStage.REFUSED
 
@@ -1848,7 +2037,9 @@ def test_a_hand_built_verdict_does_not_authorise_a_migration() -> None:
     assert refused.value.refusal is Refusal.VERDICT_NOT_MINTED_BY_A_PREFLIGHT
 
     with pytest.raises(RecoveryRefused):
-        ledger.note_snapshot_written(forged, descriptor(),
+        ledger.note_snapshot_written(
+            forged,
+            descriptor(),
             quarantine=a_quarantine(quarantined=False),
         )
     assert ledger.audit() == ()
@@ -1927,9 +2118,7 @@ def test_a_snapshot_is_recorded_as_written_only_after_the_caller_acted() -> None
     twin = descriptor()
     assert twin == judged and twin is not judged
     with pytest.raises(RecoveryRefused) as tie:
-        ledger.note_snapshot_written(
-            unspent, twin, quarantine=a_quarantine(quarantined=False)
-        )
+        ledger.note_snapshot_written(unspent, twin, quarantine=a_quarantine(quarantined=False))
     assert tie.value.refusal is Refusal.VERDICT_NOT_MINTED_BY_A_PREFLIGHT
 
     # And both methods exist, which the class docstring used to claim while
@@ -2007,7 +2196,11 @@ def test_a_workflow_refuses_a_stage_asked_for_another_sitting(observations) -> N
     flow = workflow(observations)
     with pytest.raises(RecoveryRefused) as refused:
         flow.start(
-            descriptor(), observations, session_id="another-sitting", started_by_operator=True
+            descriptor(),
+            observations,
+            media_binding_holds=True,
+            session_id="another-sitting",
+            started_by_operator=True,
         )
     assert refused.value.refusal is Refusal.NOT_THIS_SITTING
     # Terminal and audited, on the module's own principle that a swap is an
@@ -2015,9 +2208,7 @@ def test_a_workflow_refuses_a_stage_asked_for_another_sitting(observations) -> N
     # an empty audit, so a foreign sitting could probe a live workflow as often
     # as it liked and nothing recorded that it had.
     assert flow.stage is RecoveryStage.REFUSED
-    assert [entry.event for entry in flow.audit()] == [
-        SnapshotAuditEvent.RECOVERY_FOREIGN_SITTING
-    ]
+    assert [entry.event for entry in flow.audit()] == [SnapshotAuditEvent.RECOVERY_FOREIGN_SITTING]
 
 
 def test_the_audit_repr_does_not_render_the_fingerprint(observations) -> None:
@@ -2076,13 +2267,16 @@ def test_the_key_and_integrity_gates_cannot_be_contested_against_each_other(
 
     flow = workflow(observations)
     good = descriptor()
-    flow.start(good, observations, session_id=SESSION, started_by_operator=True)
-    flow.open_trial(good, observations, session_id=SESSION)
+    flow.start(
+        good, observations, media_binding_holds=True, session_id=SESSION, started_by_operator=True
+    )
+    flow.open_trial(good, observations, media_binding_holds=True, session_id=SESSION)
 
     with pytest.raises(RecoveryRefused) as refused:
         flow.commit(
             descriptor(integrity=SnapshotIntegrity.FAILED),
             observations,
+            media_binding_holds=True,
             session_id=SESSION,
             acquisition=Opens(channel=NOT_A_CHANNEL),
             confirmed=False,
@@ -2124,7 +2318,13 @@ def test_the_workflow_and_the_ledger_are_sealed(observations) -> None:
         flow._sealed_assign("_stage", RecoveryStage.TRIAL_OPEN)
     assert flow.stage is RecoveryStage.NOT_STARTED
 
-    flow.start(descriptor(), observations, session_id=SESSION, started_by_operator=True)
+    flow.start(
+        descriptor(),
+        observations,
+        media_binding_holds=True,
+        session_id=SESSION,
+        started_by_operator=True,
+    )
     for name, value in (
         ("_snapshot", descriptor(schema_version=2)),
         ("_pinned", descriptor(schema_version=2)),
@@ -2242,12 +2442,19 @@ def test_the_key_acquisition_refusal_traceback_holds_what_it_was_handed(
     flow = workflow(observations)
     snap = descriptor()
     acquisition = Opens(channel=NOT_A_CHANNEL)
-    flow.start(snap, observations, session_id=SESSION, started_by_operator=True)
-    flow.open_trial(snap, observations, session_id=SESSION)
+    flow.start(
+        snap, observations, media_binding_holds=True, session_id=SESSION, started_by_operator=True
+    )
+    flow.open_trial(snap, observations, media_binding_holds=True, session_id=SESSION)
 
     with pytest.raises(RecoveryRefused) as refused:
         flow.commit(
-            snap, observations, session_id=SESSION, acquisition=acquisition, confirmed=True
+            snap,
+            observations,
+            media_binding_holds=True,
+            session_id=SESSION,
+            acquisition=acquisition,
+            confirmed=True,
         )
 
     summary = traceback.TracebackException.from_exception(refused.value, capture_locals=True)
@@ -2294,9 +2501,7 @@ def test_a_stand_in_for_the_quarantine_is_refused(observations) -> None:
             image_digest_holds=True,
         )
 
-    binding = SessionBinding(
-        host_fingerprint=host_fingerprint(observations), session_id=SESSION
-    )
+    binding = SessionBinding(host_fingerprint=host_fingerprint(observations), session_id=SESSION)
     with pytest.raises(TypeError, match="must be a Quarantine"):
         RecoveryWorkflow(NotAQuarantine(), binding, session_id=SESSION)
     with pytest.raises(TypeError, match="must be a SessionBinding"):
@@ -2319,18 +2524,26 @@ def test_an_attempted_automatic_start_is_terminal_and_audited(observations) -> N
     flow = workflow(observations)
     with pytest.raises(RecoveryRefused) as refused:
         flow.start(
-            descriptor(), observations, session_id=SESSION, started_by_operator=False
+            descriptor(),
+            observations,
+            media_binding_holds=True,
+            session_id=SESSION,
+            started_by_operator=False,
         )
     assert refused.value.refusal is Refusal.RECOVERY_NOT_STARTED_BY_AN_OPERATOR
     assert flow.stage is RecoveryStage.REFUSED
-    assert flow.audit() == (
-        SnapshotAuditEntry(event=SnapshotAuditEvent.RECOVERY_REFUSED),
-    )
+    assert flow.audit() == (SnapshotAuditEntry(event=SnapshotAuditEvent.RECOVERY_REFUSED),)
 
     # And terminal: a real start afterwards is refused, so the attempt cannot
     # be washed away by simply trying again properly.
     with pytest.raises(RecoveryRefused) as again:
-        flow.start(descriptor(), observations, session_id=SESSION, started_by_operator=True)
+        flow.start(
+            descriptor(),
+            observations,
+            media_binding_holds=True,
+            session_id=SESSION,
+            started_by_operator=True,
+        )
     assert again.value.refusal is Refusal.WORKFLOW_ALREADY_FINISHED
 
 
@@ -2353,16 +2566,29 @@ def test_the_two_operator_flags_must_be_actual_bools(truthy, observations) -> No
 
     flow = workflow(observations)
     with pytest.raises(TypeError, match="started_by_operator"):
-        flow.start(descriptor(), observations, session_id=SESSION, started_by_operator=truthy)
+        flow.start(
+            descriptor(),
+            observations,
+            media_binding_holds=True,
+            session_id=SESSION,
+            started_by_operator=truthy,
+        )
     assert flow.stage is RecoveryStage.NOT_STARTED
 
     good = workflow(observations)
     snap = descriptor()
-    good.start(snap, observations, session_id=SESSION, started_by_operator=True)
-    good.open_trial(snap, observations, session_id=SESSION)
+    good.start(
+        snap, observations, media_binding_holds=True, session_id=SESSION, started_by_operator=True
+    )
+    good.open_trial(snap, observations, media_binding_holds=True, session_id=SESSION)
     with pytest.raises(TypeError, match="confirmed"):
         good.commit(
-            snap, observations, session_id=SESSION, acquisition=Opens(), confirmed=truthy
+            snap,
+            observations,
+            media_binding_holds=True,
+            session_id=SESSION,
+            acquisition=Opens(),
+            confirmed=truthy,
         )
     assert good.stage is RecoveryStage.TRIAL_OPEN
 
@@ -2394,9 +2620,7 @@ def test_a_quarantine_subclass_that_lies_about_its_state_is_refused(observations
     assert Quarantine.is_fenced.fget(lying) is True  # it really is fenced
     assert lying.is_fenced is False  # and it says otherwise
 
-    binding = SessionBinding(
-        host_fingerprint=host_fingerprint(observations), session_id=SESSION
-    )
+    binding = SessionBinding(host_fingerprint=host_fingerprint(observations), session_id=SESSION)
     with pytest.raises(TypeError, match="exactly"):
         RecoveryWorkflow(lying, binding, session_id=SESSION)
     with pytest.raises(TypeError, match="exactly"):
@@ -2442,12 +2666,21 @@ def test_a_snapshot_stand_in_is_refused_by_the_type_before_its_eq_is_asked(
 
     flow = workflow(observations)
     real = descriptor()
-    flow.start(real, observations, session_id=SESSION, started_by_operator=True)
+    flow.start(
+        real, observations, media_binding_holds=True, session_id=SESSION, started_by_operator=True
+    )
 
     for stage in (
-        lambda item: flow.open_trial(item, observations, session_id=SESSION),
+        lambda item: flow.open_trial(
+            item, observations, media_binding_holds=True, session_id=SESSION
+        ),
         lambda item: flow.commit(
-            item, observations, session_id=SESSION, acquisition=Opens(), confirmed=True
+            item,
+            observations,
+            media_binding_holds=True,
+            session_id=SESSION,
+            acquisition=Opens(),
+            confirmed=True,
         ),
     ):
         with pytest.raises(TypeError, match="exactly"):
@@ -2457,11 +2690,15 @@ def test_a_snapshot_stand_in_is_refused_by_the_type_before_its_eq_is_asked(
     with pytest.raises(TypeError, match="exactly"):
         RecoveryWorkflow(
             a_quarantine(),
-            SessionBinding(
-                host_fingerprint=host_fingerprint(observations), session_id=SESSION
-            ),
+            SessionBinding(host_fingerprint=host_fingerprint(observations), session_id=SESSION),
             session_id=SESSION,
-        ).start(Substitute(), observations, session_id=SESSION, started_by_operator=True)
+        ).start(
+            Substitute(),
+            observations,
+            media_binding_holds=True,
+            session_id=SESSION,
+            started_by_operator=True,
+        )
 
 
 @pytest.mark.parametrize("name", ["current_schema", "target_schema"])
@@ -2530,17 +2767,34 @@ def test_every_stage_refuses_a_foreign_sitting(stage, observations) -> None:
     flow = workflow(observations)
     snap = descriptor()
     if stage != "start":
-        flow.start(snap, observations, session_id=SESSION, started_by_operator=True)
+        flow.start(
+            snap,
+            observations,
+            media_binding_holds=True,
+            session_id=SESSION,
+            started_by_operator=True,
+        )
     if stage == "commit":
-        flow.open_trial(snap, observations, session_id=SESSION)
+        flow.open_trial(snap, observations, media_binding_holds=True, session_id=SESSION)
 
     call = {
         "start": lambda: flow.start(
-            snap, observations, session_id="elsewhere", started_by_operator=True
+            snap,
+            observations,
+            media_binding_holds=True,
+            session_id="elsewhere",
+            started_by_operator=True,
         ),
-        "open_trial": lambda: flow.open_trial(snap, observations, session_id="elsewhere"),
+        "open_trial": lambda: flow.open_trial(
+            snap, observations, media_binding_holds=True, session_id="elsewhere"
+        ),
         "commit": lambda: flow.commit(
-            snap, observations, session_id="elsewhere", acquisition=Opens(), confirmed=True
+            snap,
+            observations,
+            media_binding_holds=True,
+            session_id="elsewhere",
+            acquisition=Opens(),
+            confirmed=True,
         ),
     }[stage]
 
@@ -2629,22 +2883,34 @@ def test_a_commit_without_a_key_acquisition_is_refused(observations) -> None:
 
     flow = workflow(observations)
     snap = descriptor()
-    flow.start(snap, observations, session_id=SESSION, started_by_operator=True)
-    flow.open_trial(snap, observations, session_id=SESSION)
+    flow.start(
+        snap, observations, media_binding_holds=True, session_id=SESSION, started_by_operator=True
+    )
+    flow.open_trial(snap, observations, media_binding_holds=True, session_id=SESSION)
 
     with pytest.raises(TypeError, match="requires a key acquisition"):
-        flow.commit(snap, observations, session_id=SESSION, acquisition=None, confirmed=True)
+        flow.commit(
+            snap,
+            observations,
+            media_binding_holds=True,
+            session_id=SESSION,
+            acquisition=None,
+            confirmed=True,
+        )
     assert flow.stage is RecoveryStage.TRIAL_OPEN
     assert flow.holds(RecoveryCandidate(1, FINGERPRINT)) is False
 
     # And the honest failing acquisition, for the contrast the finding rests on.
     refused_flow = workflow(observations)
-    refused_flow.start(snap, observations, session_id=SESSION, started_by_operator=True)
-    refused_flow.open_trial(snap, observations, session_id=SESSION)
+    refused_flow.start(
+        snap, observations, media_binding_holds=True, session_id=SESSION, started_by_operator=True
+    )
+    refused_flow.open_trial(snap, observations, media_binding_holds=True, session_id=SESSION)
     with pytest.raises(RecoveryRefused) as refused:
         refused_flow.commit(
             snap,
             observations,
+            media_binding_holds=True,
             session_id=SESSION,
             acquisition=Opens(AttemptOutcome.REJECTED),
             confirmed=True,
@@ -2680,15 +2946,19 @@ def test_a_sitting_id_cannot_answer_its_own_check(observations) -> None:
 
     flow = workflow(observations)
     with pytest.raises(TypeError, match="session_id must be a str exactly"):
-        flow.start(descriptor(), observations, session_id=lying, started_by_operator=True)
+        flow.start(
+            descriptor(),
+            observations,
+            media_binding_holds=True,
+            session_id=lying,
+            started_by_operator=True,
+        )
     assert flow.stage is RecoveryStage.NOT_STARTED
 
     with pytest.raises(TypeError, match="session_id must be a str exactly"):
         RecoveryWorkflow(
             a_quarantine(),
-            SessionBinding(
-                host_fingerprint=host_fingerprint(observations), session_id=SESSION
-            ),
+            SessionBinding(host_fingerprint=host_fingerprint(observations), session_id=SESSION),
             session_id=lying,
         )
 
@@ -2752,14 +3022,17 @@ def test_the_medium_is_read_again_after_the_passphrase_prompt(observations) -> N
 
     flow = workflow(observations, quarantine=quarantine)
     snap = descriptor()
-    flow.start(snap, observations, session_id=SESSION, started_by_operator=True)
-    flow.open_trial(snap, observations, session_id=SESSION)
+    flow.start(
+        snap, observations, media_binding_holds=True, session_id=SESSION, started_by_operator=True
+    )
+    flow.open_trial(snap, observations, media_binding_holds=True, session_id=SESSION)
     assert quarantine.is_fenced is False
 
     with pytest.raises(RecoveryRefused) as refused:
         flow.commit(
             snap,
             observations,
+            media_binding_holds=True,
             session_id=SESSION,
             acquisition=PulledDuringThePrompt(),
             confirmed=True,
@@ -2789,13 +3062,15 @@ def test_mutating_the_held_descriptor_between_the_stages_is_a_substitution(
 
     flow = workflow(observations)
     snap = descriptor()
-    flow.start(snap, observations, session_id=SESSION, started_by_operator=True)
+    flow.start(
+        snap, observations, media_binding_holds=True, session_id=SESSION, started_by_operator=True
+    )
 
     object.__setattr__(snap, "schema_version", 2)
     object.__setattr__(snap, "fingerprint", "snapshot-fingerprint-0000")
 
     with pytest.raises(RecoveryRefused) as refused:
-        flow.open_trial(snap, observations, session_id=SESSION)
+        flow.open_trial(snap, observations, media_binding_holds=True, session_id=SESSION)
     assert refused.value.refusal is Refusal.SNAPSHOT_CHANGED_UNDER_THE_WORKFLOW
     assert flow.stage is RecoveryStage.REFUSED
     assert SnapshotAuditEvent.RECOVERY_SNAPSHOT_SUBSTITUTED in [
@@ -2831,7 +3106,9 @@ def test_the_seal_writes_only_the_four_fields_a_recovery_moves(observations) -> 
             flow._sealed_assign(name, value)
 
     snap = descriptor()
-    flow.start(snap, observations, session_id=SESSION, started_by_operator=True)
+    flow.start(
+        snap, observations, media_binding_holds=True, session_id=SESSION, started_by_operator=True
+    )
     flow.interrupt(session_id=SESSION)
     assert flow.stage is RecoveryStage.INTERRUPTED
     for name, value in (
@@ -2863,9 +3140,7 @@ def test_an_audit_entry_refuses_an_int_that_renders_as_a_capacity() -> None:
             return self.__str__()
 
     with pytest.raises(TypeError, match="schema_version must be an int exactly"):
-        SnapshotAuditEntry(
-            event=SnapshotAuditEvent.RECOVERY_STARTED, schema_version=Renders(1)
-        )
+        SnapshotAuditEntry(event=SnapshotAuditEvent.RECOVERY_STARTED, schema_version=Renders(1))
     with pytest.raises(TypeError, match="fingerprint must be a str exactly"):
         SnapshotAuditEntry(
             event=SnapshotAuditEvent.RECOVERY_STARTED,
@@ -2885,7 +3160,9 @@ def test_an_interruption_belongs_to_its_sitting_like_every_other_stage(
 
     flow = workflow(observations)
     snap = descriptor()
-    flow.start(snap, observations, session_id=SESSION, started_by_operator=True)
+    flow.start(
+        snap, observations, media_binding_holds=True, session_id=SESSION, started_by_operator=True
+    )
 
     with pytest.raises(RecoveryRefused) as refused:
         flow.interrupt(session_id="another-sitting")
@@ -2895,12 +3172,8 @@ def test_an_interruption_belongs_to_its_sitting_like_every_other_stage(
         flow.interrupt(session_id=type("S", (str,), {})(SESSION))
 
 
-@pytest.mark.parametrize(
-    "stage", ["start", "open_trial", "commit"]
-)
-def test_every_stage_refuses_observations_that_are_not_observations(
-    stage, observations
-) -> None:
+@pytest.mark.parametrize("stage", ["start", "open_trial", "commit"])
+def test_every_stage_refuses_observations_that_are_not_observations(stage, observations) -> None:
     """R4, low: the one input to the gates that nothing pinned.
 
     `binding_applies` re-derives the host fingerprint from these rather than
@@ -2918,17 +3191,30 @@ def test_every_stage_refuses_observations_that_are_not_observations(
     flow = workflow(observations)
     snap = descriptor()
     if stage != "start":
-        flow.start(snap, observations, session_id=SESSION, started_by_operator=True)
+        flow.start(
+            snap,
+            observations,
+            media_binding_holds=True,
+            session_id=SESSION,
+            started_by_operator=True,
+        )
     if stage == "commit":
-        flow.open_trial(snap, observations, session_id=SESSION)
+        flow.open_trial(snap, observations, media_binding_holds=True, session_id=SESSION)
 
     call = {
         "start": lambda items: flow.start(
-            snap, items, session_id=SESSION, started_by_operator=True
+            snap, items, media_binding_holds=True, session_id=SESSION, started_by_operator=True
         ),
-        "open_trial": lambda items: flow.open_trial(snap, items, session_id=SESSION),
+        "open_trial": lambda items: flow.open_trial(
+            snap, items, media_binding_holds=True, session_id=SESSION
+        ),
         "commit": lambda items: flow.commit(
-            snap, items, session_id=SESSION, acquisition=Opens(), confirmed=True
+            snap,
+            items,
+            media_binding_holds=True,
+            session_id=SESSION,
+            acquisition=Opens(),
+            confirmed=True,
         ),
     }[stage]
 
@@ -3053,9 +3339,7 @@ def test_no_input_to_this_module_changes_anything_about_the_quarantine(
 
     from itertools import product
 
-    binding = SessionBinding(
-        host_fingerprint=host_fingerprint(observations), session_id=SESSION
-    )
+    binding = SessionBinding(host_fingerprint=host_fingerprint(observations), session_id=SESSION)
     drives = 0
     for (
         schema_version,
@@ -3114,13 +3398,26 @@ def test_no_input_to_this_module_changes_anything_about_the_quarantine(
         # second would see a guard that always builds the first.
         for _sitting in (1, 2):
             flow = RecoveryWorkflow(rule, binding, session_id=SESSION)
-            _swallow(flow.start, snap, observations, session_id=SESSION,
-                     started_by_operator=by_operator)
+            _swallow(
+                flow.start, snap, observations, session_id=SESSION, started_by_operator=by_operator
+            )
             _swallow(flow.open_trial, snap, observations, session_id=SESSION)
-            _swallow(flow.commit, snap, observations, session_id=SESSION,
-                     acquisition=Opens(outcome), confirmed=confirmed)
-            _swallow(flow.commit, snap, observations, session_id=SESSION,
-                     acquisition=Opens(outcome), confirmed=confirmed)
+            _swallow(
+                flow.commit,
+                snap,
+                observations,
+                session_id=SESSION,
+                acquisition=Opens(outcome),
+                confirmed=confirmed,
+            )
+            _swallow(
+                flow.commit,
+                snap,
+                observations,
+                session_id=SESSION,
+                acquisition=Opens(outcome),
+                confirmed=confirmed,
+            )
             _swallow(flow.audit)
             _swallow(flow.holds, RecoveryCandidate(schema_version, "x"))
             _swallow(repr, flow)
@@ -3312,13 +3609,22 @@ def test_this_module_performs_no_io_when_it_actually_runs() -> None:
             flow = RecoveryWorkflow(rule, binding, session_id=SESSION)
             for act in (
                 lambda: flow.start(
-                    snapshot, observations, session_id=SESSION, started_by_operator=True
+                    snapshot,
+                    observations,
+                    media_binding_holds=True,
+                    session_id=SESSION,
+                    started_by_operator=True,
                 ),
-                lambda: flow.open_trial(snapshot, observations, session_id=SESSION),
+                lambda: flow.open_trial(
+                    snapshot,
+                    observations,
+                    media_binding_holds=True,
+                    session_id=SESSION,
+                ),
                 lambda: flow.commit(
                     snapshot,
                     observations,
-                    session_id=SESSION,
+                    media_binding_holds=True, session_id=SESSION,
                     acquisition=Opens(),
                     confirmed=True,
                 ),
@@ -3352,12 +3658,8 @@ def test_this_module_performs_no_io_when_it_actually_runs() -> None:
     )
     assert finished.returncode == 0, finished.stderr
     while_running, at_import = ast.literal_eval(finished.stdout.strip())
-    assert while_running == [], (
-        f"the decision path performed audited operations: {while_running}"
-    )
-    assert at_import == [], (
-        f"the module performed audited operations while importing: {at_import}"
-    )
+    assert while_running == [], f"the decision path performed audited operations: {while_running}"
+    assert at_import == [], f"the module performed audited operations while importing: {at_import}"
 
 
 # --------------------------------------------------------------------------
@@ -3529,7 +3831,9 @@ def test_the_write_record_asks_whether_the_verdict_was_minted() -> None:
 
     ledger = MigrationLedger()
     with pytest.raises(RecoveryRefused) as refused:
-        ledger.note_snapshot_written(never_minted, snapshot,
+        ledger.note_snapshot_written(
+            never_minted,
+            snapshot,
             quarantine=a_quarantine(quarantined=False),
         )
     assert refused.value.refusal is Refusal.VERDICT_NOT_MINTED_BY_A_PREFLIGHT
@@ -3563,7 +3867,9 @@ def test_one_preflight_records_one_write_in_any_ledger() -> None:
 
     for ledger in (first, second):
         with pytest.raises(RecoveryRefused) as refused:
-            ledger.note_snapshot_written(verdict, snapshot,
+            ledger.note_snapshot_written(
+                verdict,
+                snapshot,
                 quarantine=a_quarantine(quarantined=False),
             )
         assert refused.value.refusal is Refusal.VERDICT_ALREADY_SPENT
@@ -3604,7 +3910,9 @@ def test_the_write_record_asks_whether_the_verdict_passed() -> None:
 
     ledger = MigrationLedger()
     with pytest.raises(RecoveryRefused) as refused:
-        ledger.note_snapshot_written(refused_verdict, snapshot,
+        ledger.note_snapshot_written(
+            refused_verdict,
+            snapshot,
             quarantine=a_quarantine(quarantined=False),
         )
     assert refused.value.refusal is Refusal.VERDICT_NOT_MINTED_BY_A_PREFLIGHT
@@ -3637,9 +3945,15 @@ def test_a_recovery_refuses_a_medium_the_quarantine_never_saw(observations) -> N
 
     flow = workflow(observations, quarantine=blind)
     with pytest.raises(RecoveryRefused) as refused:
-        flow.start(descriptor(), observations, session_id=SESSION, started_by_operator=True)
+        flow.start(
+            descriptor(),
+            observations,
+            media_binding_holds=True,
+            session_id=SESSION,
+            started_by_operator=True,
+        )
     assert refused.value.refusal is Refusal.GATE_REFUSED
-    assert flow.audit()[-1].gate is RecoveryGate.TARGET_BINDING
+    assert flow.audit()[-1].gate is RecoveryGate.MEDIUM_NOT_RECOGNISED
     assert flow.stage is RecoveryStage.REFUSED
     assert flow.holds(RecoveryCandidate(1, FINGERPRINT)) is False
 
@@ -3660,9 +3974,15 @@ def test_a_recovery_refuses_a_quarantine_from_another_sitting(observations) -> N
 
     flow = workflow(observations, quarantine=elsewhere)
     with pytest.raises(RecoveryRefused) as refused:
-        flow.start(descriptor(), observations, session_id=SESSION, started_by_operator=True)
+        flow.start(
+            descriptor(),
+            observations,
+            media_binding_holds=True,
+            session_id=SESSION,
+            started_by_operator=True,
+        )
     assert refused.value.refusal is Refusal.GATE_REFUSED
-    assert flow.audit()[-1].gate is RecoveryGate.TARGET_BINDING
+    assert flow.audit()[-1].gate is RecoveryGate.MEDIUM_NOT_RECOGNISED
 
 
 def test_a_verdict_is_not_a_permission_that_outlives_what_it_judged() -> None:
@@ -3709,8 +4029,9 @@ def test_a_verdict_is_not_a_permission_that_outlives_what_it_judged() -> None:
     with pytest.raises(RecoveryRefused):
         ledger.may_migrate(verdict, quarantine=medium)
     assert ledger.audit()[-1].check is PreflightCheck.MEDIUM_FENCED
-    assert not [entry for entry in ledger.audit() if entry.event is not
-                SnapshotAuditEvent.MIGRATION_REFUSED]
+    assert not [
+        entry for entry in ledger.audit() if entry.event is not SnapshotAuditEvent.MIGRATION_REFUSED
+    ]
 
 
 def test_the_repr_survives_an_instance_that_was_never_built(observations) -> None:
@@ -3726,9 +4047,7 @@ def test_the_repr_survives_an_instance_that_was_never_built(observations) -> Non
 
     import traceback
 
-    binding = SessionBinding(
-        host_fingerprint=host_fingerprint(observations), session_id=SESSION
-    )
+    binding = SessionBinding(host_fingerprint=host_fingerprint(observations), session_id=SESSION)
     for arguments in (
         {"quarantine": object(), "binding": binding, "session_id": SESSION},
         {"quarantine": a_quarantine(), "binding": object(), "session_id": SESSION},
@@ -3741,9 +4060,7 @@ def test_the_repr_survives_an_instance_that_was_never_built(observations) -> Non
                 session_id=arguments["session_id"],
             )
         rendered = "".join(
-            traceback.TracebackException.from_exception(
-                raised.value, capture_locals=True
-            ).format()
+            traceback.TracebackException.from_exception(raised.value, capture_locals=True).format()
         )
         assert "RecoveryWorkflow(stage=unbuilt)" in rendered
         assert FINGERPRINT not in rendered
@@ -3775,13 +4092,16 @@ def test_a_snapshot_mutated_during_the_prompt_is_a_substitution(observations) ->
             return super().attempt()
 
     flow = workflow(observations)
-    flow.start(snap, observations, session_id=SESSION, started_by_operator=True)
-    flow.open_trial(snap, observations, session_id=SESSION)
+    flow.start(
+        snap, observations, media_binding_holds=True, session_id=SESSION, started_by_operator=True
+    )
+    flow.open_trial(snap, observations, media_binding_holds=True, session_id=SESSION)
 
     with pytest.raises(RecoveryRefused) as refused:
         flow.commit(
             snap,
             observations,
+            media_binding_holds=True,
             session_id=SESSION,
             acquisition=MutatesDuringThePrompt(),
             confirmed=True,
@@ -3805,15 +4125,22 @@ def test_the_candidate_names_the_snapshot_that_was_judged(observations) -> None:
 
     snap = descriptor()
     flow = workflow(observations)
-    flow.start(snap, observations, session_id=SESSION, started_by_operator=True)
-    flow.open_trial(snap, observations, session_id=SESSION)
+    flow.start(
+        snap, observations, media_binding_holds=True, session_id=SESSION, started_by_operator=True
+    )
+    flow.open_trial(snap, observations, media_binding_holds=True, session_id=SESSION)
 
     held = flow._pinned
     assert held is not snap
     assert _fields_of(held) == _fields_of(snap)
 
     candidate = flow.commit(
-        snap, observations, session_id=SESSION, acquisition=Opens(), confirmed=True
+        snap,
+        observations,
+        media_binding_holds=True,
+        session_id=SESSION,
+        acquisition=Opens(),
+        confirmed=True,
     )
     assert candidate.schema_version == 1
     assert flow.audit()[-1].fingerprint == FINGERPRINT
@@ -3938,7 +4265,13 @@ def test_a_snapshot_subclass_is_refused_like_every_other_stand_in(observations) 
 
     flow = workflow(observations)
     for act in (
-        lambda: flow.start(sneaky, observations, session_id=SESSION, started_by_operator=True),
+        lambda: flow.start(
+            sneaky,
+            observations,
+            media_binding_holds=True,
+            session_id=SESSION,
+            started_by_operator=True,
+        ),
         lambda: preflight(
             a_quarantine(quarantined=False),
             snapshot=sneaky,
@@ -3977,6 +4310,7 @@ def test_a_workflow_with_nothing_pinned_commits_nothing(observations) -> None:
         flow.commit(
             descriptor(schema_version=2),
             observations,
+            media_binding_holds=True,
             session_id=SESSION,
             acquisition=Opens(),
             confirmed=True,
@@ -3999,8 +4333,10 @@ def test_a_workflow_and_a_ledger_do_not_fork(observations) -> None:
 
     flow = workflow(observations)
     snap = descriptor()
-    flow.start(snap, observations, session_id=SESSION, started_by_operator=True)
-    flow.open_trial(snap, observations, session_id=SESSION)
+    flow.start(
+        snap, observations, media_binding_holds=True, session_id=SESSION, started_by_operator=True
+    )
+    flow.open_trial(snap, observations, media_binding_holds=True, session_id=SESSION)
 
     ledger = MigrationLedger()
     for subject in (flow, ledger):
@@ -4091,3 +4427,113 @@ def test_a_schema_this_build_does_not_know_migrates_nowhere(current) -> None:
     )
     assert verdict.may_migrate is False
     assert verdict.refused_by is PreflightCheck.SCHEMA_COMPATIBILITY
+
+
+def test_the_media_binding_is_reported_and_asked_at_every_stage(observations) -> None:
+    """ADR-0010 D8 gate 1, as the ADR names it.
+
+    `RecoveryGate.TARGET_BINDING` used to be `commissioning.binding_applies` —
+    the **host** binding — and D8 gate 1 is ADR-0008 D4.1.1's key-protected
+    **media** binding. The caller re-derives that (`media_binding_applies` over
+    a `MediaClaim` under a `BindingKey`, in `azazel_boot.persistence`) and
+    reports the answer here, in the same shape `preflight` takes its three
+    reports. The key does not come here: a decision module that holds key
+    material is a decision module the secret arrives at.
+
+    Asked at **every** stage, because a medium can be swapped while an operator
+    reads a screen — the same reason the fence is re-read three times.
+    """
+
+    snap = descriptor()
+    for stage in ("start", "open_trial", "commit"):
+        flow = workflow(observations)
+        if stage != "start":
+            flow.start(
+                snap,
+                observations,
+                media_binding_holds=True,
+                session_id=SESSION,
+                started_by_operator=True,
+            )
+        if stage == "commit":
+            flow.open_trial(
+                snap, observations, media_binding_holds=True, session_id=SESSION
+            )
+
+        def call(holds, *, on=flow, at=stage):
+            if at == "start":
+                return on.start(
+                    snap,
+                    observations,
+                    media_binding_holds=holds,
+                    session_id=SESSION,
+                    started_by_operator=True,
+                )
+            if at == "open_trial":
+                return on.open_trial(
+                    snap, observations, media_binding_holds=holds, session_id=SESSION
+                )
+            return on.commit(
+                snap,
+                observations,
+                media_binding_holds=holds,
+                session_id=SESSION,
+                acquisition=Opens(),
+                confirmed=True,
+            )
+
+        # A truthy object is not a check, here as everywhere else.
+        with pytest.raises(TypeError, match="media_binding_holds"):
+            call("yes")
+
+        with pytest.raises(RecoveryRefused) as refused:
+            call(False)
+        assert refused.value.refusal is Refusal.GATE_REFUSED
+        assert flow.audit()[-1].gate is RecoveryGate.TARGET_BINDING
+        assert flow.stage is RecoveryStage.REFUSED
+        assert flow.holds(RecoveryCandidate(1, FINGERPRINT)) is False
+
+
+def test_no_function_here_takes_the_live_data_and_the_snapshot_together() -> None:
+    """ADR-0010 D6, asserted on the signatures — which nothing did.
+
+    The module docstring and `docs/snapshot-and-recovery.md` both said "a test
+    asserts that on the signatures rather than on the bodies", and a review
+    found there was no such test. D6 requires that a snapshot's integrity is
+    judged **on the snapshot alone**: a snapshot that can only be judged by the
+    thing it would restore is not a snapshot.
+
+    So: no callable here takes a parameter naming live data, and no callable
+    takes two snapshot-shaped parameters at once.
+    """
+
+    from azazel_boot import snapshot as module
+
+    live = ("live", "current_data", "volume_data", "original", "source_bytes", "actual")
+    for name, value in inspect.getmembers(module):
+        if not (inspect.isfunction(value) or inspect.isclass(value)):
+            continue
+        if getattr(value, "__module__", None) != module.__name__:
+            continue
+        callables = (
+            [(name, value)]
+            if inspect.isfunction(value)
+            else [
+                (f"{name}.{attribute}", member)
+                for attribute, member in inspect.getmembers(value, inspect.isfunction)
+                if member.__module__ == module.__name__
+            ]
+        )
+        for label, call in callables:
+            parameters = inspect.signature(call).parameters
+            assert not [
+                word for word in live for key in parameters if word in key.lower()
+            ], label
+            snapshots = [
+                key
+                for key, parameter in parameters.items()
+                if "snapshot" in key.lower()
+                and "written" not in key.lower()
+                and parameter.kind is not parameter.VAR_KEYWORD
+            ]
+            assert len(snapshots) <= 1, f"{label} takes {snapshots}"

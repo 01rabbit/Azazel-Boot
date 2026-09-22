@@ -689,17 +689,24 @@ class RecoveryGate(Enum):
 
     MEDIUM_FENCED = "medium_fenced"
     NOTHING_TO_RECOVER = "nothing_to_recover"
-    #: **Which medium is being recovered.** This gate used to be the host
-    #: binding wearing D8 gate 1's name: `binding_applies` compares a host
-    #: fingerprint and a sitting, and a review committed a recovery over a
-    #: quarantine that had never observed *any* device, and over two different
-    #: media identities in turn, because nothing in the workflow ever asked
-    #: what it was recovering. The quarantine is asked, through its own
-    #: question, so no device identity enters this module.
-    TARGET_BINDING = "target_binding"
-    #: The host and the sitting — what `binding_applies` actually answers, now
-    #: named for what it is rather than borrowed for D8 gate 1.
+    #: **Which medium is being recovered**, asked of the quarantine through its
+    #: own question. A review committed a recovery over a quarantine that had
+    #: never observed *any* device, and over two different media identities in
+    #: turn, because nothing in the workflow ever asked what it was recovering.
+    #: No device identity enters this module to ask it.
+    MEDIUM_NOT_RECOGNISED = "medium_not_recognised"
+    #: The host and the sitting — what `commissioning.binding_applies` answers.
+    #: It carried D8 gate 1's name until a review pointed out that the name
+    #: belongs to the *media* binding, which this is not.
     HOST_BINDING = "host_binding"
+    #: **ADR-0010 D8 gate 1**: ADR-0008 D4.1.1's key-protected media binding.
+    #: The caller re-derives it — `azazel_boot.persistence.media_binding_applies`
+    #: over a `MediaClaim` under a `BindingKey` — and reports the answer, in
+    #: the same shape `preflight` takes its three. The key does not come here:
+    #: a decision module that holds key material is a decision module the
+    #: secret arrives at, and `session_mode` fixed that boundary for the
+    #: passphrase in exactly this way.
+    TARGET_BINDING = "target_binding"
     KEY_ACQUISITION = "key_acquisition"
     INTEGRITY_VERIFICATION = "integrity_verification"
     OPERATOR_CONFIRMATION = "operator_confirmation"
@@ -996,6 +1003,7 @@ class RecoveryWorkflow:
         observations: tuple[InterfaceObservation, ...],
         *,
         session_id: str,
+        media_binding_holds: bool,
         started_by_operator: bool,
     ) -> None:
         """An operator starts this. Nothing else does.
@@ -1030,7 +1038,12 @@ class RecoveryWorkflow:
                 "nothing here starts one on its own, retries one, or resumes "
                 "one in the background",
             )
-        self._require_the_gates(snapshot, observations, session_id=session_id)
+        self._require_the_gates(
+            snapshot,
+            observations,
+            session_id=session_id,
+            media_binding_holds=media_binding_holds,
+        )
 
         self._sealed_assign("_snapshot", snapshot)
         # The **values**, not the object. `held = self._snapshot` was the same
@@ -1058,6 +1071,7 @@ class RecoveryWorkflow:
         observations: tuple[InterfaceObservation, ...],
         *,
         session_id: str,
+        media_binding_holds: bool,
     ) -> None:
         """Open the trial, with every gate asked again.
 
@@ -1072,7 +1086,12 @@ class RecoveryWorkflow:
         self._require_stage(RecoveryStage.PREFLIGHT_PASSED)
         self._require_this_sitting(session_id)
         self._require_the_same_snapshot(snapshot)
-        self._require_the_gates(snapshot, observations, session_id=session_id)
+        self._require_the_gates(
+            snapshot,
+            observations,
+            session_id=session_id,
+            media_binding_holds=media_binding_holds,
+        )
 
         self._sealed_assign("_stage", RecoveryStage.TRIAL_OPEN)
         self._record(SnapshotAuditEvent.RECOVERY_TRIAL_OPENED)
@@ -1083,6 +1102,7 @@ class RecoveryWorkflow:
         observations: tuple[InterfaceObservation, ...],
         *,
         session_id: str,
+        media_binding_holds: bool,
         acquisition: KeyAcquisition,
         confirmed: bool,
     ) -> RecoveryCandidate:
@@ -1106,7 +1126,11 @@ class RecoveryWorkflow:
         self._require_this_sitting(session_id)
         self._require_the_same_snapshot(snapshot)
         self._require_the_gates(
-            snapshot, observations, session_id=session_id, acquisition=acquisition
+            snapshot,
+            observations,
+            session_id=session_id,
+            media_binding_holds=media_binding_holds,
+            acquisition=acquisition,
         )
         # **Again, after the prompt.** The two quarantine flags were re-read
         # after `attempt()` and the pin was not, so a review mutated the frozen
@@ -1256,9 +1280,10 @@ class RecoveryWorkflow:
         observations: tuple[InterfaceObservation, ...],
         *,
         session_id: str,
+        media_binding_holds: bool,
         acquisition: KeyAcquisition | None = None,
     ) -> None:
-        """D8's gates, in D8's order, with the two that precede them.
+        """D8's gates, in D8's order, with the three that precede them.
 
         Each is driven failing on its own in `tests/unit/test_snapshot.py` to
         show the next is not reached, because an order nobody tests is an order
@@ -1284,16 +1309,25 @@ class RecoveryWorkflow:
         # stays with `azazel_boot.persistence` and is named in the docs as a
         # limit rather than claimed here.
         if not self._quarantine.medium_is_bound():
-            self._refuse_gate(RecoveryGate.TARGET_BINDING)
+            self._refuse_gate(RecoveryGate.MEDIUM_NOT_RECOGNISED)
         # And the quarantine has to be this sitting's. `PersistenceSession`
         # refuses the identical pairing with `QUARANTINE_FROM_ANOTHER_SESSION`;
         # this module type-checked the quarantine, the binding and the sitting
         # and never compared the first with the third.
         if self._quarantine.session_id != self._session_id:
-            self._refuse_gate(RecoveryGate.TARGET_BINDING)
+            self._refuse_gate(RecoveryGate.MEDIUM_NOT_RECOGNISED)
 
         if not binding_applies(self._binding, observations, session_id=session_id):
             self._refuse_gate(RecoveryGate.HOST_BINDING)
+
+        # D8 gate 1, re-derived by the caller and reported here. A stored
+        # answer would be the thing ADR-0008 D4.1.1 refuses; a `BindingKey`
+        # passed in would be the thing `session_mode` refuses. So it arrives as
+        # the caller's report, checked as a `bool` and asked again at every
+        # stage — the medium can be swapped while an operator reads a screen.
+        _require_an_actual_bool("media_binding_holds", media_binding_holds)
+        if not media_binding_holds:
+            self._refuse_gate(RecoveryGate.TARGET_BINDING)
 
         if acquisition is not None:
             if acquisition.channel is not PassphraseChannel.LOCAL_HIDDEN_PROMPT:
