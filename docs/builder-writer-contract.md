@@ -67,9 +67,12 @@ later reader has; a field absent from it is a fact that is gone.
 | `git_revision` | The exact commit of this repository the build was driven from. |
 | `builder_version` | The version of the builder itself — part of what a release attests to ([ADR-0002](adr/0002-image-builder.md) D4.3). |
 | `debian_snapshot` | The Debian snapshot identity the packages came from, not a distribution name. |
-| `package_manifest` | Every package in the payload, with version and origin. |
-| `firmware_manifest` | Every firmware blob, `non-free-firmware` included, per [ADR-0008](adr/0008-debian-13-live-baseline.md) D1 item 3. |
-| `sbom` | The SBOM for the payload (release policy §2). |
+| `package_manifest_ref` | Where the package manifest sits inside the artifact. |
+| `package_manifest_digest` | A digest binding that manifest's contents. |
+| `firmware_manifest_ref` | Where the firmware manifest sits, `non-free-firmware` included, per [ADR-0008](adr/0008-debian-13-live-baseline.md) D1 item 3. |
+| `firmware_manifest_digest` | A digest binding that manifest's contents. |
+| `sbom_ref` | Where the SBOM sits inside the artifact (release policy §2). |
+| `sbom_digest` | A digest binding the SBOM's contents. |
 | `source_date_epoch` | The `SOURCE_DATE_EPOCH` the build was pinned to. |
 | `build_input_digest` | A digest over the closed set of inputs — the thing a second builder is given. |
 | `partition_layout_digest` | The layout, separately from its contents. |
@@ -81,6 +84,35 @@ later reader has; a field absent from it is a fact that is gone.
 | `build_time` | When the build ran. Distinct from `source_date_epoch`, which is an input. |
 | `compatibility_claim` | `candidate` or `hardware_verified`, and nothing else ([compatibility](compatibility.md)). |
 | `quarantine_policy_version` | Which version of the host-storage quarantine policy the payload carries ([threat model](threat-model.md) §3). |
+
+The medium's own block layout is fixed alongside this: GPT, an ESP, the signed
+read-only root, and an optional LUKS2 persistence partition holding a filesystem
+formatted directly on it. **No volume manager is assembled, imported or
+auto-activated on either the host's storage or the medium**; LUKS2's `dm-crypt`
+mapping is the one exception, and it exists to open persistence
+([ADR-0008](adr/0008-debian-13-live-baseline.md) D4.1).
+
+### 3.0 The record holds scalars; the manifests are sidecars
+
+Every field above is a **JSON scalar** — a string, an integer, or absent. The
+structured package manifest, firmware manifest and SBOM are separate files
+inside the signed artifact; the record references them and binds their contents
+by digest ([ADR-0009](adr/0009-builder-and-writer-contract.md) D2, revised).
+
+A `*_ref` is a **normalised relative reference inside the artifact**. An
+arbitrary URL, an absolute path and a parent traversal are refused: a reference
+that can leave the artifact turns a record into an instruction to fetch
+something.
+
+Each `*_digest` binds its sidecar's contents; the signed artifact digest binds
+the record **and** the set of sidecars, so an added, removed or swapped sidecar
+is detectable against the signature.
+
+The claim these fields make is therefore: **every included item is represented
+by a verified, referenced manifest or SBOM** — not "every package is in the
+record". A fingerprint over a record containing arbitrary nested documents is a
+canonicalisation hazard, and a binding that cannot be computed identically twice
+is not a binding.
 
 ### 3.1 Why "image digest" is two fields
 
