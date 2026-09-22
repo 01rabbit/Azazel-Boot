@@ -9,6 +9,7 @@ Nothing below may be cited as evidence that Azazel-Boot has been built, signed,
 attested, or released. None of those things has happened.
 
 Related: [ADR index](adr/README.md) · [ADR-0002 image builder](adr/0002-image-builder.md) ·
+[Builder and writer contract](builder-writer-contract.md) ·
 [ADR-0003 immutable A/B update](adr/0003-immutable-ab-update.md) ·
 [ADR-0004 Fabric pin](adr/0004-exact-tag-fabric-consumption.md) ·
 [Threat model](threat-model.md) · [Compatibility](compatibility.md) ·
