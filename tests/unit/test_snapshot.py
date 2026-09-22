@@ -18,6 +18,7 @@ judged the medium refuses exactly as much afterwards as before.
 from __future__ import annotations
 
 import ast
+import copy
 import dataclasses
 import inspect
 import pickle
@@ -208,10 +209,23 @@ def test_a_candidate_is_not_a_volume_and_grants_nothing(observations) -> None:
     surface = {name for name in dir(candidate) if not name.startswith("_")}
     assert surface == {"authority", "schema_version"}
 
-    with pytest.raises(AttributeError):
-        candidate.schema_version = 2
+    # Assigned to a **slot** and to a new name, not to `schema_version`.
+    # `schema_version` is a property without a setter, so Python refuses it
+    # whatever `__setattr__` does — a mutation replacing `__setattr__` with
+    # `object.__setattr__` survived the whole suite against the first version
+    # of this assertion. That is the incidental-refusal pattern this repository
+    # has now hit three times: crediting the class for a refusal it did not make.
+    assert RecoveryCandidate.__setattr__ is not object.__setattr__
+    for name, value in (("_schema_version", 2), ("_fingerprint", "other"), ("extra", 1)):
+        with pytest.raises(AttributeError, match="fixed when it is minted"):
+            setattr(candidate, name, value)
+    assert candidate.schema_version == 1
+
+    assert RecoveryCandidate.__reduce__ is not object.__reduce__
     with pytest.raises(TypeError, match="not serialisable"):
         pickle.dumps(candidate)
+    with pytest.raises(TypeError, match="not serialisable"):
+        copy.deepcopy(candidate)
 
 
 def test_nothing_in_this_module_can_lift_a_quarantine_or_a_fence() -> None:
