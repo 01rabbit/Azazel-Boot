@@ -23,6 +23,8 @@ and each names what it defeated:
 from __future__ import annotations
 
 import dataclasses
+import hashlib
+import hmac
 import json
 import traceback
 
@@ -33,6 +35,7 @@ from azazel_boot.commissioning import SessionBinding, host_fingerprint
 from azazel_boot.inventory import collect_interfaces
 from azazel_boot.persistence import (
     DEGRADED_CAPABILITY,
+    KNOWN_PLACEHOLDER_IDENTITIES,
     PARTITION_ROLES,
     RECOVERY_OPTIONS,
     VOLUME_MANAGER_MEMBERS,
@@ -54,6 +57,7 @@ from azazel_boot.persistence import (
     UnlockOutcome,
     bind_media,
     check_layout,
+    encodable,
     identity_is_stable,
     media_binding_applies,
     status_field_names,
@@ -102,6 +106,7 @@ COMMISSIONING_GENERATION = 3
 def claim(**overrides) -> MediaClaim:
     return MediaClaim(
         identity=overrides.pop("identity", MEDIA_IDENTITY),
+        device_identity=overrides.pop("device_identity", MEDIUM_ID),
         persistence_uuid=overrides.pop("persistence_uuid", PERSISTENCE_UUID),
         boot_image_digest=overrides.pop("boot_image_digest", BOOT_IMAGE_DIGEST),
         commissioning_generation=overrides.pop(
@@ -1201,18 +1206,35 @@ def test_without_a_key_there_is_no_binding_and_therefore_no_persistence() -> Non
 @pytest.mark.parametrize(
     "changed",
     [
-        {"identity": MediaIdentity("ANOTHER-MEDIUM-0002", MediaIdentitySource.NVME_EUI64)},
+        # The identity's **value**, with the source held constant, and the
+        # **source**, with the value held constant. They were one case once —
+        # `MediaIdentity("ANOTHER-MEDIUM-0002", NVME_EUI64)` against a default
+        # of `("SYNTHETIC-MEDIA-0001", USB_SERIAL_DESCRIPTOR)` — so both moved
+        # together and the source alone made the digest differ. A review
+        # removed the identity *value* from the HMAC and the suite stayed
+        # green: the central property of this whole change was passing for the
+        # wrong reason. Two cases, one variable each.
+        {
+            "identity": MediaIdentity(
+                "ANOTHER-MEDIUM-0002", MediaIdentitySource.USB_SERIAL_DESCRIPTOR
+            )
+        },
+        {
+            "identity": MediaIdentity(
+                "SYNTHETIC-MEDIA-0001", MediaIdentitySource.NVME_EUI64
+            )
+        },
         {"persistence_uuid": "00000000-1111-4000-8000-recreated01"},
         {"boot_image_digest": "sha256:" + "b" * 64},
         {"commissioning_generation": COMMISSIONING_GENERATION - 1},
     ],
 )
-def test_any_of_the_four_bound_inputs_changing_refuses(changed, observations) -> None:
+def test_any_of_the_bound_inputs_changing_refuses(changed, observations) -> None:
     """A different medium, a re-created volume, a different image, a rollback.
 
-    All four are one refusal on purpose. A refusal naming *which* input was
-    wrong is an oracle: it tells an attacker holding three of them which one to
-    keep working on.
+    All of them are one refusal on purpose. A refusal naming *which* input was
+    wrong is an oracle: it tells an attacker holding the rest which one to keep
+    working on.
     """
 
     live = session(observations)
@@ -1317,6 +1339,23 @@ def _tampered_media() -> tuple[MediaAssertion, BindingKey]:
             binding=MEDIA.binding,
         ),
         BindingKey(b"the-key-material-must-never-render"),
+    )
+
+
+def _unencodable_media() -> tuple[MediaClaim, BindingKey]:
+    """Values that cannot be encoded, built where they will not be a local."""
+
+    return (
+        MediaClaim(
+            identity=MediaIdentity(
+                "SNSECRET\ud800", MediaIdentitySource.USB_SERIAL_DESCRIPTOR
+            ),
+            device_identity=MEDIUM_ID,
+            persistence_uuid="uuid-SECRETVALUE-A",
+            boot_image_digest="sha256:secretimagedigest",
+            commissioning_generation=COMMISSIONING_GENERATION,
+        ),
+        BindingKey(b"another-key-that-must-never-render"),
     )
 
 
@@ -1458,3 +1497,241 @@ def test_the_limit_of_the_media_binding_is_stated_rather_than_implied() -> None:
     threat_model = Path(__file__).resolve().parents[2] / "docs" / "threat-model.md"
     text = " ".join(threat_model.read_text(encoding="utf-8").split())
     assert "hardware-provided stable media identity" in text
+
+
+# --------------------------------------------------------------------------
+# Round seven: the seven mutations that survived, and why they could
+#
+# A mutation harness whose copied tree was already red reported every mutation
+# as caught, including the one that removed the medium's identity from the
+# digest. The numbers it produced were not evidence. These tests exist because
+# a harness that establishes its own baseline found seven live holes.
+# --------------------------------------------------------------------------
+
+
+def test_a_claim_for_one_device_does_not_open_persistence_on_another(
+    observations,
+) -> None:
+    """Two identity systems were checked independently, so both could be satisfied.
+
+    `_require_the_medium` asks the quarantine about `Device.identity`, which
+    this session assigned from what the initramfs marked.
+    `_require_the_media_binding` checks `MediaClaim.identity`, which the
+    hardware reports. Nothing related them, so a valid binding for a medium the
+    caller owns, presented alongside the booted medium as `device`, opened
+    persistence. The claim must be *about* the device being acted on, and the
+    device's identity is inside the HMAC so the pair cannot be swapped.
+    """
+
+    elsewhere = assertion(device_identity="a-medium-the-caller-owns")
+    live = session(observations)
+
+    with pytest.raises(PersistenceRefused) as refused:
+        live.unlock(
+            MEDIUM,
+            layout(),
+            observations,
+            media=elsewhere,
+            binding_key=BINDING_KEY,
+            **unlock_arguments(),
+        )
+    assert refused.value.refusal is Refusal.MEDIA_BINDING_MISMATCH
+    assert live.status().state is PersistenceState.UNEXAMINED
+
+
+def test_an_identity_that_cannot_be_encoded_is_refused_rather_than_raised(
+    observations,
+) -> None:
+    """It used to escape as `UnicodeEncodeError`, from the worst possible frame.
+
+    A lone surrogate passed every stability check — long enough, not uniform,
+    not a listed placeholder — and then failed the strict encode inside the
+    canonical encoding, whose frame holds the disclosed identity, the volume
+    UUID and the image digest. All three were in the traceback, and the
+    exception escaped both public functions, which no caller is told about.
+
+    The route is ordinary: Python decodes OS-provided strings with
+    `surrogateescape`, so a sysfs attribute whose bytes are not valid UTF-8
+    produces exactly this.
+    """
+
+    assert not identity_is_stable("SNSECRET\ud800")
+    assert not encodable("SNSECRET\ud800")
+    assert encodable("SYNTHETIC-MEDIA-0001", "")
+
+    surrogate = MediaIdentity("SNSECRET\ud800", MediaIdentitySource.USB_SERIAL_DESCRIPTOR)
+    with pytest.raises(PersistenceRefused) as refused:
+        bind_media(claim(identity=surrogate), BINDING_KEY)
+    assert refused.value.refusal is Refusal.MEDIA_IDENTITY_NOT_STABLE
+
+    with pytest.raises(PersistenceRefused) as refused:
+        bind_media(claim(persistence_uuid="uuid-\ud800"), BINDING_KEY)
+    assert refused.value.refusal is Refusal.MEDIA_BINDING_INCOMPLETE
+
+    # And it does not escape the boolean-answering function either.
+    assert not media_binding_applies(
+        MEDIA.binding, claim(identity=surrogate), BINDING_KEY
+    )
+
+
+def test_no_traceback_of_an_unencodable_identity_carries_it(observations) -> None:
+    """The frame that held it has returned before anything raises."""
+
+    hostile, key = _unencodable_media()
+    try:
+        bind_media(hostile, key)
+    except PersistenceRefused as error:
+        captured = "".join(
+            traceback.TracebackException.from_exception(
+                error, capture_locals=True
+            ).format()
+        )
+    secret = hostile.identity.disclose()
+    assert secret not in captured
+    assert hostile.persistence_uuid not in captured
+    assert key.disclose().decode() not in captured
+
+
+def test_a_uniform_identity_is_refused_even_when_it_is_not_on_the_denylist() -> None:
+    """The denylist was doing the work the uniformity rule is credited with.
+
+    Every uniform value the parametrized list happened to use — `aaaaaaaaaaaa`,
+    `0000000000000000` — is *also* a known placeholder, so deleting the
+    uniformity check left the suite green.
+    """
+
+    for uniform in ("11111111", "ffffffffff", "zzzzzzzzzzzz", "--------"):
+        assert uniform not in KNOWN_PLACEHOLDER_IDENTITIES
+        assert not identity_is_stable(uniform)
+
+
+def test_the_binding_is_domain_separated() -> None:
+    """Claimed in the docstring, pinned by nothing until now."""
+
+    from azazel_boot.persistence import _BINDING_DOMAIN, _canonical
+
+    assert _BINDING_DOMAIN
+    encoded = _canonical("a", "bb")
+    assert encoded.startswith(_BINDING_DOMAIN)
+    assert hmac.new(
+        BINDING_KEY.disclose(), encoded[len(_BINDING_DOMAIN):], hashlib.sha256
+    ).hexdigest() != hmac.new(
+        BINDING_KEY.disclose(), encoded, hashlib.sha256
+    ).hexdigest()
+
+
+def test_the_digest_comparison_is_constant_time_and_whole() -> None:
+    """A prefix comparison passed every test, which is the point of pinning it.
+
+    Timing is not observable from a unit test, so the mechanism is asserted at
+    the source — the same shape as the seal-limit test. A reviewer replaced
+    `hmac.compare_digest` with a truncated `==` and nothing noticed.
+    """
+
+    from pathlib import Path
+
+    from azazel_boot import persistence as module
+
+    source = " ".join(Path(module.__file__).read_text(encoding="utf-8").split())
+    assert "hmac.compare_digest(recomputed.digest, media.binding.digest)" in source
+    assert source.count("hmac.compare_digest") >= 2
+
+    last = MEDIA.binding.digest[-1]
+    near = MediaBinding(digest=MEDIA.binding.digest[:-1] + ("0" if last != "0" else "1"))
+    assert not media_binding_applies(near, claim(), BINDING_KEY)
+
+
+def test_media_binding_applies_fails_closed_on_a_claim_it_cannot_bind() -> None:
+    """The public function's refusal path had no caller in the suite.
+
+    Returning True there would make every unbindable medium — no identity, a
+    placeholder identity, no key — match whatever binding was presented.
+    """
+
+    unusable = MediaIdentity("", MediaIdentitySource.USB_SERIAL_DESCRIPTOR)
+    assert not media_binding_applies(MEDIA.binding, claim(identity=unusable), BINDING_KEY)
+    assert not media_binding_applies(
+        MEDIA.binding, claim(identity=MEDIA_IDENTITY), BindingKey(b"tooshort")
+    )
+    assert not media_binding_applies(
+        MEDIA.binding, claim(persistence_uuid="  "), BINDING_KEY
+    )
+
+
+@pytest.mark.parametrize("act", ["create", "unlock"])
+def test_the_media_binding_is_checked_before_the_layout_in_both_acts(
+    act: str, observations
+) -> None:
+    """A caller with a wrong binding must not learn layout facts first.
+
+    The earlier test exercised `create` only, so moving the check after
+    `check_layout` in `unlock` alone survived. The partition table is
+    attacker-supplied input, and parsing it on behalf of a medium already known
+    not to be ours is work done for the adversary.
+    """
+
+    live = session(observations)
+    hostile = Partition(role="/dev/nvme0n1p3 SERIAL=S4EVNF0N", filesystem="ext4")
+    forged = MediaAssertion(claim=claim(), binding=MediaBinding(digest="0" * 64))
+    bad = layout(ESP, ROOT, hostile)
+
+    with pytest.raises(PersistenceRefused) as refused:
+        if act == "create":
+            live.create(MEDIUM, bad, observations, media=forged, binding_key=BINDING_KEY)
+        else:
+            live.unlock(
+                MEDIUM,
+                bad,
+                observations,
+                media=forged,
+                binding_key=BINDING_KEY,
+                **unlock_arguments(),
+            )
+    assert refused.value.refusal is Refusal.MEDIA_BINDING_MISMATCH
+
+
+def test_a_length_is_not_key_material() -> None:
+    """`bytes(16)` is sixteen zero bytes, and `BindingKey(16)` accepted it."""
+
+    for wrong in (16, "a-passphrase", None, 3.0):
+        with pytest.raises(TypeError):
+            BindingKey(wrong)
+    assert BindingKey(bytearray(b"x" * 32)).is_usable
+
+
+def test_a_binding_cannot_be_reused_under_a_different_device_identity(
+    observations,
+) -> None:
+    """The cross-check alone is not the same as binding the device in.
+
+    With `device_identity` compared but **not** inside the HMAC, a binding
+    minted while the quarantine called the medium one thing matches a claim
+    naming another — the digest does not move — and the comparison then passes
+    because the claim agrees with the device in front of it. The binding
+    becomes reusable across device identities, which is the property the
+    comparison was supposed to establish.
+
+    Mutation found it: removing `claim.device_identity` from the canonical
+    message left the suite green when the cross-check was the only test.
+    """
+
+    minted_elsewhere = bind_media(
+        claim(device_identity="a-different-device-identity"), BINDING_KEY
+    )
+    here = claim(device_identity=MEDIUM_ID)
+
+    # The claim agrees with the device being acted on, so only the HMAC can
+    # refuse this.
+    assert here.device_identity == MEDIUM.identity
+    assert not media_binding_applies(minted_elsewhere, here, BINDING_KEY)
+
+    live = session(observations)
+    with pytest.raises(PersistenceRefused) as refused:
+        live.create(
+            MEDIUM,
+            layout(),
+            observations,
+            media=MediaAssertion(claim=here, binding=minted_elsewhere),
+            binding_key=BINDING_KEY,
+        )
+    assert refused.value.refusal is Refusal.MEDIA_BINDING_MISMATCH

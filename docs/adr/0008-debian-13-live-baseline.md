@@ -147,24 +147,40 @@ key-protected HMAC over four inputs:
 ```
 stable media hardware identity   (USB serial descriptor, SCSI VPD WWN,
                                   NVMe EUI-64 / NGUID, or ATA serial)
++ the device identity the quarantine holds
 + LUKS persistence UUID
 + signed Boot image digest
 + commissioning generation
 ```
 
-Four rules follow, and each is enforced by test rather than by convention:
+Five rules follow. Each is pinned by a test that fails when the rule is
+removed, verified by mutation against a baseline rather than asserted — an
+earlier version of this line said "each is enforced by test", and a mutation
+harness whose copied tree was already red had reported every mutation as
+caught, including one that removed the medium's identity from the digest:
 
 1. **Topology is never identity.** A bus path, a device node, a port, a hub
    position or an enumeration order says where a medium is plugged in, not what
    it is, and all of them move when the operator uses a different socket. The
-   accepted-source vocabulary has no value for any of them.
+   accepted-source vocabulary has no value for any of them — that half is
+   enforced by the type. Nothing stops a caller putting a bus path in the
+   *value* under a hardware source, so that half is discipline on whoever reads
+   the device, and it is written down rather than assumed.
 2. **The binding is key-protected, not a plain digest.** The key is derived by
    the caller from the TPM or the commissioning secret and is supplied per act;
    nothing stores it. A caller with no key has no binding and opens nothing.
 3. **A medium whose stable identity cannot be read, that has changed, or whose
    HMAC does not match is `refused`** — persistence does not open. A changed
    identity and a forged binding are deliberately the same refusal, because one
-   that names which input was wrong is an oracle.
+   that names which input was wrong is an oracle. "Changed" means *checked at
+   the next act*: creating and unlocking each check, and a volume already open
+   stays open until something asks again. A live substitution with no removal
+   event is not modelled.
+5. **The binding also covers the device identity the quarantine holds**, and a
+   claim must be about the device being acted on. Two identity systems meet
+   here — the session's, assigned from what the initramfs marked, and the
+   medium's, reported by the hardware — and checking each against its own
+   reference independently left them satisfiable in combination.
 4. **The raw serial, WWN or device identity lives in the encrypted commissioning
    record and nowhere else.** Not the audit, not a journal, not a terminal, not
    an issue or a pull request, not an external report. No such encrypted record

@@ -65,6 +65,7 @@ a **key-protected HMAC** together with three other things:
 ```
 stable media hardware identity   (USB serial descriptor, SCSI VPD WWN,
                                   NVMe EUI-64 / NGUID, ATA serial)
++ the device identity the quarantine holds
 + LUKS persistence UUID
 + signed Boot image digest
 + commissioning generation
@@ -76,9 +77,9 @@ stable media hardware identity   (USB serial descriptor, SCSI VPD WWN,
 | `media_identity_unavailable` | the medium reported no hardware identity |
 | `media_identity_not_stable` | it reported one every device of its kind reports — blank, uniform, or a known bridge placeholder |
 | `media_binding_incomplete` | the volume UUID or the image digest is missing |
-| `media_binding_mismatch` | a different medium, a re-created volume, a different image, a rolled-back generation, or a forged binding |
+| `media_binding_mismatch` | a different medium, a different device, a re-created volume, a different image, a mismatched generation, or a forged binding |
 
-The last row is **one refusal for five causes, deliberately**. A refusal that
+The last row is **one refusal for six causes, deliberately**. A refusal that
 says which of the four inputs was wrong is an oracle: it tells an attacker
 holding three of them which one to keep working on.
 
@@ -98,6 +99,21 @@ making the check real put the values it was derived from into every refusal.
 The raw value belongs in the encrypted commissioning record and nowhere else;
 **no such record exists in this repository yet**, and what exists is the
 discipline that makes one possible.
+
+*The two identity systems are one binding.* The quarantine answers "is this
+the booted medium" from an identity this session assigned; the media binding
+answers "is this the medium the volume was bound to" from one the hardware
+reports. Checked independently, both were satisfiable at once — a review
+presented a valid binding for a medium the caller owns alongside the booted
+medium as the device, and persistence opened. The claim must now be about the
+device being acted on, and that device identity is inside the HMAC, so the pair
+cannot be swapped and the binding cannot be reused under another device
+identity.
+
+*"Changed" means checked at the next act.* Creating and unlocking each check
+the binding; a volume already open stays open until something asks again. A
+live substitution with no removal event is not modelled, and
+[the threat model](threat-model.md) §5 says so.
 
 *What this does not claim.* It does not defeat a byte-for-byte clone of the
 medium made together with its hardware identity, nor a programmable enclosure

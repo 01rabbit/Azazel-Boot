@@ -498,12 +498,42 @@ def identity_is_stable(raw: str | None) -> bool:
 
     if raw is None:
         return False
+    if not encodable(raw):
+        # A lone surrogate reaches here by an ordinary route: Python decodes
+        # OS-provided strings with `surrogateescape`, so a sysfs attribute whose
+        # bytes are not valid UTF-8 produces one, and a USB string descriptor
+        # (UTF-16LE by specification) decoded with `surrogatepass` does too.
+        #
+        # It used to pass every check here and then raise `UnicodeEncodeError`
+        # out of the canonical encoding — from a frame holding the disclosed
+        # identity, the volume UUID and the image digest. A review found all
+        # three in that traceback. So it is refused here, as a value that cannot
+        # be an identity, rather than escaping as an exception no caller is told
+        # about.
+        return False
     value = raw.strip().lower()
     if len(value) < MINIMUM_IDENTITY_LENGTH:
         return False
     if len(set(value)) == 1:
         return False
     return value not in KNOWN_PLACEHOLDER_IDENTITIES
+
+
+def encodable(*values: str) -> bool:
+    """Whether every value survives a strict UTF-8 encode.
+
+    It returns rather than raising, and it returns **before** anything else can
+    fail, so the values are locals of a frame that is gone by the time any
+    refusal is raised. That is the same discipline `_digest` follows, and the
+    reason both exist as separate functions.
+    """
+
+    try:
+        for value in values:
+            value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 class MediaIdentity:
@@ -573,6 +603,14 @@ class BindingKey:
     __slots__ = ("_key",)
 
     def __init__(self, key: bytes) -> None:
+        # `bytes(16)` is sixteen zero bytes, so a caller passing a *length*
+        # where key material was meant used to get a usable, entirely
+        # predictable key. An int is not key material.
+        if not isinstance(key, bytes | bytearray | memoryview):
+            raise TypeError(
+                "a BindingKey is built from key material, not from a length "
+                "or any other object"
+            )
         object.__setattr__(self, "_key", bytes(key))
 
     def __setattr__(self, name: str, value: object) -> None:
@@ -626,13 +664,25 @@ class MediaClaim:
     """
 
     identity: MediaIdentity
+    #: The identity of the device this claim is **about**, as
+    #: `azazel_boot.quarantine.Device` carries it. Two identity systems meet
+    #: here: the quarantine's, which this session assigned from what the
+    #: initramfs marked, and the medium's own, which the hardware reports.
+    #:
+    #: A review checked them independently and showed the consequence: a valid
+    #: binding for a medium the caller owns, presented alongside the booted
+    #: medium as `device`, opened persistence. Each gate was satisfied by its
+    #: own reference and nothing related the two. Binding the device identity
+    #: into the HMAC — and checking the claim is about the device being acted
+    #: on — makes them one binding rather than two coincidences.
+    device_identity: str
     persistence_uuid: str
     boot_image_digest: str
     commissioning_generation: int
 
     def __repr__(self) -> str:
         return (
-            f"MediaClaim(identity={self.identity!r}, "
+            f"MediaClaim(identity={self.identity!r}, device_identity=<redacted>, "
             f"persistence_uuid=<redacted>, boot_image_digest=<redacted>, "
             f"commissioning_generation={self.commissioning_generation!r})"
         )
@@ -654,6 +704,9 @@ def _canonical(*parts: str) -> bytes:
     other HMAC the product computes over the same values.
     """
 
+    # Every value reaching here has already passed `encodable`, so the strict
+    # encode below cannot raise. That is what lets `_digest` promise to return
+    # before anything can fail.
     encoded = [part.encode("utf-8") for part in parts]
     return _BINDING_DOMAIN + b"".join(
         str(len(item)).encode("ascii") + b":" + item for item in encoded
@@ -672,6 +725,7 @@ def _digest(claim: MediaClaim, key: BindingKey) -> str:
     message = _canonical(
         claim.identity.source.value,
         claim.identity.disclose(),
+        claim.device_identity,
         claim.persistence_uuid,
         claim.boot_image_digest,
         str(claim.commissioning_generation),
@@ -694,6 +748,9 @@ def bind_media(claim: MediaClaim, key: BindingKey) -> MediaBinding:
         key_usable=key.is_usable,
         uuid_present=claim.persistence_uuid.strip() != "",
         image_digest_present=claim.boot_image_digest.strip() != "",
+        fields_encodable=encodable(
+            claim.device_identity, claim.persistence_uuid, claim.boot_image_digest
+        ),
     )
     _require_generation(claim.commissioning_generation)
     return MediaBinding(digest=_digest(claim, key))
@@ -726,8 +783,9 @@ def _require_bindable(
     key_usable: bool,
     uuid_present: bool,
     image_digest_present: bool,
+    fields_encodable: bool,
 ) -> None:
-    """Raise from a frame holding five booleans and nothing else.
+    """Raise from a frame holding six booleans and nothing else.
 
     None of the values is in scope here, so a captured-locals traceback of any
     refusal below carries no hardware identity and no key material.
@@ -760,6 +818,12 @@ def _require_bindable(
         raise PersistenceRefused(
             Refusal.MEDIA_BINDING_INCOMPLETE,
             "the binding covers the signed Boot image as well as the medium",
+        )
+    if not fields_encodable:
+        raise PersistenceRefused(
+            Refusal.MEDIA_BINDING_INCOMPLETE,
+            "a value that cannot be encoded cannot be bound; it is refused here "
+            "rather than raised out of the encoding, where it was a local",
         )
 
 
@@ -909,7 +973,7 @@ class PersistenceSession:
 
         self._require_open_session(observations)
         self._require_the_medium(device)
-        self._require_the_media_binding(media, binding_key)
+        self._require_the_media_binding(device, media, binding_key)
         check_layout(layout)
         return self._settle(
             PersistenceState.LOCKED,
@@ -944,7 +1008,7 @@ class PersistenceSession:
 
         self._require_open_session(observations)
         self._require_the_medium(device)
-        self._require_the_media_binding(media, binding_key)
+        self._require_the_media_binding(device, media, binding_key)
         check_layout(layout)
         if not has_persistence(layout):
             raise PersistenceRefused(
@@ -1045,7 +1109,7 @@ class PersistenceSession:
             )
 
     def _require_the_media_binding(
-        self, media: MediaAssertion, binding_key: BindingKey
+        self, device: Device, media: MediaAssertion, binding_key: BindingKey
     ) -> None:
         """The medium's own identity, checked before the layout is even read.
 
@@ -1055,9 +1119,15 @@ class PersistenceSession:
         a hardware-provided identity the medium reports, under a key the caller
         derives from the platform or the commissioning secret.
 
-        Both are needed. The host binding was defeated by a USB NIC supplying
-        the host's whole identity; a medium binding that rested on the session's
-        own labelling would be defeated the same way.
+        Both are needed, and they are now **one** check rather than two. The
+        host binding was defeated by a USB NIC supplying the host's whole
+        identity; a medium binding that rested on the session's own labelling
+        would be defeated the same way. A later review showed the third form of
+        the same mistake: the two gates were satisfied independently, so a valid
+        binding for a medium the caller owns, presented alongside the booted
+        medium as `device`, opened persistence. The claim must now be *about*
+        the device being acted on, and the device's identity is inside the HMAC
+        so the pair cannot be swapped.
 
         `bind_media` raises the specific refusal for a missing key, an absent
         identity, a placeholder identity or an incomplete binding.
@@ -1069,7 +1139,10 @@ class PersistenceSession:
 
         recomputed = bind_media(media.claim, binding_key)
         _refuse_media_binding(
-            matches=hmac.compare_digest(recomputed.digest, media.binding.digest)
+            matches=(
+                media.claim.device_identity == device.identity
+                and hmac.compare_digest(recomputed.digest, media.binding.digest)
+            )
         )
 
     def _settle(
@@ -1175,8 +1248,9 @@ def _refuse_media_binding(*, matches: bool) -> None:
     if not matches:
         raise PersistenceRefused(
             Refusal.MEDIA_BINDING_MISMATCH,
-            "this volume was bound to another medium, another image or another "
-            "generation; a medium whose identity changed is the same refusal",
+            "this volume was bound to another medium, another device, another "
+            "image or another generation; a medium whose identity changed is "
+            "the same refusal",
         )
 
 
