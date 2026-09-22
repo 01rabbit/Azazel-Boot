@@ -109,7 +109,17 @@ test pins the *shape* — no parameter named for a writer, a port, a store, a
 device, a path, a file or a handle — rather than reviewing the body, since a
 body-reviewed claim lasts until the body changes.
 
-The order is fixed and is part of the contract:
+The order is fixed and is part of the contract — and it is now a **constant**,
+`PREFLIGHT_ORDER`, that `preflight` iterates, rather than the order the lines
+happen to sit in. A review permuted fourteen of sixteen adjacent pairs and
+demotions with the whole suite green. No bad input passed, because the chain
+short-circuits and a permutation cannot change the set that passes; what
+changed was the **classification** an operator is given, which is what D7
+promises. The worst of them: with the first two swapped, an operator whose
+medium had been **pulled** was told `volume_quarantined` — a state a recovery
+workflow exists for — instead of `medium_fenced`. Rewriting the branches of
+`_gate_fails` now changes nothing, and every gate is driven against all of its
+successors failing at once.
 
 | # | Check | Why here |
 | --- | --- | --- |
@@ -121,6 +131,27 @@ The order is fixed and is part of the contract:
 | 6 | required vs available space | |
 | 7 | schema compatibility | forward by a known step; a downgrade and a no-op both refuse |
 | 8 | binding, generation, image digest | |
+
+A verdict also names **which checks were asked**, in order, passes included.
+It used to be `refused_by is None` and nothing else, so a verdict from a
+`preflight` that ran three gates was indistinguishable from one that ran all
+ten — which is the structural reason the order could be permuted unnoticed.
+Complete in the sense `Azazel-Knowledge`'s scorer means it: "not evaluated" and
+"passed" are different answers.
+
+**A verdict carries nothing that says it was minted.** It used to carry a
+token, and removing the constructor *parameter* left the *read* path untouched:
+every verdict a caller was handed, refusals included, had the live sentinel one
+attribute access away. Which verdicts this module minted is now a fact the
+module keeps in a `WeakSet` the verdict does not point at. A value that is not
+on the object cannot be copied off it. The limit stated elsewhere is unchanged:
+this module is importable, so this is careless-caller defence and not a
+capability boundary.
+
+**One preflight, one recorded write.** Nothing marked a verdict spent, and a
+review recorded four `SNAPSHOT_WRITTEN` classifications across two ledgers from
+one judged snapshot. The spent-ness is kept module-side, because a second
+ledger is not a second write.
 
 Each failing check refuses with **its own classification**, so an operator
 learns which one — and nothing behind it.

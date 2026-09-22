@@ -57,6 +57,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+from weakref import WeakSet as _WeakSet
 
 from .commissioning import SessionBinding, binding_applies
 from .inventory import InterfaceObservation
@@ -196,25 +197,28 @@ class PreflightVerdict:
     `verdict_was_minted_here` is what a consumer asks.
     """
 
-    __slots__ = ("_refused_by", "_token", "_snapshot")
+    __slots__ = ("_refused_by", "_snapshot", "_evaluated", "__weakref__")
 
     def __init__(self, refused_by: PreflightCheck | None) -> None:
-        """No `token` parameter. It used to take one, and that was the hole.
+        """No token, and nothing to read off a verdict at all.
 
-        `preflight` stamped the sentinel through this signature, so every
-        verdict a caller was handed — **including a refusal** — carried it on
-        `_token`, readable with one attribute access. A re-review read it off a
-        refused verdict, built `PreflightVerdict(None, stolen)`, and authorised
-        a migration over a snapshot whose integrity had **failed**, recorded as
-        written. A token a caller is given is not a token.
+        It used to take a `token` parameter, and round two removed the
+        parameter. Round four pointed out that removing the *write* path left
+        the *read* path exactly as it was: `preflight` returned a verdict whose
+        `_token` **was** the live sentinel, on refusals as well as passes, one
+        attribute access away. A review read it off a refused verdict, stamped
+        it onto a fresh one, and recorded `SNAPSHOT_WRITTEN` against a snapshot
+        whose integrity had failed.
 
-        The sentinel is now stamped by `_mint`, which is module-private and is
-        the only thing that writes `_token`.
+        So there is no token. Which verdicts this module minted is a fact this
+        module keeps, in `_MINTED_HERE` — a `WeakSet` the verdict does not
+        point at and a caller holding one cannot read. A value that is not on
+        the object cannot be copied off it.
         """
 
         object.__setattr__(self, "_refused_by", refused_by)
-        object.__setattr__(self, "_token", None)
         object.__setattr__(self, "_snapshot", None)
+        object.__setattr__(self, "_evaluated", ())
 
     def __setattr__(self, name: str, value: object) -> None:
         raise AttributeError("a PreflightVerdict is fixed when it is minted")
@@ -243,18 +247,65 @@ class PreflightVerdict:
 
         return ()
 
+    @property
+    def evaluated(self) -> tuple[PreflightCheck, ...]:
+        """Which checks were **asked**, in the order they were asked.
 
-#: The token `_mint` stamps into the verdicts this module produces. Identity is
-#: the whole of it.
+        A passing verdict used to be `refused_by is None` and nothing else, so
+        a verdict from a `preflight` that ran three gates was indistinguishable
+        from one that ran all ten — by repr, by `refused_by`, by `may_migrate`
+        and by the whole public surface. That is the structural reason a review
+        could permute the gate order with the suite green: correctness of the
+        gate *set* lived entirely in test parametrisation, and neither the
+        ledger nor the audit could notice a gate that stopped running.
+
+        Complete, in the sense `Azazel-Knowledge`'s scorer means it: the checks
+        that passed are named as well as the one that refused, so "not
+        evaluated" and "passed" are different answers.
+        """
+
+        return self._evaluated
+
+
+#: The verdicts this module minted. Membership is the whole of it, and the
+#: verdict does not point back — so reading a verdict, by any means, yields
+#: nothing that can be stamped onto another one. Weak, so a verdict a caller
+#: dropped is not kept alive by having been judged.
 #:
 #: **This is careless-caller defence, not a capability boundary.** An earlier
 #: comment here said "no constructor a caller can reach", which claimed more
-#: than Python can give: `_mint` and this object are both importable, and
-#: `object.__setattr__(PreflightVerdict(None), "_token", _MINTED_HERE)`
-#: produces a verdict `verdict_was_minted_here` accepts. `azazel_boot.quarantine`
-#: states the same limit about its own seal, in the same words, and the honest
-#: sentence is that one.
-_MINTED_HERE = object()
+#: than Python can give: this module is importable, and
+#: `_MINTED_HERE.add(PreflightVerdict(None))` produces a verdict
+#: `verdict_was_minted_here` accepts. `azazel_boot.quarantine` states the same
+#: limit about its own seal, in the same words, and the honest sentence is that
+#: one. What changed is narrower and real: it is no longer reachable from a
+#: verdict a caller was legitimately handed.
+_MINTED_HERE: _WeakSet = _WeakSet()
+
+#: The verdicts a write has already been recorded against, in any ledger. Kept
+#: here rather than on the ledger because a verdict replayed into a *second*
+#: ledger is the same false count as one replayed into the first.
+_ALREADY_SPENT: _WeakSet = _WeakSet()
+
+#: The order the gates are asked in, named once so that it is a contract rather
+#: than the order the lines happen to sit in. A review permuted eight adjacent
+#: pairs and six demotions-to-last with the suite green: no bad input passed —
+#: `preflight` short-circuits, so permutation cannot change the passing set —
+#: but the *classification* an operator is given changed, which is exactly what
+#: ADR-0010 D7 promises. An operator whose medium had been **pulled** was told
+#: `volume_quarantined`.
+PREFLIGHT_ORDER = (
+    PreflightCheck.MEDIUM_FENCED,
+    PreflightCheck.VOLUME_QUARANTINED,
+    PreflightCheck.SNAPSHOT_ABSENT,
+    PreflightCheck.SNAPSHOT_CONTAINER_UNKNOWN,
+    PreflightCheck.SNAPSHOT_INTEGRITY,
+    PreflightCheck.REQUIRED_SPACE,
+    PreflightCheck.SCHEMA_COMPATIBILITY,
+    PreflightCheck.BINDING,
+    PreflightCheck.GENERATION,
+    PreflightCheck.IMAGE_DIGEST,
+)
 
 #: The only four fields a recovery moves. `_sealed_assign` writes these and
 #: nothing else — not the quarantine, not the binding, not the sitting, and
@@ -396,7 +447,9 @@ def _require_an_actual_bool(name: str, value: object) -> None:
 
 
 def _mint(
-    refused_by: PreflightCheck | None, snapshot: SnapshotDescriptor | None = None
+    refused_by: PreflightCheck | None,
+    snapshot: SnapshotDescriptor | None = None,
+    evaluated: tuple[PreflightCheck, ...] = (),
 ) -> PreflightVerdict:
     """Build a verdict, stamp it, and record **which snapshot it judged**.
 
@@ -408,8 +461,9 @@ def _mint(
     """
 
     verdict = PreflightVerdict(refused_by)
-    object.__setattr__(verdict, "_token", _MINTED_HERE)
     object.__setattr__(verdict, "_snapshot", snapshot)
+    object.__setattr__(verdict, "_evaluated", tuple(evaluated))
+    _MINTED_HERE.add(verdict)
     return verdict
 
 
@@ -418,13 +472,15 @@ def verdict_was_minted_here(verdict: PreflightVerdict) -> bool:
 
     A hand-built `PreflightVerdict(None)` is not one, and `MigrationLedger`
     refuses it rather than reading `may_migrate` and believing it.
+
+    Membership, not a stamp: there is nothing on a verdict that says it was
+    minted, so there is nothing to read off one and reuse. The `isinstance`
+    that used to stand in front of the `type(...) is` is gone — it was implied
+    by it, and two checks where there is one is how a later reader decides the
+    second is redundant. That is how round three's regression happened.
     """
 
-    return (
-        isinstance(verdict, PreflightVerdict)
-        and type(verdict) is PreflightVerdict
-        and verdict._token is _MINTED_HERE
-    )
+    return type(verdict) is PreflightVerdict and verdict in _MINTED_HERE
 
 
 #: Schema versions this build can migrate **to**. A downgrade is not on it.
@@ -442,6 +498,58 @@ def schema_is_compatible(*, current: int, target: int) -> bool:
     if current not in SUPPORTED_SCHEMA_VERSIONS or target not in SUPPORTED_SCHEMA_VERSIONS:
         return False
     return target > current
+
+
+def _gate_fails(
+    check: PreflightCheck,
+    quarantine: Quarantine,
+    snapshot: SnapshotDescriptor | None,
+    capacity: CapacityReport,
+    *,
+    current_schema: int,
+    target_schema: int,
+    binding_holds: bool,
+    generation_holds: bool,
+    image_digest_holds: bool,
+) -> bool:
+    """One check, asked. The **order** is `PREFLIGHT_ORDER`'s, not this
+    function's: nothing here decides what runs next, so reordering these
+    branches is not a reordering of the gates.
+
+    The snapshot-reading branches are reachable only after `SNAPSHOT_ABSENT`
+    has passed, which `PREFLIGHT_ORDER` places before them.
+    """
+
+    if check is PreflightCheck.MEDIUM_FENCED:
+        return quarantine.is_fenced
+    if check is PreflightCheck.VOLUME_QUARANTINED:
+        # The recovery path treated a quarantined volume as load-bearing and
+        # this one treated it as invisible, which a review caught. ADR-0010 D4
+        # stops the **whole volume** on a suspected torn write, and a schema
+        # migration is a large write to exactly that volume.
+        return quarantine.volume_is_quarantined
+    if check is PreflightCheck.SNAPSHOT_ABSENT:
+        # D7: no flag, no acceptance, no emergency state. An operator cannot
+        # consent to this, because what they would be consenting to is the loss
+        # of the only path back — so there is no parameter to consent with.
+        return snapshot is None
+    if check is PreflightCheck.SNAPSHOT_CONTAINER_UNKNOWN:
+        return snapshot.container_version not in KNOWN_CONTAINER_VERSIONS
+    if check is PreflightCheck.SNAPSHOT_INTEGRITY:
+        # `INDETERMINATE` lands here with `FAILED`. D7: ambiguity refuses the
+        # migration, and there is no third answer that proceeds.
+        return snapshot.integrity is not SnapshotIntegrity.VERIFIED
+    if check is PreflightCheck.REQUIRED_SPACE:
+        # No degraded migration, no "we can fit most of it". A medium too small
+        # keeps the old schema and keeps working.
+        return capacity.available < capacity.required
+    if check is PreflightCheck.SCHEMA_COMPATIBILITY:
+        return not schema_is_compatible(current=current_schema, target=target_schema)
+    if check is PreflightCheck.BINDING:
+        return not binding_holds
+    if check is PreflightCheck.GENERATION:
+        return not generation_holds
+    return not image_digest_holds
 
 
 def preflight(
@@ -497,43 +605,29 @@ def preflight(
     if snapshot is not None:
         _require_a_real_snapshot(snapshot)
 
-    if quarantine.is_fenced:
-        return _mint(PreflightCheck.MEDIUM_FENCED)
-    if quarantine.volume_is_quarantined:
-        # The recovery path treated a quarantined volume as load-bearing and
-        # this one treated it as invisible, which a review caught. ADR-0010 D4
-        # stops the **whole volume** on a suspected torn write, and a schema
-        # migration is a large write to exactly that volume.
-        return _mint(PreflightCheck.VOLUME_QUARANTINED)
+    # Driven from `PREFLIGHT_ORDER`, so the order is the constant rather than
+    # the order these lines happen to sit in. A review permuted fourteen of
+    # sixteen adjacent pairs and demotions with the suite green — no bad input
+    # passed, because this short-circuits, but the classification an operator
+    # is given changed, and that classification is what ADR-0010 D7 promises.
+    # Rewriting `_gate_fails`'s branches now changes nothing at all.
+    asked: list[PreflightCheck] = []
+    for check in PREFLIGHT_ORDER:
+        asked.append(check)
+        if _gate_fails(
+            check,
+            quarantine,
+            snapshot,
+            capacity,
+            current_schema=current_schema,
+            target_schema=target_schema,
+            binding_holds=binding_holds,
+            generation_holds=generation_holds,
+            image_digest_holds=image_digest_holds,
+        ):
+            return _mint(check, None, tuple(asked))
 
-    if snapshot is None:
-        # D7: no flag, no acceptance, no emergency state. An operator cannot
-        # consent to this, because what they would be consenting to is the loss
-        # of the only path back — so there is no parameter to consent with.
-        return _mint(PreflightCheck.SNAPSHOT_ABSENT)
-    if snapshot.container_version not in KNOWN_CONTAINER_VERSIONS:
-        return _mint(PreflightCheck.SNAPSHOT_CONTAINER_UNKNOWN)
-    if snapshot.integrity is not SnapshotIntegrity.VERIFIED:
-        # `INDETERMINATE` lands here with `FAILED`. D7: ambiguity refuses the
-        # migration, and there is no third answer that proceeds.
-        return _mint(PreflightCheck.SNAPSHOT_INTEGRITY)
-
-    if capacity.available < capacity.required:
-        # No degraded migration, no "we can fit most of it". A medium too small
-        # keeps the old schema and keeps working.
-        return _mint(PreflightCheck.REQUIRED_SPACE)
-
-    if not schema_is_compatible(current=current_schema, target=target_schema):
-        return _mint(PreflightCheck.SCHEMA_COMPATIBILITY)
-
-    if not binding_holds:
-        return _mint(PreflightCheck.BINDING)
-    if not generation_holds:
-        return _mint(PreflightCheck.GENERATION)
-    if not image_digest_holds:
-        return _mint(PreflightCheck.IMAGE_DIGEST)
-
-    return _mint(None, snapshot)
+    return _mint(None, snapshot, tuple(asked))
 
 
 class RecoveryStage(Enum):
@@ -590,6 +684,12 @@ class Refusal(Enum):
     SNAPSHOT_CHANGED_UNDER_THE_WORKFLOW = "snapshot_changed_under_the_workflow"
     NOT_THIS_SITTING = "not_this_sitting"
     VERDICT_NOT_MINTED_BY_A_PREFLIGHT = "verdict_not_minted_by_a_preflight"
+    #: One preflight judged one snapshot, so one write is recordable against
+    #: it. Nothing marked a verdict spent, and a review recorded four
+    #: `SNAPSHOT_WRITTEN` classifications across two ledgers from one judged
+    #: write — for an audit whose only positive classification is "a snapshot
+    #: was written", n records for one write is a false count.
+    VERDICT_ALREADY_SPENT = "verdict_already_spent"
 
 
 class RecoveryRefused(Exception):
@@ -1299,6 +1399,12 @@ class MigrationLedger:
         Separate from :meth:`may_migrate` because recording the write at
         permission time asserts an act that has not happened. The verdict is
         re-checked here so that this cannot be reached without one.
+
+        **Once.** One preflight judged one snapshot, so one write is
+        recordable against it. A review replayed a single verdict into two
+        ledgers and recorded four writes for one judged snapshot; the
+        spent-ness is kept module-side rather than per-ledger, because a second
+        ledger is not a second write.
         """
 
         _require_a_real_snapshot(snapshot)
@@ -1313,6 +1419,13 @@ class MigrationLedger:
                 "that snapshot; a passing verdict for a different one is not "
                 "permission to record this one",
             )
+        if verdict in _ALREADY_SPENT:
+            raise RecoveryRefused(
+                Refusal.VERDICT_ALREADY_SPENT,
+                "this preflight's write is already recorded; a second record "
+                "against it would be a second write that did not happen",
+            )
+        _ALREADY_SPENT.add(verdict)
 
         self._audit.append(
             SnapshotAuditEntry(

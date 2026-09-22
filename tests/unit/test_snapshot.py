@@ -45,6 +45,7 @@ from azazel_boot.quarantine import Device, DeviceClass, Quarantine
 from azazel_boot.session_mode import AttemptOutcome, PassphraseChannel
 from azazel_boot.snapshot import (
     KNOWN_CONTAINER_VERSIONS,
+    PREFLIGHT_ORDER,
     SUPPORTED_SCHEMA_VERSIONS,
     TERMINAL_STAGES,
     CapacityReport,
@@ -265,6 +266,7 @@ def test_nothing_in_this_module_can_lift_a_quarantine_or_a_fence() -> None:
         "field",
         "Enum",
         "KNOWN_CONTAINER_VERSIONS",
+        "PREFLIGHT_ORDER",
         "SUPPORTED_SCHEMA_VERSIONS",
         "TERMINAL_STAGES",
         "CapacityReport",
@@ -624,6 +626,10 @@ def test_preflight_is_read_only_by_construction() -> None:
         "__future__",
         "dataclasses",
         "enum",
+        # Added deliberately: `_MINTED_HERE` is a `WeakSet` now, because a
+        # sentinel stamped onto a verdict is a sentinel a caller can read off
+        # one. Imported privately, so it is not a name this module exports.
+        "weakref",
         "commissioning",
         "inventory",
         "quarantine",
@@ -1997,8 +2003,13 @@ def test_a_verdict_subclass_carrying_a_stolen_token_is_refused() -> None:
     class Subclassed(PreflightVerdict):
         pass
 
+    # Registered as if minted — which is what an importer of this module can
+    # do, and what the module says about its own limit. The type check is what
+    # refuses it, and it is the one being driven here.
     stolen = Subclassed(None)
-    object.__setattr__(stolen, "_token", minted._token)
+    module_registry = sys.modules["azazel_boot.snapshot"]._MINTED_HERE
+    module_registry.add(stolen)
+    assert stolen in module_registry
     assert stolen.may_migrate is True
     assert verdict_was_minted_here(stolen) is False
     with pytest.raises(RecoveryRefused):
@@ -2008,11 +2019,15 @@ def test_a_verdict_subclass_carrying_a_stolen_token_is_refused() -> None:
 def test_the_token_cannot_be_read_off_a_verdict_and_reused() -> None:
     """F-6: it could, including off a **refused** one.
 
-    `PreflightVerdict.__init__` took the token positionally and `preflight`
-    stamped it through that signature, so every verdict a caller was handed
-    carried it. A re-review read it off a refusal, rebuilt a passing verdict,
-    and authorised a migration over a snapshot whose integrity had failed —
-    recorded as written.
+    Round two removed the `token` **parameter**, and round four pointed out
+    that this test then asserted the parameter was gone and stopped — it never
+    read a token off a verdict and never reused one, while the read path was
+    untouched: `_token` on every returned verdict, refusals included, **was**
+    the live sentinel.
+
+    So the assertion is now an absence, which is the only kind that holds:
+    there is nothing on a verdict that says it was minted. Not a guarded
+    attribute — no attribute.
     """
 
     refused = preflight(
@@ -2028,6 +2043,15 @@ def test_the_token_cannot_be_read_off_a_verdict_and_reused() -> None:
     assert refused.refused_by is PreflightCheck.SNAPSHOT_INTEGRITY
 
     assert "token" not in inspect.signature(PreflightVerdict).parameters
+    assert "_token" not in PreflightVerdict.__slots__
+    for verdict in (refused, PreflightVerdict(None)):
+        assert not [name for name in dir(verdict) if "token" in name.lower()]
+        for name in PreflightVerdict.__slots__:
+            if name == "__weakref__":
+                continue
+            held = object.__getattribute__(verdict, name)
+            assert held is None or isinstance(held, PreflightCheck | tuple), name
+
     rebuilt = PreflightVerdict(None)
     assert rebuilt.may_migrate is True
     assert verdict_was_minted_here(rebuilt) is False
@@ -3036,3 +3060,210 @@ def test_this_module_performs_no_io_when_it_actually_runs() -> None:
     assert finished.returncode == 0, finished.stderr
     events = ast.literal_eval(finished.stdout.strip())
     assert events == [], f"the decision path performed audited operations: {events}"
+
+
+# --------------------------------------------------------------------------
+# The fourth review's findings on the gates and the verdict
+# --------------------------------------------------------------------------
+
+
+def _preflight_failing_from(position: int, **overrides):
+    """Every gate from `position` onwards failing at once.
+
+    The earliest one is the answer the contract promises, and a reordering is
+    exactly what changes that answer without changing which inputs pass.
+    """
+
+    knobs = {
+        "fenced": position <= 1,
+        "quarantined": position <= 2,
+        "absent": position <= 3,
+        "container": position <= 4,
+        "integrity": position <= 5,
+        "space": position <= 6,
+        "schema": position <= 7,
+        "binding": position <= 8,
+        "generation": position <= 9,
+        "digest": position <= 10,
+    }
+    knobs.update(overrides)
+    snapshot = (
+        None
+        if knobs["absent"]
+        else descriptor(
+            container_version=2 if knobs["container"] else 1,
+            integrity=(
+                SnapshotIntegrity.FAILED if knobs["integrity"] else SnapshotIntegrity.VERIFIED
+            ),
+        )
+    )
+    return preflight(
+        a_quarantine(fenced=knobs["fenced"], quarantined=knobs["quarantined"]),
+        snapshot=snapshot,
+        capacity=capacity(required=1000, available=1) if knobs["space"] else capacity(),
+        current_schema=1,
+        target_schema=99 if knobs["schema"] else 2,
+        binding_holds=not knobs["binding"],
+        generation_holds=not knobs["generation"],
+        image_digest_holds=not knobs["digest"],
+    )
+
+
+@pytest.mark.parametrize("position", range(1, 11))
+def test_the_earliest_failing_gate_is_the_one_an_operator_is_told(position) -> None:
+    """R4: the ten-gate order was held up by prose, and a review permuted it.
+
+    Eight of nine adjacent swaps and six of seven demotions-to-last kept the
+    whole suite green. No bad input passed — `preflight` short-circuits, so a
+    permutation cannot change the *set* that passes — but the classification
+    changed, and the classification is what ADR-0010 D7 promises. The worst
+    case: an operator whose medium had been **pulled** was told
+    `volume_quarantined`, a state a recovery exists for, instead of
+    `medium_fenced`.
+
+    The suite had two ordering assertions for a ten-element ordered contract,
+    and one of them never contested its own neighbour. So every gate is now
+    driven against **all** of its successors failing at once.
+    """
+
+    verdict = _preflight_failing_from(position)
+    expected = PREFLIGHT_ORDER[position - 1]
+    assert verdict.refused_by is expected
+    assert verdict.evaluated == PREFLIGHT_ORDER[:position]
+
+
+def test_a_passing_verdict_names_every_check_it_was_asked() -> None:
+    """R4: "not evaluated" and "passed" were the same answer.
+
+    A verdict was `refused_by is None` and nothing else, so one from a
+    `preflight` that ran three gates was indistinguishable from one that ran
+    all ten — by repr, by `refused_by`, by `may_migrate`, by the whole public
+    surface. That is the structural reason the order could be permuted with the
+    suite green: the gate set lived in test parametrisation, and neither the
+    ledger nor the audit could notice a gate that had stopped running.
+
+    Completeness, in the sense `Azazel-Knowledge`'s scorer means it: what
+    passed is named as well as what refused.
+    """
+
+    passing = preflight(
+        a_quarantine(quarantined=False),
+        snapshot=descriptor(),
+        capacity=capacity(),
+        current_schema=1,
+        target_schema=2,
+        binding_holds=True,
+        generation_holds=True,
+        image_digest_holds=True,
+    )
+    assert passing.may_migrate is True
+    assert passing.evaluated == PREFLIGHT_ORDER
+    assert set(PREFLIGHT_ORDER) == set(PreflightCheck)
+    assert len(PREFLIGHT_ORDER) == len(PreflightCheck)
+
+
+def test_a_verdict_is_fixed_when_it_is_minted() -> None:
+    """R4: the two defences the whole claim rests on had no test at all.
+
+    `__setattr__` and `__reduce__` could both be deleted with the suite green,
+    and with `__setattr__` gone two plain assignments —
+    `verdict._refused_by = None` — turned a genuine refusal over a
+    failed-integrity snapshot into a passing verdict that
+    `verdict_was_minted_here` **correctly** accepts, because it really was
+    minted. No `object.__setattr__`, no private import, no forgery.
+
+    `tests/unit/test_snapshot.py` already asserted exactly this on
+    `RecoveryCandidate`, with a comment naming the incidental-refusal pattern
+    this repository has now hit four times. It was never mirrored onto the
+    object that gates the migration.
+    """
+
+    assert PreflightVerdict.__setattr__ is not object.__setattr__
+    assert PreflightVerdict.__reduce__ is not object.__reduce__
+
+    verdict = preflight(
+        a_quarantine(quarantined=False),
+        snapshot=descriptor(integrity=SnapshotIntegrity.FAILED),
+        capacity=capacity(),
+        current_schema=1,
+        target_schema=2,
+        binding_holds=True,
+        generation_holds=True,
+        image_digest_holds=True,
+    )
+    assert verdict.refused_by is PreflightCheck.SNAPSHOT_INTEGRITY
+
+    for name in ("_refused_by", "_snapshot", "_evaluated", "refused_by"):
+        with pytest.raises(AttributeError, match="fixed when it is minted"):
+            setattr(verdict, name, None)
+    with pytest.raises(TypeError, match="not serialisable"):
+        pickle.dumps(verdict)
+    with pytest.raises(TypeError, match="not serialisable"):
+        copy.deepcopy(verdict)
+    with pytest.raises(TypeError, match="not serialisable"):
+        copy.copy(verdict)
+    assert verdict.may_migrate is False
+    assert verdict.refused_by is PreflightCheck.SNAPSHOT_INTEGRITY
+
+
+def test_the_write_record_asks_whether_the_verdict_was_minted() -> None:
+    """R4: the clause had no test that could fail for its own reason.
+
+    `test_a_hand_built_verdict_does_not_authorise_a_migration` looks like it
+    covers this, and does not: a hand-built verdict's `_snapshot` is always
+    `None`, so the identity tie answers first and the mint check is never the
+    reason. Deleting the mint check left the suite green while a verdict that
+    was never minted recorded `SNAPSHOT_WRITTEN` against a failed-integrity
+    snapshot.
+
+    So: a verdict of the exact type, never minted, whose `_snapshot` **is** the
+    one presented. Then only the mint check can refuse it.
+    """
+
+    snapshot = descriptor(integrity=SnapshotIntegrity.FAILED)
+    never_minted = PreflightVerdict(None)
+    object.__setattr__(never_minted, "_snapshot", snapshot)
+
+    assert type(never_minted) is PreflightVerdict
+    assert never_minted.may_migrate is True
+    assert never_minted._snapshot is snapshot
+    assert verdict_was_minted_here(never_minted) is False
+
+    ledger = MigrationLedger()
+    with pytest.raises(RecoveryRefused) as refused:
+        ledger.note_snapshot_written(never_minted, snapshot)
+    assert refused.value.refusal is Refusal.VERDICT_NOT_MINTED_BY_A_PREFLIGHT
+    assert ledger.audit() == ()
+
+
+def test_one_preflight_records_one_write_in_any_ledger() -> None:
+    """R4: nothing marked a verdict spent.
+
+    One `preflight` over one snapshot produced four `SNAPSHOT_WRITTEN`
+    classifications across two ledgers. For an audit whose only positive
+    classification is "a snapshot was written", n records for one judged write
+    is a false count — and the second ledger is not a second write, which is
+    why the spent-ness is kept module-side rather than per-ledger.
+    """
+
+    snapshot = descriptor()
+    verdict = preflight(
+        a_quarantine(quarantined=False),
+        snapshot=snapshot,
+        capacity=capacity(),
+        current_schema=1,
+        target_schema=2,
+        binding_holds=True,
+        generation_holds=True,
+        image_digest_holds=True,
+    )
+    first, second = MigrationLedger(), MigrationLedger()
+    first.note_snapshot_written(verdict, snapshot)
+    assert len(first.audit()) == 1
+
+    for ledger in (first, second):
+        with pytest.raises(RecoveryRefused) as refused:
+            ledger.note_snapshot_written(verdict, snapshot)
+        assert refused.value.refusal is Refusal.VERDICT_ALREADY_SPENT
+    assert len(first.audit()) == 1
+    assert second.audit() == ()
