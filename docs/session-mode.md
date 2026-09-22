@@ -104,6 +104,13 @@ ephemeral until the machine reboots, and a second `commission()` refuses with
 because a third value is something later code would compare against and proceed
 on.
 
+**Reading `mode.is_persistent` is not asking whether this boot decided it.**
+Anyone can construct a `CommissionedMode(PERSISTENT, …)` and it will answer
+`True`, because that property reads the two fields it was handed. The rule for
+a caller is `mode_applies_to(session, mode)` first, the capability second. The
+accessor is kept rather than removed because a mode that cannot say what it is
+would be answered by reading `_mode` instead, which is worse.
+
 `CommissionedMode.authority` is `()` in both modes. A mode is a capability
 statement, never an authority; Azazel-Edge's deterministic arbiter holds the
 same and only authority before and after. A test drives the quarantine through
@@ -112,7 +119,13 @@ a full commissioning in both modes and asserts no verdict moves.
 ## The order of the gates
 
 `commission()` settles everything that costs nothing **before** an operator is
-asked to type:
+asked to type, and **re-checks the fence on every iteration** — the loop spans
+an operator typing up to five passphrases, which is as much wall-clock time as
+they take, and the medium can be pulled during it. Checking once meant a medium
+removed after the first prompt still commissioned a persistent mode over a
+fence, which an adversarial review drove and nothing caught.
+
+The gates, in order:
 
 1. a mode already decided → `mode_already_fixed`
 2. a record made on another machine or in another sitting → `not_this_host_or_session`
@@ -139,6 +152,13 @@ renders an address — it would have passed against any implementation at all.
 The double now leaks deliberately, and the assertion is scoped to this module's
 own frames, which is the only thing this module can be held to.
 
+The same is true of the **session id**. `commission` and `_require_this_host`
+were handed it, so their frames hold it and a captured-locals traceback renders
+it in clear. The frame that raises holds one boolean, and no refusal *message*
+carries it — that much is tested on all six refusal paths. Beyond that, a
+sitting's id is visible to anything that renders a traceback of this module,
+and this page says so rather than leaving it to be found.
+
 ## What the audit may hold
 
 Three classifications, and nothing else:
@@ -162,9 +182,25 @@ photograph of a screen, and a counter in a `repr` is one in every traceback.
 ## What cannot be reached from here
 
 Host storage, a USB write, a VM, the network, an export, a snapshot and a
-recovery. The module imports nothing that could reach them and names none of
-them in code — asserted over the AST rather than over the file's text, so that
-the paragraph you are reading is not mistaken for a violation of itself.
+recovery. The module's imports are pinned to an **exact set** —
+`__future__`, `dataclasses`, `enum`, `typing`, `azazel_boot` — and it names none
+of those things in code, asserted over the AST rather than over the file's text
+so that the paragraph you are reading is not mistaken for a violation of itself.
+
+An allowlist rather than a denylist, because a denylist of module names is one
+`__import__` wide. An adversarial review appended a function that ran `dd`
+against a raw block device and sent the bytes over TCP, assembling every module
+name from fragments — `__import__("sub" + "process")`, `__import__("soc" +
+"ket")`, `__import__("io")` — and the entire suite stayed green, here and in
+the repository-wide guard in `tests/unit/test_boundary_static.py`. Both now
+refuse `__import__`, `eval`, `exec` and `compile` by name across
+`src/azazel_boot/`, and both see relative imports, which they previously did
+not.
+
+Docstrings are excluded from that scan **by node identity, not by value**:
+excluding them by value meant a function whose entire body was the one-word
+docstring `"mount"` silently whitelisted that literal everywhere else in the
+file, which the same review armed and walked four forbidden tokens through.
 
 ## What this does not establish
 

@@ -69,7 +69,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Protocol, runtime_checkable
+from typing import Protocol
 
 from azazel_boot.commissioning import SessionBinding, binding_applies
 from azazel_boot.inventory import InterfaceObservation
@@ -203,7 +203,6 @@ class ModeRefused(Exception):
         self.detail = detail
 
 
-@runtime_checkable
 class KeyAcquisition(Protocol):
     """Prompts, attempts, and reports one enum value.
 
@@ -282,6 +281,20 @@ class CommissionedMode:
 
     @property
     def is_persistent(self) -> bool:
+        """**Not a permission, and not proof this boot decided it.**
+
+        Any caller can build a `CommissionedMode(SessionMode.PERSISTENT, …)`
+        and it will answer `True` here, because this property reads the two
+        fields it was handed and nothing else. What makes a mode *this boot's*
+        answer is that the session minted it, which only
+        :func:`mode_applies_to` can tell you.
+
+        So the rule for a caller is: ask `mode_applies_to(session, mode)`
+        first, and read this afterwards. This accessor is kept because a mode
+        that cannot say what it is would be answered by reading `_mode`
+        instead, which is worse.
+        """
+
         return self._mode is SessionMode.PERSISTENT
 
     @property
@@ -348,9 +361,17 @@ class BootSession:
         return tuple(self._audit)
 
     def holds(self, mode: CommissionedMode) -> bool:
-        """Whether this is the object this boot decided. Checked by identity."""
+        """Whether this is the object this boot decided. Checked by identity.
 
-        return self._mode is mode
+        The `is not None` is not redundant. Without it an undecided session
+        answers `True` for `None` — and `None` is exactly what `decided`
+        returns while undecided, so a caller writing
+        `if session.holds(session.decided)` opened the gate in the one state it
+        exists to close. An adversarial review found it; the annotation said
+        `CommissionedMode` and nothing enforced the annotation.
+        """
+
+        return self._mode is not None and self._mode is mode
 
     def commission(
         self,
@@ -377,6 +398,13 @@ class BootSession:
 
         while True:
             outcome = acquisition.attempt()
+
+            # Re-checked every iteration, not only before the first prompt.
+            # The loop spans an operator typing up to five passphrases, which
+            # is as much wall-clock time as they take — and the medium can be
+            # pulled during it. Checking once meant a medium removed after the
+            # first prompt still commissioned a persistent mode over a fence.
+            self._require_the_medium_is_not_fenced()
 
             if outcome is AttemptOutcome.OPENED:
                 return self._fix(SessionMode.PERSISTENT)
@@ -411,6 +439,11 @@ class BootSession:
     def _require_this_host(
         self, observations: tuple[InterfaceObservation, ...], *, session_id: str
     ) -> None:
+        # The comparison is made here and only its answer travels onward, so
+        # the frame that *raises* holds neither the sitting's id nor the
+        # inventory. This frame and `commission` above still hold both, because
+        # they were handed them — see `_require_local_hidden_prompt` for why
+        # that limit is stated rather than claimed away.
         _refuse_foreign_record(
             applies=binding_applies(self._binding, observations, session_id=session_id)
         )

@@ -19,10 +19,11 @@ from __future__ import annotations
 import ast
 import copy
 import dataclasses
-import inspect
 import pickle
 import traceback
+from enum import Enum
 from pathlib import Path
+from typing import Protocol, get_type_hints
 
 import pytest
 from conftest import mac_reader
@@ -152,17 +153,46 @@ def test_the_acquisition_boundary_carries_one_enum_and_nothing_else() -> None:
     nothing for this module to hold, redact, pickle or leak.
     """
 
-    names = {n for n in dir(KeyAcquisition) if not n.startswith("_")}
-    assert names == {"channel", "attempt"}
-    assert (
-        inspect.signature(KeyAcquisition.attempt).return_annotation == "AttemptOutcome"
-    )
+    public = {n for n in dir(KeyAcquisition) if not n.startswith("_")}
+    assert public == {"channel", "attempt"}
+
+    # Typing's own bookkeeping (`_is_protocol`, `_abc_impl`, …) is not this
+    # module's vocabulary, so it is excluded by prefix — but every *other*
+    # single-underscore name is scanned below, because a `_key()` a caller can
+    # still call is not private in any sense that matters here.
+    names = {
+        n
+        for n in dir(KeyAcquisition)
+        if not n.startswith("__") and n not in vars(Protocol) and not n.startswith("_is_")
+    } - {"_abc_impl"}
+
+    # Resolved to the class, not compared to the string `"AttemptOutcome"`.
+    # The string comparison worked only because of `from __future__ import
+    # annotations`; deleting that import would have turned this red for an
+    # unrelated reason, and a reviewer would have "fixed" it by loosening it.
+    assert get_type_hints(KeyAcquisition.attempt)["return"] is AttemptOutcome
+
+    # Single-underscore names included. `dir()` filtering on `_` would have let
+    # a `_key()` method through the loop below, and a method a caller can still
+    # call is not private in any sense that matters here.
     for forbidden in ("passphrase", "key", "secret", "read", "disclose", "material"):
         assert not any(forbidden in name for name in names)
 
 
 def test_no_type_in_this_module_can_hold_a_secret() -> None:
-    """Absent vocabulary, checked over every field of every dataclass here."""
+    """Absent vocabulary, over every type this module defines — not only its dataclasses.
+
+    The first version filtered on `dataclasses.is_dataclass`, which in this
+    module means `AuditEntry` and nothing else; `CommissionedMode`,
+    `BootSession` and `NoLocalPrompt` — the three classes that actually hold
+    state — were never looked at. Adding `passphrase` and `key_material` to
+    `CommissionedMode.__slots__`, plus a module-level `disclose_passphrase()`,
+    left the whole suite green.
+
+    So this walks dataclass fields, `__slots__`, class attributes *and*
+    module-level function names, because a secret reaches a caller through any
+    of them.
+    """
 
     import azazel_boot.session_mode as module
 
@@ -180,17 +210,48 @@ def test_no_type_in_this_module_can_hold_a_secret() -> None:
         "message",
         "error",
         "reason",
+        "disclose",
+        "reveal",
+        "plaintext",
     )
+
+    def offending(names, where: str) -> None:
+        for name in names:
+            for bad in forbidden:
+                assert bad not in name.lower(), f"{where} exposes {name!r}, matching {bad!r}"
+
+    inspected = 0
     for name, value in vars(module).items():
-        if not dataclasses.is_dataclass(value) or not isinstance(value, type):
+        if name.startswith("__"):
             continue
-        if value.__module__ != module.__name__:
-            continue  # imported for a signature, not a container this module defines
-        fields = {f.name for f in dataclasses.fields(value)}
-        for bad in forbidden:
-            assert not any(bad in field_name for field_name in fields), (
-                f"{name} has a field matching {bad!r}"
-            )
+        if isinstance(value, type):
+            if getattr(value, "__module__", None) != module.__name__:
+                continue  # imported for a signature, not a container defined here
+            if issubclass(value, Enum):
+                # An enum member is a classification, not a container: it holds
+                # the one string it was declared with and nothing per-instance.
+                # `NO_KEY_MATERIAL` is the correct name for "no key material",
+                # and forbidding the word there would forbid saying what
+                # happened. The exclusion is narrow on purpose — it covers
+                # enums and only enums, checked here rather than assumed.
+                assert not set(getattr(value, "__slots__", ()) or ()) - {"_value_", "_name_"}
+                continue
+            inspected += 1
+            members = set(getattr(value, "__slots__", ()) or ())
+            members |= {n for n in vars(value) if not n.startswith("__")}
+            if dataclasses.is_dataclass(value):
+                members |= {f.name for f in dataclasses.fields(value)}
+            offending(members, f"{name}")
+        elif callable(value) and getattr(value, "__module__", None) == module.__name__:
+            inspected += 1
+            offending({name}, "a module-level function")
+
+    # The classes that hold state must actually have been among them, or this
+    # test is a loop over nothing dressed up as a guarantee.
+    assert inspected >= 4
+    for required in ("CommissionedMode", "BootSession", "AuditEntry", "NoLocalPrompt"):
+        assert isinstance(vars(module)[required], type)
+        assert vars(module)[required].__module__ == module.__name__
 
 
 def test_nothing_rendered_anywhere_carries_the_secret(observations) -> None:
@@ -329,16 +390,25 @@ def test_there_is_no_unprotected_volume_and_no_fallback_key() -> None:
     for the thing is not.
     """
 
-    source = " ".join(MODULE.read_text(encoding="utf-8").split()).lower()
-    for never in (
-        "unprotected",
-        "fallback key",
-        "plaintext volume",
-        "unencrypted",
-        "emergency exception",
-        "override",
-    ):
-        assert f"{never} =" not in source
+    # Over *names the module binds*, not over normalised text. The first
+    # version matched `f"{never} ="` against lowercased source, and three of
+    # its six needles contained a space — which no Python assignment ever
+    # does — while the other three were evaded by omitting the space around
+    # `=`. `FALLBACK_KEY="azazel-default-unlock"` at module scope passed it.
+    bound: set[str] = set()
+    for node in ast.walk(TREE):
+        if isinstance(node, ast.Assign):
+            bound.update(t.id for t in node.targets if isinstance(t, ast.Name))
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            bound.add(node.target.id)
+        elif isinstance(node, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+            bound.add(node.name)
+
+    assert bound, "nothing was collected; the scan would pass against anything"
+    for never in ("unprotected", "fallback", "plaintext", "unencrypted", "emergency", "override"):
+        assert not any(never in name.lower() for name in bound), (
+            f"module binds a name matching {never!r}"
+        )
     assert {m.value for m in SessionMode} == {"persistent", "ephemeral"}
     assert not any(
         "unprotected" in o.value or "fallback" in o.value for o in AttemptOutcome
@@ -395,12 +465,56 @@ def test_an_interruption_verifies_nothing_so_it_spends_nothing(observations) -> 
     assert session.decided is None
     assert session.audit() == ()
 
-    # One rejection was spent before the interruption; four remain, and the
-    # session can still be commissioned.
-    decided = session.commission(
-        Scripted(*[AttemptOutcome.REJECTED] * 10), observations, session_id=SESSION
-    )
+    # One rejection was spent before the interruption; four remain. Asserting
+    # only the resulting *mode* here let a mutation that reset `_spent` to 0 on
+    # every interruption pass the whole suite — which is exactly the unbounded
+    # retry oracle this test is named for: guess, interrupt, repeat, forever,
+    # without a reboot. The prompt count is the assertion that closes it.
+    second = Scripted(*[AttemptOutcome.REJECTED] * 10)
+    decided = session.commission(second, observations, session_id=SESSION)
     assert decided.mode is SessionMode.EPHEMERAL
+    assert second.prompts == ATTEMPT_BUDGET - 1
+
+
+def test_interrupting_repeatedly_does_not_buy_more_attempts(observations) -> None:
+    """The oracle, driven: guess, interrupt, guess, interrupt, …
+
+    Across every `commission()` call on one session, the total number of
+    prompts an attacker gets must never exceed the budget. A budget that
+    restarted on each interruption would make the limit unreachable while the
+    machine stays up, and D2's whole claim is about a *running* session.
+    """
+
+    session = a_session(observations)
+    rejections = 0
+
+    for _ in range(ATTEMPT_BUDGET * 3):
+        # One guess, then a withdrawal. The withdrawal is free by design — it
+        # verified nothing — so what must stay bounded is the number of
+        # *guesses*, not the number of prompts.
+        acquisition = Scripted(AttemptOutcome.REJECTED, AttemptOutcome.INTERRUPTED)
+        try:
+            decided = session.commission(acquisition, observations, session_id=SESSION)
+        except ModeRefused as refused:
+            assert refused.refusal is Refusal.INPUT_INTERRUPTED
+            rejections += 1
+            continue
+        rejections += 1
+        assert decided.mode is SessionMode.EPHEMERAL
+        break
+    else:  # pragma: no cover - only reached if the budget never runs out
+        raise AssertionError("the budget was never exhausted; interruptions bought guesses")
+
+    assert rejections == ATTEMPT_BUDGET
+    assert session.decided is not None
+    assert session.decided.mode is SessionMode.EPHEMERAL
+
+    # And the session is now fixed: no further guess is even offered.
+    exhausted = Scripted(AttemptOutcome.OPENED)
+    with pytest.raises(ModeRefused) as refused:
+        session.commission(exhausted, observations, session_id=SESSION)
+    assert refused.value.refusal is Refusal.MODE_ALREADY_FIXED
+    assert exhausted.prompts == 0
 
 
 def test_the_budget_belongs_to_the_boot_and_a_new_boot_starts_fresh(observations) -> None:
@@ -559,10 +673,23 @@ def test_a_boot_session_needs_a_boot_id() -> None:
 
 
 def test_the_session_refuses_reassignment_and_serialisation(observations) -> None:
+    """Matched on *this* module's message, not on any TypeError at all.
+
+    `pytest.raises(TypeError)` around `pickle.dumps(session)` passed with
+    `BootSession.__reduce__` deleted, because the session holds a `Quarantine`
+    and *that* class refuses first, from another module. The test credited this
+    class for a refusal it did not make — the same shape as crediting
+    `__slots__` for an absent `__reduce__`.
+    """
+
     session = a_session(observations)
-    with pytest.raises(TypeError):
+    assert BootSession.__reduce__ is not object.__reduce__
+    with pytest.raises(TypeError, match="a BootSession is not serialisable"):
         pickle.dumps(session)
-    for name in ("_spent", "_mode", "_quarantine", "_binding", "_boot_id"):
+
+    # `_audit` included: the seal refuses *assignment*, and leaving the one
+    # mutable slot out of this list is how it would quietly stop being checked.
+    for name in ("_spent", "_mode", "_quarantine", "_binding", "_boot_id", "_audit"):
         with pytest.raises(AttributeError):
             setattr(session, name, None)
 
@@ -619,39 +746,68 @@ def test_a_refusal_that_changes_nothing_records_nothing(observations) -> None:
 
 
 def test_this_module_cannot_reach_a_disk_a_device_a_network_or_a_vm() -> None:
-    """Statically, so a later convenience call is a red test, not a review note."""
+    """An allowlist, because a denylist of module names is one `__import__` wide.
+
+    The first version collected `ast.Import` / `ast.ImportFrom` and refused
+    eleven names. A review appended a function that ran `dd` against a raw
+    block device and sent the bytes over TCP, assembling every module name from
+    fragments — `__import__("sub" + "process")`, `__import__("soc" + "ket")`,
+    `__import__("io")` — and the whole suite stayed green. A denylist answers
+    "is this one of the names I thought of", which is not the question.
+
+    So the imports are pinned **exactly**, and the dynamic-import escape hatches
+    are named as forbidden calls. Anything new that this module needs has to be
+    added here deliberately, which is the point.
+    """
 
     imported: set[str] = set()
     for node in ast.walk(TREE):
         if isinstance(node, ast.Import):
             imported.update(a.name.split(".")[0] for a in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
-            imported.add(node.module.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            # No `level == 0` condition: `from .sibling import x` is an import
+            # too, and skipping it made relative imports invisible.
+            imported.add((node.module or "").split(".")[0] or ".")
 
-    assert not imported & {
-        "os",
-        "sys",
-        "subprocess",
-        "shutil",
-        "socket",
-        "urllib",
-        "http",
-        "ctypes",
-        "pathlib",
-        "tempfile",
-    }
+    assert imported == {"__future__", "dataclasses", "enum", "typing", "azazel_boot"}
 
-    # Over *code*, not prose: every identifier the module uses and every string
-    # literal that is not a docstring. The module docstring says in words that a
-    # snapshot and an export are unreachable, and a raw text scan would call that
-    # sentence a violation of itself. Comments never enter an AST at all.
-    doc_values = {
-        ast.get_docstring(node, clean=False)
-        for node in ast.walk(TREE)
-        if isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef)
-        and ast.get_docstring(node, clean=False) is not None
+    called: set[str] = set()
+    for node in ast.walk(TREE):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            called.add(node.func.id)
+    assert not called & {
+        "__import__",
+        "eval",
+        "exec",
+        "compile",
+        "open",
+        "input",
+        "globals",
+        "vars",
     }
-    assert doc_values, "the module is expected to carry docstrings"
+    # `getattr` is not on that list: `__setattr__` uses it to read `_sealed`
+    # during construction, before the slot exists. It is a real use, so
+    # forbidding it would mean forbidding the seal.
+
+    # And over *code*, not prose: every identifier the module uses and every
+    # string literal that is not a docstring. The module docstring says in
+    # words that a snapshot and an export are unreachable, and a raw text scan
+    # would call that sentence a violation of itself. Comments never enter an
+    # AST at all.
+    #
+    # Docstrings are excluded **by node identity, not by value**. Excluding
+    # them by value meant any function whose entire body was the one-word
+    # docstring `"mount"` silently whitelisted that literal everywhere else in
+    # the file — a review armed exactly that and walked four forbidden tokens
+    # through it.
+    docstring_nodes: set[int] = set()
+    for node in ast.walk(TREE):
+        if isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+            if node.body and isinstance(node.body[0], ast.Expr):
+                first = node.body[0].value
+                if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                    docstring_nodes.add(id(first))
+    assert docstring_nodes, "the module is expected to carry docstrings"
 
     used: list[str] = []
     for node in ast.walk(TREE):
@@ -666,10 +822,10 @@ def test_this_module_cannot_reach_a_disk_a_device_a_network_or_a_vm() -> None:
         elif isinstance(node, ast.alias):
             used.append(node.asname or node.name)
         elif isinstance(node, ast.Constant) and isinstance(node.value, str):
-            used.append(node.value)
+            if id(node) not in docstring_nodes:
+                used.append(node.value)
 
-    code = " ".join(item for item in used if item not in doc_values)
-
+    code = " ".join(used)
     for never in (
         "approve_export",
         "export_write",
@@ -682,6 +838,7 @@ def test_this_module_cannot_reach_a_disk_a_device_a_network_or_a_vm() -> None:
         "write_text",
         "write_bytes",
         "mount",
+        "import",
     ):
         assert never not in code, f"session_mode names {never!r} in code"
 
@@ -732,13 +889,23 @@ def test_every_refusal_is_one_this_module_actually_raises() -> None:
     a red test.
     """
 
-    constructed = {
-        node.attr
-        for node in ast.walk(TREE)
-        if isinstance(node, ast.Attribute)
-        and isinstance(node.value, ast.Name)
-        and node.value.id == "Refusal"
-    }
+    # Restricted to `Refusal.X` passed to a `ModeRefused(...)` that is the
+    # operand of a `raise`. Collecting every `Refusal.X` attribute access made
+    # this test say "mentioned somewhere", so a member kept alive only by
+    # `_MENTIONED = (Refusal.MEDIUM_FENCED,)` counted as raised.
+    constructed: set[str] = set()
+    for node in ast.walk(TREE):
+        if not isinstance(node, ast.Raise) or not isinstance(node.exc, ast.Call):
+            continue
+        if not (isinstance(node.exc.func, ast.Name) and node.exc.func.id == "ModeRefused"):
+            continue
+        for argument in node.exc.args:
+            if (
+                isinstance(argument, ast.Attribute)
+                and isinstance(argument.value, ast.Name)
+                and argument.value.id == "Refusal"
+            ):
+                constructed.add(argument.attr)
     declared = {member.name for member in Refusal}
 
     assert declared == constructed, (
@@ -901,3 +1068,86 @@ def test_no_refusal_message_carries_a_host_a_session_or_a_device(observations, e
             for value in never:
                 assert value not in rendered, f"{refusal.refusal.name} rendered {value!r}"
             assert not any(character.isdigit() for character in rendered), rendered
+
+
+def test_a_medium_pulled_between_prompts_refuses_rather_than_commissioning(observations) -> None:
+    """The fence is re-checked every iteration, not only before the first prompt.
+
+    The loop spans an operator typing up to five passphrases — as much
+    wall-clock time as they take — and the medium can be pulled during it. A
+    review drove exactly that: an acquisition that fenced the quarantine
+    between attempt one and attempt two, then reported `OPENED`. The session
+    commissioned `PERSISTENT` over a fenced medium and audited
+    `mode_selected`, with nothing red.
+    """
+
+    quarantine = a_quarantine()
+
+    class PullsTheMediumMidway(Scripted):
+        def attempt(self) -> AttemptOutcome:
+            if self.prompts == 1:
+                quarantine.fence()
+            return super().attempt()
+
+    acquisition = PullsTheMediumMidway(AttemptOutcome.REJECTED, AttemptOutcome.OPENED)
+    session = a_session(observations, quarantine=quarantine)
+
+    with pytest.raises(ModeRefused) as refused:
+        session.commission(acquisition, observations, session_id=SESSION)
+
+    assert refused.value.refusal is Refusal.MEDIUM_FENCED
+    assert quarantine.is_fenced
+    assert session.decided is None
+    assert session.audit() == ()
+
+
+def test_an_undecided_session_holds_nothing_not_even_none(observations) -> None:
+    """`None is None` is `True`, and `decided` returns `None` while undecided.
+
+    So `holds(session.decided)` on a fresh session answered `True` — the gate
+    opening in the one state it exists to close. The annotation said
+    `CommissionedMode`; nothing enforced the annotation.
+    """
+
+    session = a_session(observations)
+    assert session.decided is None
+    assert not session.holds(None)  # type: ignore[arg-type]
+    assert not mode_applies_to(session, None)  # type: ignore[arg-type]
+    assert not mode_applies_to(session, session.decided)  # type: ignore[arg-type]
+
+    decided = session.commission(Scripted(AttemptOutcome.OPENED), observations, session_id=SESSION)
+    assert session.holds(decided)
+    assert not session.holds(None)  # type: ignore[arg-type]
+
+
+def test_the_foreign_record_refusal_renders_no_sitting_and_no_inventory(
+    observations, elsewhere
+) -> None:
+    """The other refusal path's traceback, which the first version left untested.
+
+    `test_nothing_rendered_anywhere_carries_the_secret` inspects only the
+    channel path and only the innermost frame. The `session_id` is a plain
+    string held by `commission` and, until this was fixed, by
+    `_require_this_host` as well — and a `session_id` is the sitting, which
+    belongs in no rendered line.
+    """
+
+    session = a_session(observations)
+    with pytest.raises(ModeRefused) as refused:
+        session.commission(Scripted(AttemptOutcome.OPENED), elsewhere, session_id=SESSION)
+
+    summary = traceback.TracebackException.from_exception(refused.value, capture_locals=True)
+    module_frames = [frame for frame in summary.stack if frame.filename == str(MODULE)]
+    assert [frame.name for frame in module_frames][-1] == "_refuse_foreign_record"
+    assert set(module_frames[-1].locals or {}) == {"applies"}
+
+    # And what is *not* true, asserted so it cannot be quietly claimed:
+    # `_require_this_host` was handed the sitting's id, so its frame holds it,
+    # exactly as `commission` holds the acquisition. A frame cannot forget its
+    # own parameter. What the design buys is that the frame which *raises*
+    # holds neither, and that the message carries neither.
+    intermediate = next(frame for frame in module_frames if frame.name == "_require_this_host")
+    assert SESSION in " ".join((intermediate.locals or {}).values())
+
+    assert SESSION not in str(refused.value)
+    assert host_fingerprint(observations) not in str(refused.value)
