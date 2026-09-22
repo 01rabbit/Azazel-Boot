@@ -699,9 +699,21 @@ class MediaAssertion:
 def _canonical(*parts: str) -> bytes:
     """Length-prefixed, so no two different field sets share an encoding.
 
-    Concatenating `a|b` and `ab|` would otherwise give one digest for two
-    different media. The domain prefix keeps this digest distinct from any
-    other HMAC the product computes over the same values.
+    Two encodings lose this property, and the tests cover both because a review
+    showed the first case passing while the second did not exist:
+
+    *Plain concatenation.* `("aaaa", "bbbbbb")` and `("aaaabb", "bbbb")` join to
+    one string, so two different media share a digest.
+
+    *A delimiter join.* Moving the boundary is not enough to break it, but
+    content carrying the delimiter is: with `b"|".join`,
+    `("AAAAAAAB|B", "C")` and `("AAAAAAAB", "B|C")` are the same bytes — and
+    both identities pass every stability check, so nothing upstream rejects
+    them. A separator is only safe when the values cannot contain it, and these
+    values come from hardware and from a caller.
+
+    The domain prefix keeps this digest distinct from any other HMAC the product
+    computes over the same values.
     """
 
     # Every value reaching here has already passed `encodable`, so the strict
@@ -746,6 +758,7 @@ def bind_media(claim: MediaClaim, key: BindingKey) -> MediaBinding:
         identity_present=claim.identity.disclose().strip() != "",
         identity_stable=claim.identity.is_stable,
         key_usable=key.is_usable,
+        device_identity_present=claim.device_identity.strip() != "",
         uuid_present=claim.persistence_uuid.strip() != "",
         image_digest_present=claim.boot_image_digest.strip() != "",
         fields_encodable=encodable(
@@ -781,11 +794,12 @@ def _require_bindable(
     identity_present: bool,
     identity_stable: bool,
     key_usable: bool,
+    device_identity_present: bool,
     uuid_present: bool,
     image_digest_present: bool,
     fields_encodable: bool,
 ) -> None:
-    """Raise from a frame holding six booleans and nothing else.
+    """Raise from a frame holding seven booleans and nothing else.
 
     None of the values is in scope here, so a captured-locals traceback of any
     refusal below carries no hardware identity and no key material.
@@ -808,6 +822,17 @@ def _require_bindable(
             Refusal.MEDIA_IDENTITY_NOT_STABLE,
             "the reported identity is one every device of its kind reports; it "
             "is an absence with a value, not an identity",
+        )
+    if not device_identity_present:
+        # The volume UUID and the image digest were guarded and this was not, so
+        # an empty device identity minted a binding and opened a volume end to
+        # end. Degenerate — it needs a quarantine built on an empty medium
+        # identity — but it is the family the empty host digest belonged to: an
+        # absence behaving like a value, and `""` is the same value everywhere.
+        raise PersistenceRefused(
+            Refusal.MEDIA_BINDING_INCOMPLETE,
+            "the binding covers the device this claim is about; an absent "
+            "identity is not one",
         )
     if not uuid_present:
         raise PersistenceRefused(

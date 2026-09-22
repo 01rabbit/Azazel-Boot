@@ -1457,18 +1457,63 @@ def test_the_binding_carries_no_field_that_could_hold_the_identity_or_a_key() ->
 def test_the_canonical_encoding_cannot_confuse_two_different_media() -> None:
     """Length-prefixed, so field boundaries are not a matter of luck.
 
-    Plain concatenation gives `a|b` and `ab|` one digest. These two claims
-    differ only in where the boundary falls between the volume UUID and the
-    image digest.
+    **Two cases, because one was not enough.** The first version used only the
+    boundary shift below, which kills plain concatenation and nothing else: a
+    review rewrote `_canonical` as `b"|".join(...)` and the suite stayed green,
+    because shifting a boundary in content that carries no delimiter produces
+    different strings under a delimiter join.
+
+    The second case is content that carries the delimiter. It is not contrived:
+    the identity comes from hardware and the rest from a caller, so neither can
+    be assumed free of any separator a future encoding might pick. Both
+    identities below pass every stability check, so nothing upstream rejects
+    them.
     """
 
-    left = bind_media(
+    shifted_left = bind_media(
         claim(persistence_uuid="aaaa", boot_image_digest="bbbbbb"), BINDING_KEY
     )
-    right = bind_media(
+    shifted_right = bind_media(
         claim(persistence_uuid="aaaabb", boot_image_digest="bbbb"), BINDING_KEY
     )
-    assert left.digest != right.digest
+    assert shifted_left.digest != shifted_right.digest
+
+    for separator in ("|", ":", "\x00", "/"):
+        head = f"AAAAAAAB{separator}B"
+        assert identity_is_stable(head)
+        carrying_left = bind_media(
+            claim(
+                identity=MediaIdentity(head, MediaIdentitySource.USB_SERIAL_DESCRIPTOR),
+                device_identity="C",
+            ),
+            BINDING_KEY,
+        )
+        carrying_right = bind_media(
+            claim(
+                identity=MediaIdentity(
+                    "AAAAAAAB", MediaIdentitySource.USB_SERIAL_DESCRIPTOR
+                ),
+                device_identity=f"B{separator}C",
+            ),
+            BINDING_KEY,
+        )
+        assert carrying_left.digest != carrying_right.digest
+
+
+def test_an_absent_device_identity_is_refused_like_its_two_siblings() -> None:
+    """`""` is the same value on every machine, which is the whole family.
+
+    The volume UUID and the image digest were guarded by a presence check and
+    the device identity was not, so an empty one minted a binding and opened a
+    volume end to end. Same shape as the host fingerprint taken over nothing.
+    """
+
+    for field in ("device_identity", "persistence_uuid", "boot_image_digest"):
+        with pytest.raises(PersistenceRefused) as refused:
+            bind_media(claim(**{field: ""}), BINDING_KEY)
+        assert refused.value.refusal is Refusal.MEDIA_BINDING_INCOMPLETE
+        with pytest.raises(PersistenceRefused):
+            bind_media(claim(**{field: "   "}), BINDING_KEY)
 
 
 def test_a_negative_or_non_integer_commissioning_generation_is_refused() -> None:
