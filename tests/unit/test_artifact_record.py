@@ -23,6 +23,7 @@ from azazel_boot.artifact import (
     COMPATIBILITY_CLAIMS,
     OPTIONAL_FIELDS,
     RECORD_FIELDS,
+    REFERENCE_FIELDS,
     RecordRefused,
     Refusal,
     VerificationOutcome,
@@ -41,9 +42,12 @@ def a_record(**overrides) -> dict:
         "git_revision": "0" * 40,
         "builder_version": "0.0.0",
         "debian_snapshot": "snapshot:20260101T000000Z",
-        "package_manifest": "sha256:" + "2" * 64,
-        "firmware_manifest": "sha256:" + "3" * 64,
-        "sbom": "sha256:" + "4" * 64,
+        "package_manifest_ref": "manifests/packages.json",
+        "package_manifest_digest": "sha256:" + "2" * 64,
+        "firmware_manifest_ref": "manifests/firmware.json",
+        "firmware_manifest_digest": "sha256:" + "3" * 64,
+        "sbom_ref": "sbom/payload.spdx.json",
+        "sbom_digest": "sha256:" + "4" * 64,
         "source_date_epoch": 1735689600,
         "build_input_digest": "sha256:" + "5" * 64,
         "partition_layout_digest": "sha256:" + "6" * 64,
@@ -66,9 +70,52 @@ def signed_record(**overrides) -> dict:
     )
 
 
-def test_the_record_is_the_eighteen_fields_of_the_contract() -> None:
-    assert len(RECORD_FIELDS) == 18
-    assert len(set(RECORD_FIELDS)) == 18
+def test_the_record_carries_references_rather_than_the_manifests_themselves() -> None:
+    """ADR-0009 D2, revised: scalars in the record, documents in the artifact."""
+
+    assert len(set(RECORD_FIELDS)) == len(RECORD_FIELDS) == 21
+    for name in ("package_manifest", "firmware_manifest", "sbom"):
+        assert name not in RECORD_FIELDS
+        assert {f"{name}_ref", f"{name}_digest"} <= set(RECORD_FIELDS)
+
+
+@pytest.mark.parametrize("name", REFERENCE_FIELDS)
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "https://example.invalid/packages.json",
+        "http://example.invalid/x",
+        "/etc/passwd",
+        "../outside/packages.json",
+        "manifests/../../outside.json",
+        "manifests/./packages.json",
+        "..",
+        "manifests\\packages.json",
+        "manifests//packages.json",
+    ],
+)
+def test_a_reference_that_can_leave_the_artifact_is_refused(name, reference) -> None:
+    """A record that can name something outside itself is a fetch instruction."""
+
+    with pytest.raises(RecordRefused) as refused:
+        parse(a_record(**{name: reference}))
+    assert refused.value.refusal is Refusal.REFERENCE_ESCAPES_THE_ARTIFACT
+
+
+@pytest.mark.parametrize("name", REFERENCE_FIELDS)
+def test_an_empty_reference_is_refused_as_an_empty_field(name) -> None:
+    """A reference to nothing is a missing fact, not an escaping one."""
+
+    with pytest.raises(RecordRefused) as refused:
+        parse(a_record(**{name: ""}))
+    assert refused.value.refusal is Refusal.EMPTY_FIELD
+
+
+@pytest.mark.parametrize(
+    "reference", ["packages.json", "manifests/packages.json", "a/b/c/d.spdx.json"]
+)
+def test_a_normalised_relative_reference_inside_the_artifact_parses(reference) -> None:
+    assert parse(a_record(sbom_ref=reference))["sbom_ref"] == reference
 
 
 def test_a_complete_record_parses() -> None:
@@ -260,7 +307,7 @@ def test_a_field_that_is_not_a_scalar_is_refused() -> None:
     a bare `TypeError`, past the one `except` this package's refusals exist for."""
 
     with pytest.raises(RecordRefused) as refused:
-        parse(a_record(package_manifest={"a", "b"}))
+        parse(a_record(package_manifest_digest={"a", "b"}))
     assert refused.value.refusal is Refusal.NOT_A_SCALAR
 
 

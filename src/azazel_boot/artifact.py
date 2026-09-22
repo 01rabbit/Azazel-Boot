@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
@@ -37,17 +38,20 @@ from types import MappingProxyType
 
 from .refusals import Refused
 
-#: The eighteen fields of `docs/builder-writer-contract.md` section 3, in the
-#: order that document lists them. A record is this set exactly: a missing field
-#: is a fact that is gone, and an extra one is a claim nobody agreed to carry.
+#: The fields of `docs/builder-writer-contract.md` section 3, in the order that
+#: document lists them. A record is this set exactly: a missing field is a fact
+#: that is gone, and an extra one is a claim nobody agreed to carry.
 RECORD_FIELDS = (
     "image_version",
     "git_revision",
     "builder_version",
     "debian_snapshot",
-    "package_manifest",
-    "firmware_manifest",
-    "sbom",
+    "package_manifest_ref",
+    "package_manifest_digest",
+    "firmware_manifest_ref",
+    "firmware_manifest_digest",
+    "sbom_ref",
+    "sbom_digest",
     "source_date_epoch",
     "build_input_digest",
     "partition_layout_digest",
@@ -69,6 +73,16 @@ OPTIONAL_FIELDS = ("signed_artifact_digest", "signature")
 #: Contract section 3.2. There is no third value, and none is inferred.
 COMPATIBILITY_CLAIMS = ("candidate", "hardware_verified")
 
+#: Fields naming a sidecar inside the signed artifact (ADR-0009 D2, revised).
+#: The structured manifests and the SBOM are not embedded in the record: a
+#: fingerprint over a record containing arbitrary nested documents cannot be
+#: computed identically twice, and a binding that cannot be is not a binding.
+REFERENCE_FIELDS = ("package_manifest_ref", "firmware_manifest_ref", "sbom_ref")
+
+#: A normalised relative reference inside the artifact. Lowercase is not
+#: required; leaving the artifact is what is refused.
+_REFERENCE_SEGMENT = re.compile(r"^[A-Za-z0-9._-]+$")
+
 
 #: A record field is a JSON scalar. Constraining this is what keeps
 #: `fingerprint()` total (an unserialisable value used to escape as a bare
@@ -80,6 +94,7 @@ SCALAR_TYPES = (str, int, type(None))
 class Refusal(Enum):
     NOT_AN_OBJECT = "not_an_object"
     NOT_A_SCALAR = "not_a_scalar"
+    REFERENCE_ESCAPES_THE_ARTIFACT = "reference_escapes_the_artifact"
     UNKNOWN_FIELD = "unknown_field"
     MISSING_FIELD = "missing_field"
     EMPTY_FIELD = "empty_field"
@@ -234,6 +249,9 @@ def parse(document: object) -> ArtifactRecord:
         if value is None or (isinstance(value, str) and not value.strip()):
             raise RecordRefused(Refusal.EMPTY_FIELD, name)
 
+    for name in REFERENCE_FIELDS:
+        _require_reference_inside_the_artifact(name, document[name])
+
     claim = document["compatibility_claim"]
     if claim not in COMPATIBILITY_CLAIMS:
         raise RecordRefused(Refusal.UNKNOWN_COMPATIBILITY_CLAIM, _bounded(repr(claim)))
@@ -291,6 +309,31 @@ def verify(
             **about,
         )
     return Verification(VerificationOutcome.SIGNATURE_VERIFIED, **about)
+
+
+def _require_reference_inside_the_artifact(name: str, value: object) -> None:
+    """A `*_ref` names a sidecar in the artifact, and cannot name anything else.
+
+    An arbitrary URL, an absolute path or a parent traversal turns a record into
+    an instruction to fetch something, which is the opposite of what a record is
+    for. The check is on the shape, so it holds before anything is opened.
+    """
+
+    reference = str(value)
+    segments = reference.split("/")
+    acceptable = (
+        not reference.startswith("/")
+        and "\\" not in reference
+        and "://" not in reference
+        and all(_REFERENCE_SEGMENT.match(segment) for segment in segments)
+        and all(segment not in {".", ".."} for segment in segments)
+    )
+    if not acceptable:
+        raise RecordRefused(
+            Refusal.REFERENCE_ESCAPES_THE_ARTIFACT,
+            f"{name}: {_bounded(reference)!r} is not a normalised relative "
+            "reference inside the artifact",
+        )
 
 
 def _bounded(value: str, limit: int = 120) -> str:

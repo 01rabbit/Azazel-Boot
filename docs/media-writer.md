@@ -14,10 +14,18 @@ Related: [Builder and writer contract](builder-writer-contract.md) ·
 
 ## 1. Verification comes before everything
 
-An artifact record is the eighteen fields of
+An artifact record is the fields of
 [the contract](builder-writer-contract.md) section 3, exactly: a missing field
 is refused because the fact it carried is gone, and an unknown field is refused
-because it is a claim nobody agreed to carry. `compatibility_claim` is
+because it is a claim nobody agreed to carry.
+
+The structured manifests and the SBOM are **not in the record**
+([ADR-0009](adr/0009-builder-and-writer-contract.md) D2, revised). It carries a
+`*_ref` and a `*_digest` for each, and a `*_ref` must be a normalised relative
+reference inside the artifact: an arbitrary URL, an absolute path, a parent
+traversal, a backslash and an empty segment are all refused, because a record
+that can name something outside itself is a fetch instruction rather than a
+record. `compatibility_claim` is
 `candidate` or `hardware_verified`; there is no third value and none is
 inferred.
 
@@ -49,15 +57,14 @@ fingerprint total and canonical: a fingerprint over arbitrary nested JSON is a
 canonicalisation hazard, and floating-point `repr` differences are a classic way
 for one to break.
 
-It also decides something the contract left open, so it is stated here rather
-than absorbed silently. [The contract](builder-writer-contract.md) section 3
-describes `package_manifest`, `firmware_manifest` and `sbom` in words that read
-like collections ("every package…", "every firmware blob…"). Under this
-constraint those fields carry a **digest or a reference**, not an inline
-document. That reading is a narrowing of section 3 and belongs in a revision of
-[ADR-0009](adr/0009-builder-and-writer-contract.md) D2 rather than only here;
-it is recorded so a builder that emits an inline manifest meets a stated
-constraint instead of an unexplained refusal.
+This is why the manifests moved out of the record.
+[ADR-0009](adr/0009-builder-and-writer-contract.md) D2 was revised to say so:
+the record holds scalars, the structured documents are sidecars inside the
+signed artifact, each `*_digest` binds its sidecar's contents, and the signed
+artifact digest binds the record and the set of sidecars together. The claim is
+now "every included item is represented by a verified, referenced manifest or
+SBOM" rather than "every package is in the record" — a weaker statement about
+the record and the same one about the artifact.
 
 **Verification is injected and the default verifies nothing.** Boot has no
 signing key, no signer role and no signed artifact
