@@ -22,6 +22,7 @@ import copy
 import dataclasses
 import inspect
 import pickle
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -2064,3 +2065,271 @@ def test_an_attempted_automatic_start_is_terminal_and_audited(observations) -> N
     with pytest.raises(RecoveryRefused) as again:
         flow.start(descriptor(), observations, session_id=SESSION, started_by_operator=True)
     assert again.value.refusal is Refusal.WORKFLOW_ALREADY_FINISHED
+
+
+# --------------------------------------------------------------------------
+# The third review's findings, each as the reproduction that found it
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("truthy", ["no", "declined", 1, [0], object()])
+def test_the_two_operator_flags_must_be_actual_bools(truthy, observations) -> None:
+    """F-2: they took any truthy object, and they are D8's operator gates.
+
+    `preflight` checked its three flags with the comment "a truthy object is
+    not a check" while the two that carry the whole operator-started doctrine
+    were not checked at all. A review reached `COMMITTED` and minted a
+    candidate with `started_by_operator="no"` and `confirmed="declined"` — the
+    hostile reading, and the point: any non-empty string, any non-zero int, any
+    object without `__bool__` did this.
+    """
+
+    flow = workflow(observations)
+    with pytest.raises(TypeError, match="started_by_operator"):
+        flow.start(descriptor(), observations, session_id=SESSION, started_by_operator=truthy)
+    assert flow.stage is RecoveryStage.NOT_STARTED
+
+    good = workflow(observations)
+    snap = descriptor()
+    good.start(snap, observations, session_id=SESSION, started_by_operator=True)
+    good.open_trial(snap, observations, session_id=SESSION)
+    with pytest.raises(TypeError, match="confirmed"):
+        good.commit(
+            snap, observations, session_id=SESSION, acquisition=Opens(), confirmed=truthy
+        )
+    assert good.stage is RecoveryStage.TRIAL_OPEN
+
+
+def test_a_quarantine_subclass_that_lies_about_its_state_is_refused(observations) -> None:
+    """F-4: `isinstance` was the fix for a stand-in, and a subclass wore the class.
+
+    Overriding `is_fenced` and `volume_is_quarantined` as properties let a
+    genuinely **fenced** medium run the whole workflow to a minted candidate.
+    `Quarantine.is_fenced.fget(q)` answered True the entire time.
+
+    `PreflightVerdict` and `RecoveryCandidate` were already checked with
+    `type(...) is`; the quarantine is the input the two gates before D8's four
+    read, so it gets the same.
+    """
+
+    class Lying(Quarantine):
+        @property
+        def is_fenced(self) -> bool:
+            return False
+
+        @property
+        def volume_is_quarantined(self) -> bool:
+            return True
+
+    lying = Lying(session_id=SESSION, boot_medium_identity=MEDIUM.identity)
+    lying.observe(MEDIUM)
+    lying.fence()
+    assert Quarantine.is_fenced.fget(lying) is True  # it really is fenced
+    assert lying.is_fenced is False  # and it says otherwise
+
+    binding = SessionBinding(
+        host_fingerprint=host_fingerprint(observations), session_id=SESSION
+    )
+    with pytest.raises(TypeError, match="exactly"):
+        RecoveryWorkflow(lying, binding, session_id=SESSION)
+    with pytest.raises(TypeError, match="exactly"):
+        preflight(
+            lying,
+            snapshot=descriptor(),
+            capacity=capacity(),
+            current_schema=1,
+            target_schema=2,
+            binding_holds=True,
+            generation_holds=True,
+            image_digest_holds=True,
+        )
+
+
+def test_a_snapshot_stand_in_is_refused_by_the_type_before_its_eq_is_asked(
+    observations,
+) -> None:
+    """F-3: the workflow accepted any object and compared with `!=`.
+
+    A stand-in with three class attributes satisfied both integrity gates, and
+    an `__eq__` returning `True` decided the substitution check for itself. The
+    type check is what refuses it; the field-by-field comparison behind it is
+    the second line, and cannot be reached by a hostile `__eq__` once the type
+    is pinned. Why that second line is required anyway, and pinned, is
+    `test_the_snapshot_pin_compares_every_field_the_descriptor_has`.
+    """
+
+    class Substitute:
+        container_version = 1
+        schema_version = 99
+        integrity = SnapshotIntegrity.VERIFIED
+        fingerprint = "attacker"
+
+        def __eq__(self, other) -> bool:
+            return True
+
+        def __ne__(self, other) -> bool:
+            return False
+
+        def __hash__(self) -> int:
+            return 0
+
+    flow = workflow(observations)
+    real = descriptor()
+    flow.start(real, observations, session_id=SESSION, started_by_operator=True)
+
+    for stage in (
+        lambda item: flow.open_trial(item, observations, session_id=SESSION),
+        lambda item: flow.commit(
+            item, observations, session_id=SESSION, acquisition=Opens(), confirmed=True
+        ),
+    ):
+        with pytest.raises(TypeError, match="exactly"):
+            stage(Substitute())
+    assert flow.stage is RecoveryStage.PREFLIGHT_PASSED
+
+    with pytest.raises(TypeError, match="exactly"):
+        RecoveryWorkflow(
+            a_quarantine(),
+            SessionBinding(
+                host_fingerprint=host_fingerprint(observations), session_id=SESSION
+            ),
+            session_id=SESSION,
+        ).start(Substitute(), observations, session_id=SESSION, started_by_operator=True)
+
+
+@pytest.mark.parametrize("name", ["current_schema", "target_schema"])
+@pytest.mark.parametrize("bad", [True, False, "1", 1.0, None])
+def test_a_schema_version_must_be_an_int_that_is_not_a_bool(name, bad) -> None:
+    """F-5: they were annotated and unchecked.
+
+    An object whose `__eq__` and `__gt__` always answer True produced a
+    **legitimately minted** passing verdict for a step in no supported set, and
+    `schema_is_compatible(current=True, target=2)` was True — a `bool` passing
+    as version 1, the exact case `SnapshotDescriptor.__post_init__` goes out of
+    its way to refuse.
+    """
+
+    arguments = {
+        "snapshot": descriptor(),
+        "capacity": capacity(),
+        "current_schema": 1,
+        "target_schema": 2,
+        "binding_holds": True,
+        "generation_holds": True,
+        "image_digest_holds": True,
+    }
+    arguments[name] = bad
+    with pytest.raises(TypeError, match=name):
+        preflight(a_quarantine(quarantined=False), **arguments)
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"schema_version": "capacity_available=123456789 medium=usb-SN-0007"},
+        {"schema_version": True},
+        {"schema_version": 1.0},
+        {"fingerprint": 1234},
+        {"event": "recovery_started"},
+        {"check": "required_space"},
+        {"gate": "medium_fenced"},
+    ],
+)
+def test_an_audit_entry_refuses_anything_it_would_render_verbatim(bad) -> None:
+    """F-6: the repr rendered whatever it was handed.
+
+    Reached through a snapshot stand-in whose `schema_version` was a string
+    carrying **a capacity figure and a medium identity** — the two things
+    ADR-0010 D10 names specifically — into the object this module's own
+    docstring calls "the object destined for a log". Fixing the reachability is
+    the snapshot type check; this removes the class of it.
+    """
+
+    fields = {"event": SnapshotAuditEvent.RECOVERY_STARTED}
+    fields.update(bad)
+    with pytest.raises(TypeError):
+        SnapshotAuditEntry(**fields)
+
+
+@pytest.mark.parametrize("stage", ["start", "open_trial", "commit"])
+def test_every_stage_refuses_a_foreign_sitting(stage, observations) -> None:
+    """F-8: the check was tested on `start` only.
+
+    Deleting it from `open_trial` and from `commit` each left the suite green,
+    while the docstring said a review had committed a workflow built for one
+    sitting by passing another's id **to every stage**.
+    """
+
+    flow = workflow(observations)
+    snap = descriptor()
+    if stage != "start":
+        flow.start(snap, observations, session_id=SESSION, started_by_operator=True)
+    if stage == "commit":
+        flow.open_trial(snap, observations, session_id=SESSION)
+
+    call = {
+        "start": lambda: flow.start(
+            snap, observations, session_id="elsewhere", started_by_operator=True
+        ),
+        "open_trial": lambda: flow.open_trial(snap, observations, session_id="elsewhere"),
+        "commit": lambda: flow.commit(
+            snap, observations, session_id="elsewhere", acquisition=Opens(), confirmed=True
+        ),
+    }[stage]
+
+    with pytest.raises(RecoveryRefused) as refused:
+        call()
+    assert refused.value.refusal is Refusal.NOT_THIS_SITTING
+
+
+def test_the_snapshot_pin_compares_every_field_the_descriptor_has() -> None:
+    """F-3b: the substitution check may not delegate, and must be total.
+
+    Two requirements, and the second is why the first is not merely style.
+
+    *Not delegated*: the check compares field by field so that no `__eq__` or
+    `__ne__` on the presented object can answer it. The type pin in
+    `_require_a_real_snapshot` makes a hostile one unreachable today; this is
+    the second line, for the day somebody weakens the first.
+
+    *Total*: a hand-written conjunction is exactly as good as the fields it
+    names. Add a fifth field to `SnapshotDescriptor` and a comparison nobody
+    updated would pass two descriptors that differ in it — a substitution, not
+    noticed. So the names the check reads are derived from its own source and
+    asserted equal to the dataclass's fields.
+
+    The two forms agree on every pair of real descriptors today, asserted
+    below: what is pinned here is what a later edit can break, not a difference
+    that exists now.
+    """
+
+    from azazel_boot import snapshot as module
+
+    source = inspect.getsource(module.RecoveryWorkflow._require_the_same_snapshot)
+    tree = ast.parse(textwrap.dedent(source))
+    compared = {
+        node.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id in {"snapshot", "held"}
+    }
+    declared = {field.name for field in dataclasses.fields(SnapshotDescriptor)}
+    assert compared == declared, (
+        "the substitution check must compare every field of SnapshotDescriptor; "
+        f"missing {sorted(declared - compared)}, unknown {sorted(compared - declared)}"
+    )
+
+    # And, for the pairs that can actually reach it, the two forms agree.
+    made = [
+        SnapshotDescriptor(1, version, integrity, fingerprint)
+        for version in (1, 2)
+        for integrity in SnapshotIntegrity
+        for fingerprint in ("one", "two")
+    ]
+    for left in made:
+        for right in made:
+            field_by_field = all(
+                getattr(left, name) == getattr(right, name) for name in sorted(declared)
+            )
+            assert (left == right) is field_by_field
