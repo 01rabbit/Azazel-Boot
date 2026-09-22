@@ -86,12 +86,13 @@ The order is fixed and is part of the contract:
 | # | Check | Why here |
 | --- | --- | --- |
 | 1 | the fence | D9: a version upgrade is not a way round it, and asking a removed medium about its free space means reasoning about a device that is not there |
-| 2 | the snapshot exists | D7's load-bearing rule, before the cheap answers |
-| 3 | its container version is known | |
-| 4 | its integrity verified | `INDETERMINATE` lands with `FAILED`; ambiguity refuses |
-| 5 | required vs available space | |
-| 6 | schema compatibility | forward by a known step; a downgrade and a no-op both refuse |
-| 7 | binding, generation, image digest | |
+| 2 | the volume is not quarantined | D4 stops the whole volume on a suspected torn write, and a migration is a large write to exactly that volume |
+| 3 | the snapshot exists | D7's load-bearing rule, before the cheap answers |
+| 4 | its container version is known | |
+| 5 | its integrity verified | `INDETERMINATE` lands with `FAILED`; ambiguity refuses |
+| 6 | required vs available space | |
+| 7 | schema compatibility | forward by a known step; a downgrade and a no-op both refuse |
+| 8 | binding, generation, image digest | |
 
 Each failing check refuses with **its own classification**, so an operator
 learns which one — and nothing behind it.
@@ -150,6 +151,17 @@ The gates, in order — D8's four, with two that precede them:
 
 Each is driven failing on its own to show the next is not reached. A binding
 from another machine refuses with the acquisition **never invoked**.
+
+**One pair cannot be contested, and saying so is better than a test that looks
+like it proves it.** D8 orders key acquisition before integrity, but at the
+commit the snapshot is pinned to the one the workflow started on — so a
+failed-integrity snapshot cannot be presented there, the substitution rule
+answering first. At `start` there is no acquisition, because that is where an
+operator has not yet been asked to type. No input makes both gates fail at the
+same moment. A re-review found that the helper written to contest that pair was
+**defined and never called**, and that reversing the two left the suite green.
+The helper is deleted rather than wired up, because wiring it up would not have
+worked either; what is pinned instead is the fact that makes it untestable.
 
 **A snapshot swapped under the workflow is refused.** The workflow holds what
 it started on and compares; an older fingerprint, a lower schema version or a

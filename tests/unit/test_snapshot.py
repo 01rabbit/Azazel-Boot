@@ -325,6 +325,26 @@ def test_this_module_never_calls_anything_that_would_change_a_quarantine() -> No
         "quarantine_volume",
     }
 
+    # **An allowlist of what may be touched on the quarantine at all**, rather
+    # than a denylist of names. The flags were the whole of the denylist, and
+    # `Quarantine` also holds two mutable containers: a re-review put
+    # `self._quarantine._audit.clear()` and `_dispositions.clear()` into
+    # `interrupt()`, erasing the audit trail and flipping `medium_is_bound()`
+    # with the flags never moving and the whole suite green.
+    #
+    # A denylist of container names would have been the same mistake one layer
+    # down. This module reads exactly two things from the quarantine, so that
+    # is what it is held to. (`_audit` as a bare name is *this* object's own
+    # slot, which is why the check is on the receiver rather than the name.)
+    on_the_quarantine = {
+        node.attr
+        for node in ast.walk(TREE)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Attribute)
+        and node.value.attr == "_quarantine"
+    }
+    assert on_the_quarantine == {"is_fenced", "volume_is_quarantined"}, on_the_quarantine
+
     assigned = {
         target.attr
         for node in ast.walk(TREE)
@@ -333,6 +353,44 @@ def test_this_module_never_calls_anything_that_would_change_a_quarantine() -> No
         if isinstance(target, ast.Attribute)
     }
     assert not assigned & {"_fenced", "_volume_quarantined"}
+
+    # **`object.__setattr__` on anything but `self`.** This rule was written
+    # once and never landed — the edit script that carried it aborted on a
+    # later assertion before writing, and the re-review found the guard absent.
+    # A string handed to `object.__setattr__` is neither an `ast.Attribute` nor
+    # an `ast.Assign` target, so nothing above sees it, and `Quarantine` uses
+    # `__slots__`, so it writes straight past that class's own seal.
+    # The one exemption is `_mint`, which stamps a `PreflightVerdict` it
+    # constructed on the line above — an object that cannot be anyone else's.
+    # It is named per function, not allowed as a general shape, so a second
+    # place doing this has to be added here deliberately.
+    for function in ast.walk(TREE):
+        if not isinstance(function, ast.FunctionDef):
+            continue
+        permitted = {"self"} | ({"verdict"} if function.name == "_mint" else set())
+        for node in ast.walk(function):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+                continue
+            if node.func.attr not in {"__setattr__", "__delattr__"}:
+                continue
+            assert node.args, "a bare __setattr__ call"
+            first = node.args[0]
+            assert isinstance(first, ast.Name) and first.id in permitted, (
+                f"__setattr__ in {function.name} targets something unexpected"
+            )
+    for node in ast.walk(TREE):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            assert node.func.id not in {"setattr", "delattr"}
+
+    # And the flag names as **string constants**, which is the form they take
+    # when they are written this way. Nothing here has a legitimate reason to
+    # name them at all.
+    literals = {
+        node.value
+        for node in ast.walk(TREE)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    }
+    assert not literals & {"_fenced", "_volume_quarantined", "_dispositions", "_approval"}
 
     # `is_fenced` and `volume_is_quarantined` are *read*, which is the point.
     assert {"is_fenced", "volume_is_quarantined"} <= attributes
@@ -805,6 +863,11 @@ def test_no_audit_entry_can_carry_contents_a_figure_or_an_identity() -> None:
     names = {field.name for field in dataclasses.fields(SnapshotAuditEntry)}
     assert names == {"event", "check", "gate", "schema_version", "fingerprint"}
 
+    # The loop below cannot fail while the exact set above holds. It is kept
+    # because it says *why* those five and no others — a reader adding a sixth
+    # edits the set above and then has to answer this list. It is documentation
+    # with an assertion's syntax, and is labelled as such rather than counted
+    # as a second check.
     for bad in (
         "content", "contents", "payload", "data", "bytes", "block", "record",
         "offset", "size", "length", "capacity", "free", "space", "required",
@@ -980,12 +1043,65 @@ def test_this_module_cannot_reach_a_host_a_network_a_vm_or_a_second_partition() 
         "__mro__",
         "__class__",
         "__getattribute__",
+        # F-4: the route the previous widening did not contain. A re-review
+        # raised and caught an exception inside `audit()`, walked
+        # `caught.__traceback__.tb_frame.f_builtins["open"]`, assembled the
+        # path from one-character fragments so the string scan never saw it,
+        # and wrote to the host filesystem with the whole suite green.
+        "__traceback__",
+        "tb_frame",
+        "tb_next",
+        "f_globals",
+        "f_builtins",
+        "f_locals",
+        "f_back",
+        "gi_frame",
+        "cr_frame",
+        "ag_frame",
+        "__code__",
+        "__func__",
+        "__self__",
+        "__dict__",
+        "__init_subclass__",
+        "__class_getitem__",
+        "__reduce_ex__",
+        "__loader__",
+        "__spec__",
     }
     assert not [
         node
         for node in ast.walk(TREE)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Subscript)
     ]
+
+    # **No subscript load outside an annotation.** Refusing only
+    # `Subscript`-as-callee was sidestepped by binding the callable to a name
+    # first — `writer = builtins["open"]`, then `writer(...)`. This module
+    # indexes nothing at runtime, so the honest rule is that it indexes
+    # nothing; `tuple[()]` and `list[SnapshotAuditEntry]` in annotations are
+    # subscripts too, and are excluded by position rather than by name.
+    annotated: set[int] = set()
+    for node in ast.walk(TREE):
+        for holder in (
+            getattr(node, "annotation", None),
+            getattr(node, "returns", None),
+        ):
+            if holder is not None:
+                annotated.update(id(inner) for inner in ast.walk(holder))
+    assert annotated, "the module is expected to carry annotations"
+
+    assert not [
+        node
+        for node in ast.walk(TREE)
+        if isinstance(node, ast.Subscript)
+        and isinstance(node.ctx, ast.Load)
+        and id(node) not in annotated
+    ]
+
+    # And no `try`/`except`, which is how a frame is obtained without calling
+    # anything: raise, catch, walk the traceback. Nothing here handles an
+    # exception — it raises them.
+    assert not [node for node in ast.walk(TREE) if isinstance(node, ast.ExceptHandler)]
 
     # `getattr` had a blanket exemption, and that exemption *was* the hole
     # above: `getattr` is how the chain is walked once the names are strings.
@@ -1110,8 +1226,20 @@ def test_the_verdict_and_the_candidate_are_capabilities_never_authorities(
 # --------------------------------------------------------------------------
 
 
-def _flags(quarantine) -> tuple[bool, bool]:
-    return (quarantine.is_fenced, quarantine.volume_is_quarantined)
+def _flags(quarantine) -> tuple:
+    """The flags **and the containers** — F-3's finding.
+
+    Erasing `_audit` and `_dispositions` moved neither flag, so a check on the
+    two booleans alone was satisfied while the quarantine's record was wiped
+    and `medium_is_bound()` flipped.
+    """
+
+    return (
+        quarantine.is_fenced,
+        quarantine.volume_is_quarantined,
+        quarantine.audit(),
+        quarantine.disposition(MEDIUM),
+    )
 
 
 def test_no_public_method_ever_turns_either_flag_off(observations, elsewhere) -> None:
@@ -1131,12 +1259,28 @@ def test_no_public_method_ever_turns_either_flag_off(observations, elsewhere) ->
         quarantine = a_quarantine(fenced=True)
         flow = workflow(observations, quarantine=quarantine)
         before = _flags(quarantine)
-        assert before == (True, True)
         try:
             build(flow, quarantine)
         except (RecoveryRefused, AssertionError, TypeError):
             pass
         assert _flags(quarantine) == before, "a flag was turned off"
+
+    # **Derived, not written out.** The list below was hand-written, so it was
+    # stale the moment a method was added: a re-review added an `abandon()`
+    # that cleared both flags through a module-private helper and the whole
+    # suite stayed green. This asserts first that the driven set *is* the
+    # public surface, so a new method fails here until it is driven.
+    driven = {
+        "start", "open_trial", "commit", "interrupt", "audit", "stage", "holds",
+    }
+    assert driven == {
+        name
+        for name, _ in inspect.getmembers(RecoveryWorkflow)
+        if not name.startswith("_")
+    }, "a public method of RecoveryWorkflow is not driven below"
+    assert {"audit", "may_migrate", "note_snapshot_written"} == {
+        name for name, _ in inspect.getmembers(MigrationLedger) if not name.startswith("_")
+    }, "a public method of MigrationLedger is not driven below"
 
     snap = descriptor()
     for build in (
@@ -1163,7 +1307,58 @@ def test_no_public_method_ever_turns_either_flag_off(observations, elsewhere) ->
     before = _flags(quarantine)
     run_to_commit(flow, observations)
     flow_after = _flags(quarantine)
-    assert flow_after == before == (False, True)
+    assert flow_after == before
+
+    # **Every gate's refusal path**, not only the fenced one. `_refuse_gate`
+    # was driven with `MEDIUM_FENCED` alone, so a re-review gated the clear on
+    # `OPERATOR_CONFIRMATION` — an operator declining the confirmation
+    # un-fenced and un-quarantined the volume, fully green.
+    for gate_case in (
+        lambda: (a_quarantine(fenced=True), "start", {}),
+        lambda: (a_quarantine(quarantined=False), "start", {}),
+        lambda: (a_quarantine(), "commit", {"elsewhere": True}),
+        lambda: (a_quarantine(), "commit", {"bad_channel": True}),
+        lambda: (a_quarantine(), "commit", {"confirmed": False}),
+        lambda: (a_quarantine(), "start", {"bad_snapshot": True}),
+        lambda: (a_quarantine(), "open_trial", {"swap": True}),
+        lambda: (a_quarantine(), "start", {"other_sitting": True}),
+        lambda: (a_quarantine(), "start", {"not_operator": True}),
+    ):
+        quarantine, where, options = gate_case()
+        before = (_flags(quarantine), quarantine.audit(), len(quarantine.audit()))
+        flow = workflow(observations, quarantine=quarantine)
+        good = descriptor()
+        try:
+            if where != "start":
+                flow.start(good, observations, session_id=SESSION, started_by_operator=True)
+            if where == "commit":
+                flow.open_trial(good, observations, session_id=SESSION)
+                flow.commit(
+                    good,
+                    elsewhere if options.get("elsewhere") else observations,
+                    session_id=SESSION,
+                    acquisition=Opens(channel=NOT_A_CHANNEL)
+                    if options.get("bad_channel")
+                    else Opens(),
+                    confirmed=options.get("confirmed", True),
+                )
+            elif where == "open_trial":
+                flow.open_trial(
+                    descriptor(fingerprint=OLD_FINGERPRINT), observations, session_id=SESSION
+                )
+            else:
+                flow.start(
+                    descriptor(integrity=SnapshotIntegrity.FAILED)
+                    if options.get("bad_snapshot")
+                    else good,
+                    observations,
+                    session_id="another" if options.get("other_sitting") else SESSION,
+                    started_by_operator=not options.get("not_operator"),
+                )
+        except RecoveryRefused:
+            pass
+        after = (_flags(quarantine), quarantine.audit(), len(quarantine.audit()))
+        assert after == before, f"{where} {options} changed the quarantine"
 
     # Every `MigrationLedger` method, and `preflight` itself.
     ledger = MigrationLedger()
@@ -1177,6 +1372,7 @@ def test_no_public_method_ever_turns_either_flag_off(observations, elsewhere) ->
         generation_holds=True,
         image_digest_holds=True,
     )
+    unchanged = _flags(quarantine)
     for act in (
         lambda: ledger.may_migrate(verdict),
         lambda: ledger.note_snapshot_written(verdict, snap),
@@ -1186,7 +1382,7 @@ def test_no_public_method_ever_turns_either_flag_off(observations, elsewhere) ->
             act()
         except RecoveryRefused:
             pass
-        assert _flags(quarantine) == (False, True)
+        assert _flags(quarantine) == unchanged
 
 
 @pytest.mark.parametrize(
@@ -1252,35 +1448,17 @@ def test_a_migration_is_refused_over_a_quarantined_volume() -> None:
 # --------------------------------------------------------------------------
 
 
-def _everything_after(gate: RecoveryGate) -> dict:
-    """Arguments that make **every gate after this one** fail too.
-
-    The first version of the ordering tests failed one gate against a clean
-    rest — a good snapshot for the key-acquisition test, an `OPENED`
-    acquisition for the confirmation test — so the "before" was never actually
-    contested and two independent reorderings shipped green.
-    """
-
-    later = {
-        RecoveryGate.TARGET_BINDING: {},
-        RecoveryGate.KEY_ACQUISITION: {"bad_snapshot": True, "confirmed": False},
-        RecoveryGate.INTEGRITY_VERIFICATION: {"confirmed": False},
-        RecoveryGate.OPERATOR_CONFIRMATION: {},
-    }
-    return later[gate]
-
-
 @pytest.mark.parametrize(
     ("gate", "build"),
     [
         (
             RecoveryGate.MEDIUM_FENCED,
-            lambda: {"quarantine": a_quarantine(fenced=True), "bad_snapshot": True,
+            lambda: {"quarantine": a_quarantine(fenced=True),
                      "bad_acquisition": True, "confirmed": False, "elsewhere": True},
         ),
         (
             RecoveryGate.NOTHING_TO_RECOVER,
-            lambda: {"quarantine": a_quarantine(quarantined=False), "bad_snapshot": True,
+            lambda: {"quarantine": a_quarantine(quarantined=False),
                      "bad_acquisition": True, "confirmed": False, "elsewhere": True},
         ),
         (
@@ -1325,11 +1503,6 @@ def test_each_gate_refuses_with_every_later_gate_also_failing(
         flow.open_trial(good, observations, session_id=SESSION)
 
     snapshot_now = good
-    if options.get("bad_snapshot") and gate is RecoveryGate.INTEGRITY_VERIFICATION:
-        # Reached through the workflow's own record, so the substitution check
-        # does not fire first: the workflow started on a snapshot whose
-        # integrity the caller later reports as failed.
-        snapshot_now = good
 
     acquisition = Opens(channel=NOT_A_CHANNEL) if options.get("bad_acquisition") else Opens()
     inventory = elsewhere if options.get("elsewhere") else observations
@@ -1579,3 +1752,175 @@ def test_a_truthy_object_is_not_a_check(name) -> None:
     arguments[name] = "yes"
     with pytest.raises(TypeError):
         preflight(a_quarantine(quarantined=False), **arguments)
+
+
+def test_the_key_and_integrity_gates_cannot_be_contested_against_each_other(
+    observations,
+) -> None:
+    """D8 orders key acquisition before integrity. That pair is **not testable**,
+    and saying so is better than a test that looks like it proves it.
+
+    At `commit` the snapshot is pinned to the one the workflow started on, so a
+    failed-integrity snapshot cannot be presented there at all — the
+    substitution check fires first. At `start` there is no acquisition, because
+    that is where an operator has not yet been asked to type. So no input makes
+    both gates fail at the same moment.
+
+    A re-review found the helper written to contest this pair was **defined and
+    never called**, and that moving the integrity block above the acquisition
+    block left the suite green. The helper is deleted rather than wired up,
+    because wiring it up would not have worked either; what is pinned instead
+    is the fact that makes it untestable.
+    """
+
+    flow = workflow(observations)
+    good = descriptor()
+    flow.start(good, observations, session_id=SESSION, started_by_operator=True)
+    flow.open_trial(good, observations, session_id=SESSION)
+
+    with pytest.raises(RecoveryRefused) as refused:
+        flow.commit(
+            descriptor(integrity=SnapshotIntegrity.FAILED),
+            observations,
+            session_id=SESSION,
+            acquisition=Opens(channel=NOT_A_CHANNEL),
+            confirmed=False,
+        )
+    # Not GATE_REFUSED: the substitution rule answers first, which is what
+    # makes the integrity gate unreachable-with-a-bad-snapshot at commit.
+    assert refused.value.refusal is Refusal.SNAPSHOT_CHANGED_UNDER_THE_WORKFLOW
+
+    # The integrity gate at commit is therefore a re-check that cannot fail
+    # given the pinning, not an ordered gate. Deleting it is still caught, at
+    # `start`, by `test_the_integrity_gate_is_reached_and_refuses`.
+
+
+def test_the_workflow_and_the_ledger_are_sealed(observations) -> None:
+    """Both seals were entirely untested; turning either off was green.
+
+    The docstrings claim the quarantine, the binding and the sitting cannot be
+    replaced. Nothing attempted it, so the claim could have been tidied away
+    without a red test — the same gap the candidate's seal had.
+    """
+
+    flow = workflow(observations)
+    for name in ("_quarantine", "_binding", "_session_id", "_stage", "_snapshot", "_candidate"):
+        with pytest.raises(AttributeError, match="sealed after construction"):
+            setattr(flow, name, None)
+
+    ledger = MigrationLedger()
+    with pytest.raises(AttributeError, match="sealed after construction"):
+        ledger._audit = []
+
+    # And the limit, stated rather than implied: `_sealed_assign` is an
+    # unconditional `object.__setattr__` that any caller can reach, so a stage
+    # can be forced without `start()`. `azazel_boot.quarantine` says the same
+    # of its own seal — this is careless-caller defence, not a seal.
+    flow._sealed_assign("_stage", RecoveryStage.TRIAL_OPEN)
+    assert flow.stage is RecoveryStage.TRIAL_OPEN
+
+
+def test_a_verdict_subclass_carrying_a_stolen_token_is_refused() -> None:
+    """F-11: `type(verdict) is PreflightVerdict` had no test behind it.
+
+    It is semantically load-bearing — the same "a check nobody tests" shape the
+    candidate's type check was found in one round earlier.
+    """
+
+    minted = preflight(
+        a_quarantine(quarantined=False),
+        snapshot=descriptor(),
+        capacity=capacity(),
+        current_schema=1,
+        target_schema=2,
+        binding_holds=True,
+        generation_holds=True,
+        image_digest_holds=True,
+    )
+    assert verdict_was_minted_here(minted)
+
+    class Subclassed(PreflightVerdict):
+        pass
+
+    stolen = Subclassed(None)
+    object.__setattr__(stolen, "_token", minted._token)
+    assert stolen.may_migrate is True
+    assert verdict_was_minted_here(stolen) is False
+    with pytest.raises(RecoveryRefused):
+        MigrationLedger().may_migrate(stolen)
+
+
+def test_the_token_cannot_be_read_off_a_verdict_and_reused() -> None:
+    """F-6: it could, including off a **refused** one.
+
+    `PreflightVerdict.__init__` took the token positionally and `preflight`
+    stamped it through that signature, so every verdict a caller was handed
+    carried it. A re-review read it off a refusal, rebuilt a passing verdict,
+    and authorised a migration over a snapshot whose integrity had failed —
+    recorded as written.
+    """
+
+    refused = preflight(
+        a_quarantine(quarantined=False),
+        snapshot=descriptor(integrity=SnapshotIntegrity.FAILED),
+        capacity=capacity(),
+        current_schema=1,
+        target_schema=2,
+        binding_holds=True,
+        generation_holds=True,
+        image_digest_holds=True,
+    )
+    assert refused.refused_by is PreflightCheck.SNAPSHOT_INTEGRITY
+
+    assert "token" not in inspect.signature(PreflightVerdict).parameters
+    rebuilt = PreflightVerdict(None)
+    assert rebuilt.may_migrate is True
+    assert verdict_was_minted_here(rebuilt) is False
+
+    ledger = MigrationLedger()
+    with pytest.raises(RecoveryRefused) as error:
+        ledger.may_migrate(rebuilt)
+    assert error.value.refusal is Refusal.VERDICT_NOT_MINTED_BY_A_PREFLIGHT
+    assert ledger.audit() == ()
+
+
+def test_the_key_acquisition_refusal_traceback_holds_what_it_was_handed(
+    observations,
+) -> None:
+    """F-13: the existing traceback assertion ran only on the fenced-`start`
+    path, where `acquisition` is `None` — so it read as coverage it did not have.
+
+    This pins the **acknowledged** outcome on the path that actually holds a
+    secret: the raising frame holds nothing, and the frames above hold what
+    they were handed, because a frame cannot forget its own argument.
+    """
+
+    import traceback
+
+    flow = workflow(observations)
+    snap = descriptor()
+    acquisition = Opens(channel=NOT_A_CHANNEL)
+    flow.start(snap, observations, session_id=SESSION, started_by_operator=True)
+    flow.open_trial(snap, observations, session_id=SESSION)
+
+    with pytest.raises(RecoveryRefused) as refused:
+        flow.commit(
+            snap, observations, session_id=SESSION, acquisition=acquisition, confirmed=True
+        )
+
+    summary = traceback.TracebackException.from_exception(refused.value, capture_locals=True)
+    frames = [frame for frame in summary.stack if frame.filename == str(MODULE)]
+    by_name = {frame.name: frame for frame in frames}
+
+    assert set(by_name["_raise_gate_refused"].locals or {}) == set()
+    assert set(by_name["_refuse_gate"].locals or {}) == {"gate", "self"}
+
+    # And what is *not* claimed: `commit` holds the acquisition it was handed,
+    # so a double whose `__repr__` leaks renders its secret from that frame.
+    held = " ".join((by_name["commit"].locals or {}).values())
+    assert acquisition.secret in held
+    assert SESSION in held
+
+    # The message carries neither.
+    assert acquisition.secret not in str(refused.value)
+    assert SESSION not in str(refused.value)

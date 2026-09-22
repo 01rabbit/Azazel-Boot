@@ -194,9 +194,22 @@ class PreflightVerdict:
 
     __slots__ = ("_refused_by", "_token")
 
-    def __init__(self, refused_by: PreflightCheck | None, token: object = None) -> None:
+    def __init__(self, refused_by: PreflightCheck | None) -> None:
+        """No `token` parameter. It used to take one, and that was the hole.
+
+        `preflight` stamped the sentinel through this signature, so every
+        verdict a caller was handed — **including a refusal** — carried it on
+        `_token`, readable with one attribute access. A re-review read it off a
+        refused verdict, built `PreflightVerdict(None, stolen)`, and authorised
+        a migration over a snapshot whose integrity had **failed**, recorded as
+        written. A token a caller is given is not a token.
+
+        The sentinel is now stamped by `_mint`, which is module-private and is
+        the only thing that writes `_token`.
+        """
+
         object.__setattr__(self, "_refused_by", refused_by)
-        object.__setattr__(self, "_token", token)
+        object.__setattr__(self, "_token", None)
 
     def __setattr__(self, name: str, value: object) -> None:
         raise AttributeError("a PreflightVerdict is fixed when it is minted")
@@ -226,9 +239,18 @@ class PreflightVerdict:
         return ()
 
 
-#: The token `preflight` stamps into the verdicts it mints. A module-private
-#: object with no constructor a caller can reach: identity is the whole of it.
+#: The token `_mint` stamps into the verdicts this module produces. A
+#: module-private object with no constructor a caller can reach: identity is
+#: the whole of it.
 _MINTED_HERE = object()
+
+
+def _mint(refused_by: PreflightCheck | None) -> PreflightVerdict:
+    """Build a verdict and stamp it. The only thing that writes `_token`."""
+
+    verdict = PreflightVerdict(refused_by)
+    object.__setattr__(verdict, "_token", _MINTED_HERE)
+    return verdict
 
 
 def verdict_was_minted_here(verdict: PreflightVerdict) -> bool:
@@ -289,7 +311,12 @@ def preflight(
     """
 
     # Checked, not merely annotated. The descriptor learned that lesson and
-    # these three did not: any truthy object passed as "the binding holds".
+    # these did not — including the **quarantine**, which was the one input
+    # nothing checked at all: a re-review passed a two-attribute stand-in
+    # (`is_fenced = False`, `volume_is_quarantined = True`) and both gates that
+    # precede D8's four were satisfied by class attributes.
+    if not isinstance(quarantine, Quarantine):
+        raise TypeError("quarantine must be a Quarantine; a stand-in is not one")
     for name, value in (
         ("binding_holds", binding_holds),
         ("generation_holds", generation_holds),
@@ -303,42 +330,42 @@ def preflight(
         raise TypeError("snapshot must be a SnapshotDescriptor or None")
 
     if quarantine.is_fenced:
-        return PreflightVerdict(PreflightCheck.MEDIUM_FENCED, _MINTED_HERE)
+        return _mint(PreflightCheck.MEDIUM_FENCED)
     if quarantine.volume_is_quarantined:
         # The recovery path treated a quarantined volume as load-bearing and
         # this one treated it as invisible, which a review caught. ADR-0010 D4
         # stops the **whole volume** on a suspected torn write, and a schema
         # migration is a large write to exactly that volume.
-        return PreflightVerdict(PreflightCheck.VOLUME_QUARANTINED, _MINTED_HERE)
+        return _mint(PreflightCheck.VOLUME_QUARANTINED)
 
     if snapshot is None:
         # D7: no flag, no acceptance, no emergency state. An operator cannot
         # consent to this, because what they would be consenting to is the loss
         # of the only path back — so there is no parameter to consent with.
-        return PreflightVerdict(PreflightCheck.SNAPSHOT_ABSENT, _MINTED_HERE)
+        return _mint(PreflightCheck.SNAPSHOT_ABSENT)
     if snapshot.container_version not in KNOWN_CONTAINER_VERSIONS:
-        return PreflightVerdict(PreflightCheck.SNAPSHOT_CONTAINER_UNKNOWN, _MINTED_HERE)
+        return _mint(PreflightCheck.SNAPSHOT_CONTAINER_UNKNOWN)
     if snapshot.integrity is not SnapshotIntegrity.VERIFIED:
         # `INDETERMINATE` lands here with `FAILED`. D7: ambiguity refuses the
         # migration, and there is no third answer that proceeds.
-        return PreflightVerdict(PreflightCheck.SNAPSHOT_INTEGRITY, _MINTED_HERE)
+        return _mint(PreflightCheck.SNAPSHOT_INTEGRITY)
 
     if capacity.available < capacity.required:
         # No degraded migration, no "we can fit most of it". A medium too small
         # keeps the old schema and keeps working.
-        return PreflightVerdict(PreflightCheck.REQUIRED_SPACE, _MINTED_HERE)
+        return _mint(PreflightCheck.REQUIRED_SPACE)
 
     if not schema_is_compatible(current=current_schema, target=target_schema):
-        return PreflightVerdict(PreflightCheck.SCHEMA_COMPATIBILITY, _MINTED_HERE)
+        return _mint(PreflightCheck.SCHEMA_COMPATIBILITY)
 
     if not binding_holds:
-        return PreflightVerdict(PreflightCheck.BINDING, _MINTED_HERE)
+        return _mint(PreflightCheck.BINDING)
     if not generation_holds:
-        return PreflightVerdict(PreflightCheck.GENERATION, _MINTED_HERE)
+        return _mint(PreflightCheck.GENERATION)
     if not image_digest_holds:
-        return PreflightVerdict(PreflightCheck.IMAGE_DIGEST, _MINTED_HERE)
+        return _mint(PreflightCheck.IMAGE_DIGEST)
 
-    return PreflightVerdict(None, _MINTED_HERE)
+    return _mint(None)
 
 
 class RecoveryStage(Enum):
@@ -567,6 +594,13 @@ class RecoveryWorkflow:
     def __init__(
         self, quarantine: Quarantine, binding: SessionBinding, *, session_id: str
     ) -> None:
+        if not isinstance(quarantine, Quarantine):
+            raise TypeError("quarantine must be a Quarantine; a stand-in is not one")
+        if not isinstance(binding, SessionBinding):
+            raise TypeError("binding must be a SessionBinding")
+        if not isinstance(session_id, str) or not session_id.strip():
+            raise TypeError("session_id must be a non-empty string")
+
         object.__setattr__(self, "_sealed", False)
         self._quarantine = quarantine
         self._binding = binding
@@ -624,6 +658,14 @@ class RecoveryWorkflow:
         self._require_stage(RecoveryStage.NOT_STARTED)
         self._require_this_sitting(session_id)
         if not started_by_operator:
+            # Audited, and terminal. It used to take the silent `_refuse`, so
+            # three refused automatic starts left `stage=NOT_STARTED, audit=()`
+            # and a real start then succeeded with no record that D8's central
+            # prohibition had been exercised — the same reasoning that made a
+            # snapshot substitution terminal and audited. A start nothing
+            # started is an event, not a typo.
+            self._sealed_assign("_stage", RecoveryStage.REFUSED)
+            self._record(SnapshotAuditEvent.RECOVERY_REFUSED)
             self._refuse(
                 Refusal.RECOVERY_NOT_STARTED_BY_AN_OPERATOR,
                 "a restore is something an operator begins deliberately; "

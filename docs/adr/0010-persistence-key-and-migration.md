@@ -15,10 +15,19 @@ device.
 **A note on how D9 and D10 are checked, which changes neither.** The
 repository holds them with static scans over the modules above. *A static scan
 is not a proof of absence; it is a check that refuses the paths found so far.*
-Two of this repository's reachability guards have been defeated by adversarial
-review — once by assembling module names from fragments for `__import__`, and
-once by walking `().__class__.__base__.__subclasses__()` to `open` with no
-import statement at all. Both are closed and both are now named in the guards.
+These guards have been defeated by adversarial review three times: by
+assembling module names from fragments for `__import__`; by walking
+`().__class__.__base__.__subclasses__()` to `open`; and by raising an exception
+and reading `__traceback__.tb_frame.f_builtins["open"]` — the last two with no
+import statement at all.
+
+**Each was closed in `azazel_boot.snapshot`'s guard only.** An earlier draft of
+this paragraph said all of them were "named in the guards", which was not true:
+the other modules' guards still name the `__import__` route and not the two
+reflection routes, and the same chain inserted into `azazel_boot.session_mode`
+writes to the host filesystem with the suite green. Widening them is work this
+record does not do.
+
 This is a statement of fact about the checks, not a revision of what D9 and D10
 decide.
 [#7](https://github.com/01rabbit/Azazel-Boot/issues/7) stays open, and so do
