@@ -24,9 +24,35 @@ def _imported_roots(path: Path) -> set[str]:
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             roots.update(alias.name.split(".")[0] for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            # No `level == 0` condition. With it, `from .sibling import x` was
+            # invisible to every check built on this function.
             roots.add(node.module.split(".")[0])
     return roots
+
+
+def _called_builtins(path: Path) -> set[str]:
+    """Bare-name calls, so a dynamic import cannot walk past the module scan.
+
+    An adversarial review appended a function to a module under `src/` that ran
+    `dd` against a raw block device and sent the bytes over TCP, with every
+    module name assembled from fragments: `__import__("sub" + "process")`,
+    `__import__("soc" + "ket")`, `__import__("io")`. Nothing in this file
+    collected it, because it collects *imports*, and that code contains none.
+    A denylist of module names answers "is this one of the names I thought of",
+    which is not the question; the escape hatch has to be closed by name too.
+    """
+
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    return {
+        node.func.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+
+
+#: The ways a module reaches something whose name it never has to write down.
+DYNAMIC_IMPORT = {"__import__", "eval", "exec", "compile"}
 
 
 def test_only_the_boundary_module_imports_fabric():
@@ -48,17 +74,50 @@ OPERATIONAL_MODULES = {
     "socket", "ssl", "http", "urllib", "ftplib", "telnetlib", "smtplib",
     "subprocess", "shutil", "ctypes", "multiprocessing", "asyncio",
     "requests", "httpx", "docker", "paramiko",
+    # Added after a review reached a block device through `io.FileIO` and none
+    # of the names above. These are the file- and device-facing ones the
+    # original set happened not to think of.
+    "io", "fcntl", "mmap", "glob", "tempfile", "importlib", "pty", "termios",
 }
+
+#: The one exemption, named per file rather than dropped from the set above.
+#:
+#: The Fabric boundary asks `importlib.util.find_spec` whether the optional
+#: extra is installed, which is how it reports the absence instead of failing
+#: on it — the whole reason that module exists. Removing `importlib` from the
+#: set would have exempted every file; this exempts one, and says which.
+ALLOWED_IN: dict[str, frozenset[str]] = {FABRIC_BOUNDARY: frozenset({"importlib"})}
 
 
 def test_the_bootstrap_contains_no_operational_code():
     """No network, no enforcement, no installer, no model fetch, no containers."""
     offenders: dict[str, list[str]] = {}
     for path in sorted(PACKAGE_ROOT.rglob("*.py")):
-        found = sorted(_imported_roots(path) & OPERATIONAL_MODULES)
+        forbidden = OPERATIONAL_MODULES - ALLOWED_IN.get(path.name, frozenset())
+        found = sorted(_imported_roots(path) & forbidden)
         if found:
             offenders[path.name] = found
     assert offenders == {}, (
         f"operational imports found: {offenders}. The bootstrap may not reach the "
         f"network, run a process, or touch host storage"
+    )
+
+
+def test_the_bootstrap_cannot_import_something_without_naming_it():
+    """The hole the set above cannot close on its own.
+
+    `__import__("sub" + "process")` imports a module this file's denylist never
+    sees, because no `ast.Import` node exists to collect. A module under `src/`
+    that calls it can reach anything at all, and every guard here would stay
+    green. So the call itself is refused, by name, everywhere in the package.
+    """
+
+    offenders: dict[str, list[str]] = {}
+    for path in sorted(PACKAGE_ROOT.rglob("*.py")):
+        found = sorted(_called_builtins(path) & DYNAMIC_IMPORT)
+        if found:
+            offenders[path.name] = found
+    assert offenders == {}, (
+        f"dynamic import or evaluation found: {offenders}. A module that can name "
+        f"an import at runtime is not bounded by any list of module names"
     )

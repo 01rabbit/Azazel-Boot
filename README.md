@@ -106,6 +106,10 @@ that is the correct outcome.
 - [Recovery](docs/recovery.md) — surprise removal, failed updates and power loss,
   what leaving the host as found does and does not cover, and what survives a
   failed session.
+- [Session mode](docs/session-mode.md) — persistent or ephemeral, decided once
+  per boot; why no key means ephemeral with no exception, why five attempts is
+  not brute-force resistance, and why the passphrase never reaches the module
+  that decides.
 - [Security policy](SECURITY.md) · [Contributing](CONTRIBUTING.md)
 
 ## Program context
