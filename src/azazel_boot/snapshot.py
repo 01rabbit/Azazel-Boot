@@ -55,7 +55,7 @@ D4.1's three-partition layout is not revised.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 
 from .commissioning import SessionBinding, binding_applies
@@ -167,9 +167,9 @@ class PreflightCheck(Enum):
     GENERATION = "generation"
     IMAGE_DIGEST = "image_digest"
     MEDIUM_FENCED = "medium_fenced"
+    VOLUME_QUARANTINED = "volume_quarantined"
 
 
-@dataclass(frozen=True)
 class PreflightVerdict:
     """Read-only, and the whole of what a preflight produces.
 
@@ -177,19 +177,72 @@ class PreflightVerdict:
     member, for the reason `azazel_boot.dirty_write.classify` returns `None`
     rather than a `CLEAN`: a member meaning "fine" is a value later code
     compares against and proceeds on.
+
+    **It is minted by `preflight` and checked by identity**, like
+    `azazel_boot.session_mode.CommissionedMode`. It was a plain frozen
+    dataclass first, and a review pointed out what that meant: the only object
+    saying "a migration may run" was constructible by exactly the caller the
+    preflight exists to gate. `MigrationLedger` read `may_migrate` and nothing
+    else, so `PreflightVerdict(None)` handed to it authorised a migration over
+    a snapshot whose integrity had **failed**, with no preflight ever having
+    run. That is the same "rebuild the object a legitimate caller holds" attack
+    that defeated the fence and then the volume quarantine.
+
+    So a verdict carries a token this module mints, and
+    `verdict_was_minted_here` is what a consumer asks.
     """
 
-    refused_by: PreflightCheck | None
+    __slots__ = ("_refused_by", "_token")
+
+    def __init__(self, refused_by: PreflightCheck | None, token: object = None) -> None:
+        object.__setattr__(self, "_refused_by", refused_by)
+        object.__setattr__(self, "_token", token)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError("a PreflightVerdict is fixed when it is minted")
+
+    def __reduce__(self):
+        raise TypeError("a PreflightVerdict is not serialisable")
+
+    def __repr__(self) -> str:
+        decided = self._refused_by.value if self._refused_by is not None else "may_migrate"
+        return f"PreflightVerdict({decided})"
+
+    @property
+    def refused_by(self) -> PreflightCheck | None:
+        return self._refused_by
 
     @property
     def may_migrate(self) -> bool:
-        return self.refused_by is None
+        """Whether the checks passed. **Not whether this module said so** —
+        that is `verdict_was_minted_here`, and a consumer asks it first."""
+
+        return self._refused_by is None
 
     @property
     def authority(self) -> tuple[()]:
         """Empty. A passed preflight permits a migration; it authorises nothing."""
 
         return ()
+
+
+#: The token `preflight` stamps into the verdicts it mints. A module-private
+#: object with no constructor a caller can reach: identity is the whole of it.
+_MINTED_HERE = object()
+
+
+def verdict_was_minted_here(verdict: PreflightVerdict) -> bool:
+    """Whether this module produced that verdict. Checked by identity.
+
+    A hand-built `PreflightVerdict(None)` is not one, and `MigrationLedger`
+    refuses it rather than reading `may_migrate` and believing it.
+    """
+
+    return (
+        isinstance(verdict, PreflightVerdict)
+        and type(verdict) is PreflightVerdict
+        and verdict._token is _MINTED_HERE
+    )
 
 
 #: Schema versions this build can migrate **to**. A downgrade is not on it.
@@ -235,37 +288,57 @@ def preflight(
     one.
     """
 
+    # Checked, not merely annotated. The descriptor learned that lesson and
+    # these three did not: any truthy object passed as "the binding holds".
+    for name, value in (
+        ("binding_holds", binding_holds),
+        ("generation_holds", generation_holds),
+        ("image_digest_holds", image_digest_holds),
+    ):
+        if not isinstance(value, bool):
+            raise TypeError(f"{name} must be a bool; a truthy object is not a check")
+    if not isinstance(capacity, CapacityReport):
+        raise TypeError("capacity must be a CapacityReport")
+    if snapshot is not None and not isinstance(snapshot, SnapshotDescriptor):
+        raise TypeError("snapshot must be a SnapshotDescriptor or None")
+
     if quarantine.is_fenced:
-        return PreflightVerdict(PreflightCheck.MEDIUM_FENCED)
+        return PreflightVerdict(PreflightCheck.MEDIUM_FENCED, _MINTED_HERE)
+    if quarantine.volume_is_quarantined:
+        # The recovery path treated a quarantined volume as load-bearing and
+        # this one treated it as invisible, which a review caught. ADR-0010 D4
+        # stops the **whole volume** on a suspected torn write, and a schema
+        # migration is a large write to exactly that volume.
+        return PreflightVerdict(PreflightCheck.VOLUME_QUARANTINED, _MINTED_HERE)
 
     if snapshot is None:
         # D7: no flag, no acceptance, no emergency state. An operator cannot
         # consent to this, because what they would be consenting to is the loss
         # of the only path back — so there is no parameter to consent with.
-        return PreflightVerdict(PreflightCheck.SNAPSHOT_ABSENT)
+        return PreflightVerdict(PreflightCheck.SNAPSHOT_ABSENT, _MINTED_HERE)
     if snapshot.container_version not in KNOWN_CONTAINER_VERSIONS:
-        return PreflightVerdict(PreflightCheck.SNAPSHOT_CONTAINER_UNKNOWN)
+        return PreflightVerdict(PreflightCheck.SNAPSHOT_CONTAINER_UNKNOWN, _MINTED_HERE)
     if snapshot.integrity is not SnapshotIntegrity.VERIFIED:
         # `INDETERMINATE` lands here with `FAILED`. D7: ambiguity refuses the
         # migration, and there is no third answer that proceeds.
-        return PreflightVerdict(PreflightCheck.SNAPSHOT_INTEGRITY)
+        return PreflightVerdict(PreflightCheck.SNAPSHOT_INTEGRITY, _MINTED_HERE)
 
     if capacity.available < capacity.required:
         # No degraded migration, no "we can fit most of it". A medium too small
         # keeps the old schema and keeps working.
-        return PreflightVerdict(PreflightCheck.REQUIRED_SPACE)
+        return PreflightVerdict(PreflightCheck.REQUIRED_SPACE, _MINTED_HERE)
 
     if not schema_is_compatible(current=current_schema, target=target_schema):
-        return PreflightVerdict(PreflightCheck.SCHEMA_COMPATIBILITY)
+        return PreflightVerdict(PreflightCheck.SCHEMA_COMPATIBILITY, _MINTED_HERE)
 
     if not binding_holds:
-        return PreflightVerdict(PreflightCheck.BINDING)
+        return PreflightVerdict(PreflightCheck.BINDING, _MINTED_HERE)
     if not generation_holds:
-        return PreflightVerdict(PreflightCheck.GENERATION)
+        return PreflightVerdict(PreflightCheck.GENERATION, _MINTED_HERE)
     if not image_digest_holds:
-        return PreflightVerdict(PreflightCheck.IMAGE_DIGEST)
+        return PreflightVerdict(PreflightCheck.IMAGE_DIGEST, _MINTED_HERE)
 
-    return PreflightVerdict(None)
+    return PreflightVerdict(None, _MINTED_HERE)
 
 
 class RecoveryStage(Enum):
@@ -320,6 +393,8 @@ class Refusal(Enum):
     WORKFLOW_ALREADY_FINISHED = "workflow_already_finished"
     GATE_REFUSED = "gate_refused"
     SNAPSHOT_CHANGED_UNDER_THE_WORKFLOW = "snapshot_changed_under_the_workflow"
+    NOT_THIS_SITTING = "not_this_sitting"
+    VERDICT_NOT_MINTED_BY_A_PREFLIGHT = "verdict_not_minted_by_a_preflight"
 
 
 class RecoveryRefused(Exception):
@@ -346,6 +421,10 @@ class SnapshotAuditEvent(Enum):
     RECOVERY_COMPLETED = "recovery_completed"
     RECOVERY_REFUSED = "recovery_refused"
     RECOVERY_INTERRUPTED = "recovery_interrupted"
+    #: The substitution this design exists to notice. It used to raise and
+    #: leave no trace, so the workflow could simply be retried with the
+    #: original snapshot and nothing recorded that a swap had been attempted.
+    RECOVERY_SNAPSHOT_SUBSTITUTED = "recovery_snapshot_substituted"
 
 
 @dataclass(frozen=True)
@@ -363,15 +442,40 @@ class SnapshotAuditEntry:
     check: PreflightCheck | None = None
     gate: RecoveryGate | None = None
     schema_version: int | None = None
-    fingerprint: str | None = None
+    fingerprint: str | None = field(default=None, repr=False)
+
+    def __repr__(self) -> str:
+        """Redacting, because **this** is the object destined for a log.
+
+        `SnapshotDescriptor.__repr__` redacted the fingerprint with the comment
+        that one in a repr is one in every traceback — and then the same value
+        rendered verbatim through the generated repr of this class, which is
+        what an operator-facing log actually holds. A review found it by
+        rendering `repr(workflow.audit())`, which the absence test had not.
+        """
+
+        parts = [f"event={self.event.value}"]
+        if self.check is not None:
+            parts.append(f"check={self.check.value}")
+        if self.gate is not None:
+            parts.append(f"gate={self.gate.value}")
+        if self.schema_version is not None:
+            parts.append(f"schema_version={self.schema_version}")
+        if self.fingerprint is not None:
+            parts.append("fingerprint=<redacted>")
+        return f"SnapshotAuditEntry({', '.join(parts)})"
 
 
 class RecoveryCandidate:
     """What a completed recovery produces. **It is not a volume.**
 
     It cannot be read, written, exported or mounted, and there is no method
-    here that does any of those. It says which schema version was restored and
-    which snapshot it came from, and its `authority` is `()`.
+    here that does any of those. It says which schema version a restore **would
+    reach** and which snapshot it came from, and its `authority` is `()`.
+
+    Not "was restored": nothing has been restored, by this module or by
+    anything else in this repository. `RECOVERY_COMPLETED` classifies what a
+    caller reported, not an act performed here.
 
     **The medium it came from is still quarantined.** Holding one of these does
     not change that and is not meant to: returning to ordinary use means a
@@ -381,8 +485,18 @@ class RecoveryCandidate:
     decides whether to start that.
 
     Minted by one workflow and checked by identity, like
-    `azazel_boot.session_mode.CommissionedMode`: a copy, a rebuild and an
-    unpickle are not it.
+    `azazel_boot.session_mode.CommissionedMode` — and, unlike the first
+    version of this class, there is now something that can *do* the checking.
+    That version carried the sentence and shipped no checker, so "checked by
+    identity" described a thing nobody could perform; a constructed candidate
+    answered every question exactly as a minted one did.
+
+    **Reading `schema_version` is not asking whether a workflow minted this.**
+    Anyone can build a `RecoveryCandidate(99, …)` and it will answer `99`,
+    because the property reads the field it was handed. Ask
+    :func:`candidate_applies_to` first — the same rule
+    `CommissionedMode.is_persistent` states, in the same words, for the same
+    reason.
     """
 
     __slots__ = ("_schema_version", "_fingerprint")
@@ -415,7 +529,12 @@ class RecoveryCandidate:
 
     @property
     def authority(self) -> tuple[()]:
-        """Empty. A candidate is evidence, not permission."""
+        """Empty. A candidate is evidence, not permission.
+
+        A subclass can override this and nothing type-checks a candidate, which
+        is why :func:`candidate_applies_to` refuses anything that is not
+        exactly this class rather than merely an instance of it.
+        """
 
         return ()
 
@@ -441,6 +560,7 @@ class RecoveryWorkflow:
         "_stage",
         "_audit",
         "_snapshot",
+        "_candidate",
         "_sealed",
     )
 
@@ -453,6 +573,7 @@ class RecoveryWorkflow:
         self._session_id = session_id
         self._stage = RecoveryStage.NOT_STARTED
         self._snapshot: SnapshotDescriptor | None = None
+        self._candidate: RecoveryCandidate | None = None
         self._audit: list[SnapshotAuditEntry] = []
         object.__setattr__(self, "_sealed", True)
 
@@ -501,6 +622,7 @@ class RecoveryWorkflow:
         """
 
         self._require_stage(RecoveryStage.NOT_STARTED)
+        self._require_this_sitting(session_id)
         if not started_by_operator:
             self._refuse(
                 Refusal.RECOVERY_NOT_STARTED_BY_AN_OPERATOR,
@@ -534,6 +656,7 @@ class RecoveryWorkflow:
         """
 
         self._require_stage(RecoveryStage.PREFLIGHT_PASSED)
+        self._require_this_sitting(session_id)
         self._require_the_same_snapshot(snapshot)
         self._require_the_gates(snapshot, observations, session_id=session_id)
 
@@ -562,6 +685,7 @@ class RecoveryWorkflow:
         """
 
         self._require_stage(RecoveryStage.TRIAL_OPEN)
+        self._require_this_sitting(session_id)
         self._require_the_same_snapshot(snapshot)
         self._require_the_gates(
             snapshot, observations, session_id=session_id, acquisition=acquisition
@@ -575,7 +699,20 @@ class RecoveryWorkflow:
             schema_version=snapshot.schema_version,
             fingerprint=snapshot.fingerprint,
         )
-        return RecoveryCandidate(snapshot.schema_version, snapshot.fingerprint)
+        minted = RecoveryCandidate(snapshot.schema_version, snapshot.fingerprint)
+        self._sealed_assign("_candidate", minted)
+        return minted
+
+    def holds(self, candidate: RecoveryCandidate) -> bool:
+        """Whether this workflow minted that candidate. Checked by identity.
+
+        The `is not None` is not redundant: without it an uncommitted workflow
+        answers `True` for `None`, and `None` is what `_candidate` is until a
+        commit — the trap `azazel_boot.persistence.PersistenceSession.holds`
+        was found in.
+        """
+
+        return self._candidate is not None and self._candidate is candidate
 
     def interrupt(self) -> None:
         """The operator stopped, or the machine did. Terminal, and fail-closed.
@@ -595,6 +732,23 @@ class RecoveryWorkflow:
 
     # -- internals ---------------------------------------------------------
 
+    def _require_this_sitting(self, session_id: str) -> None:
+        """The workflow's own sitting, enforced rather than merely stored.
+
+        `_session_id` was assigned in `__init__` and read nowhere, while
+        `__setattr__` claimed "the quarantine, the binding and the sitting
+        cannot be replaced". A field whose presence implies a check that does
+        not exist is worse than no field: a review committed a workflow built
+        for one sitting by passing another one's id to every stage.
+        """
+
+        if session_id != self._session_id:
+            self._refuse(
+                Refusal.NOT_THIS_SITTING,
+                "this workflow belongs to one sitting; a stage asked for "
+                "another is refused rather than answered",
+            )
+
     def _require_stage(self, expected: RecoveryStage) -> None:
         if self._stage in TERMINAL_STAGES:
             self._refuse(
@@ -610,7 +764,18 @@ class RecoveryWorkflow:
             )
 
     def _require_the_same_snapshot(self, snapshot: SnapshotDescriptor) -> None:
+        """Terminal and audited, because a swap is an event, not a typo.
+
+        This used to raise without touching the stage or the audit, so a caller
+        could present a substituted snapshot, be refused, and simply retry with
+        the original — with nothing recording that a substitution had been
+        attempted. The module called this "the substitution this whole design
+        exists to notice", and nothing was left that had noticed it.
+        """
+
         if self._snapshot is None or snapshot != self._snapshot:
+            self._sealed_assign("_stage", RecoveryStage.REFUSED)
+            self._record(SnapshotAuditEvent.RECOVERY_SNAPSHOT_SUBSTITUTED)
             self._refuse(
                 Refusal.SNAPSHOT_CHANGED_UNDER_THE_WORKFLOW,
                 "the snapshot presented now is not the one this workflow "
@@ -690,6 +855,22 @@ class RecoveryWorkflow:
         object.__setattr__(self, name, value)
 
 
+def candidate_applies_to(flow: RecoveryWorkflow, candidate: RecoveryCandidate) -> bool:
+    """Whether this workflow minted that candidate, by identity.
+
+    `type(...) is` rather than `isinstance`, because a subclass can override
+    `authority` and nothing else type-checks a candidate. A constructed one, a
+    subclassed one and one from another workflow are all answered `False`.
+
+    Callers ask this **before** reading `schema_version`, for the reason
+    `azazel_boot.session_mode.mode_applies_to` exists: the fields say what they
+    were handed, and what makes a candidate an answer is that a workflow
+    produced it.
+    """
+
+    return type(candidate) is RecoveryCandidate and flow.holds(candidate)
+
+
 def _raise_gate_refused() -> None:
     """Raise from a frame holding nothing.
 
@@ -710,8 +891,16 @@ def _raise_gate_refused() -> None:
 class MigrationLedger:
     """What a migration recorded, and the refusal that keeps the old schema.
 
-    It holds no port and writes nothing. `refuse` and `note_snapshot_written`
-    record classifications the caller reports; the caller performed the act.
+    It holds no port and writes nothing. `may_migrate` answers, and
+    `note_snapshot_written` records what the caller reports **after** acting.
+
+    They were one method, `record`, which both answered "may this run" and
+    asserted the write had happened — in a repository whose every document says
+    no snapshot has been written. A review pointed out that the audit's only
+    positive classification was a claim about an act that had not occurred and
+    might never occur. (The docstring also named these two methods while the
+    class shipped neither; that is fixed by making them real rather than by
+    correcting the sentence.)
 
     There is deliberately **no** `migrate_without_snapshot`, no `force`, no
     `accept_degraded` and no `overwrite_snapshot`. ADR-0010 D7 refuses a
@@ -741,14 +930,27 @@ class MigrationLedger:
     def audit(self) -> tuple[SnapshotAuditEntry, ...]:
         return tuple(self._audit)
 
-    def record(self, verdict: PreflightVerdict, snapshot: SnapshotDescriptor | None) -> bool:
-        """Record the preflight's answer and say whether a migration may run.
+    def may_migrate(self, verdict: PreflightVerdict) -> bool:
+        """Say whether a migration may run, and record a refusal.
 
-        A refusal records **which check** and nothing behind it — no figure, no
+        The verdict must be one **this module minted**. A hand-built
+        `PreflightVerdict(None)` authorised a migration over a snapshot whose
+        integrity had failed, with no preflight ever having run, because this
+        read `may_migrate` and believed it — the "rebuild the object a
+        legitimate caller holds" attack, for the third time in this codebase.
+
+        A refusal records **which check** and nothing behind it: no figure, no
         capacity, no fingerprint of a snapshot that was not used. The old
         schema keeps working, which is D7's safe outcome rather than a degraded
         one, and a test asserts it is still usable afterwards.
         """
+
+        if not verdict_was_minted_here(verdict):
+            raise RecoveryRefused(
+                Refusal.VERDICT_NOT_MINTED_BY_A_PREFLIGHT,
+                "a migration runs on a verdict this module produced; a value "
+                "that merely has the right shape is not one",
+            )
 
         if not verdict.may_migrate:
             self._audit.append(
@@ -757,8 +959,27 @@ class MigrationLedger:
                 )
             )
             return False
+        return True
 
-        assert snapshot is not None  # a passed preflight had one; D7 requires it
+    def note_snapshot_written(
+        self, verdict: PreflightVerdict, snapshot: SnapshotDescriptor
+    ) -> None:
+        """Record that the caller wrote a snapshot. **After** it did.
+
+        Separate from :meth:`may_migrate` because recording the write at
+        permission time asserts an act that has not happened. The verdict is
+        re-checked here so that this cannot be reached without one.
+        """
+
+        if not verdict_was_minted_here(verdict) or not verdict.may_migrate:
+            raise RecoveryRefused(
+                Refusal.VERDICT_NOT_MINTED_BY_A_PREFLIGHT,
+                "a snapshot is recorded against the preflight that permitted "
+                "it; there is no way to record one without a passed verdict",
+            )
+        if not isinstance(snapshot, SnapshotDescriptor):
+            raise TypeError("note_snapshot_written takes a SnapshotDescriptor")
+
         self._audit.append(
             SnapshotAuditEntry(
                 event=SnapshotAuditEvent.SNAPSHOT_WRITTEN,
@@ -766,4 +987,3 @@ class MigrationLedger:
                 fingerprint=snapshot.fingerprint,
             )
         )
-        return True

@@ -125,10 +125,13 @@ that restarts a finished workflow, because restarting is a new workflow that
 runs every gate again — which is what starting one does.
 
 **The gates run before the trial opens and again before the commit**, not once
-at the start. A medium can be pulled while an operator reads a confirmation
-screen, and a gate checked once is a gate checked at a moment that has passed.
-A test fences the quarantine between the trial and the commit and asserts the
-commit refuses.
+at the start — except key acquisition, which runs only at the commit, because
+that is where an operator is asked to type. A medium can be pulled while an
+operator reads a confirmation screen, and a gate checked once is a gate checked
+at a moment that has passed. Tests fence the quarantine between the start and
+the trial, and again between the trial and the commit, and assert each refuses;
+the trial-side recheck was untested until a review deleted it and the suite
+stayed green.
 
 The gates, in order — D8's four, with two that precede them:
 
@@ -158,10 +161,23 @@ No second partition, no host disk, no network, no USB export, no temporary file
 — not "just while the migration runs". Asserted as an import allowlist plus the
 names that make a call unnecessary (`__builtins__`, `globals`, `vars`, `eval`,
 `exec`, `compile`, `__import__`, `open`, `input`), plus a refusal of calls on a
-subscript. A denylist of module names is one `__import__` wide, which a review
-proved against two of this repository's guards.
+subscript.
 
-Seven audit classifications. `SnapshotAuditEntry` has five fields — `event`,
+**The first version of this paragraph claimed more than the scan did.** It
+boasted that a denylist of module names is one `__import__` wide — true, and a
+review then walked past *this* scan a different way, with no import statement
+at all: `().__class__.__base__.__subclasses__()` to a class whose
+`__globals__["__builtins__"]` yields `open`, and a file written to the host
+disk with the whole suite green. The chain's attribute names are now denied,
+and `getattr` — which had a blanket exemption, and which *was* the hole once
+the names are strings — is allowed only in the seal's one shape,
+`getattr(self, "_sealed", False)`.
+
+**A static scan is not a proof of absence.** Two have now been defeated here,
+each in a way the previous fix did not anticipate. The honest reading is that
+the next hole is closed when it is found.
+
+Eight audit classifications. `SnapshotAuditEntry` has five fields — `event`,
 `check`, `gate`, `schema_version`, `fingerprint` — and **no** field for
 snapshot contents, a byte count, a free-space figure, a capacity, a raw key, a
 passphrase, a device identity, a path or an operator identifier.
@@ -169,9 +185,14 @@ passphrase, a device identity, a path or an operator identifier.
 **The capacity figures never render at all.** `CapacityReport.__repr__` is
 `CapacityReport(<redacted>)`, and a test asserts no digit appears in it: those
 numbers describe how much medium the operator is carrying and how much of it is
-used. `SnapshotDescriptor` redacts its fingerprint for the same reason, and
-keeps the versions, which are this build's vocabulary rather than the
-operator's hardware.
+used.
+
+`SnapshotDescriptor` redacts its fingerprint for the same reason, **and so does
+`SnapshotAuditEntry`** — which is the object actually destined for a log. The
+descriptor's redaction carried the comment that a fingerprint in a repr is one
+in every traceback, and the same value then rendered verbatim through the audit
+entry's generated repr. A review found it by rendering `repr(workflow.audit())`,
+which the absence test had not.
 
 The refusal raised from `_raise_gate_refused` holds **nothing** in its frame —
 no gate, no snapshot, no binding, no sitting. The limit `session_mode` states
@@ -189,6 +210,16 @@ frame cannot forget its own argument.
   the real LUKS unlock do not exist — [ADR-0011](adr/0011-unlock-helper-boundary.md)
   decides their shape and nothing implements it — so no acquisition in this
   repository can return `OPENED`.
+- **Nothing is restored and nothing is written.** `RECOVERY_COMPLETED` and
+  `SNAPSHOT_WRITTEN` are classifications of what a caller reports, not acts
+  this module performed; a candidate says which schema version it *would*
+  restore to. `MigrationLedger` used to record `SNAPSHOT_WRITTEN` at permission
+  time, before the caller had acted, which is now two methods: `may_migrate`
+  answers, `note_snapshot_written` records afterwards.
+- **`azazel_boot.snapshot` is imported by nothing in `src/`.** No consumer
+  exists for a `RecoveryCandidate`. The central claim is therefore true by
+  structure *and* currently by disuse, and the structure is what these tests
+  are for — it has to hold when something is finally wired up.
 - **The atomicity of a trial is the caller's**, and is not demonstrated here.
   This module decides whether a trial may open and whether a commit may happen;
   what happens to bytes between those two points is performed elsewhere, on a

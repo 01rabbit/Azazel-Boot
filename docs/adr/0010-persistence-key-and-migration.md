@@ -1,14 +1,22 @@
 # ADR-0010: Persistence key handling, dirty-write detection, and migration
 
-Status: **accepted (2026-09-22). D1–D9 implemented in software and
-hardware-unverified; D10 is a rule the others are held to, not a component.** The owner decided D1–D10 below.
+Status: **accepted (2026-09-22). D1–D8 implemented in software and
+hardware-unverified; D9 and D10 asserted by static scan, which is not a proof
+of absence; nothing implemented on hardware.** The owner decided D1–D10 below.
 `azazel_boot.session_mode` implements D1, D2 and D3 — see
 [session mode](../session-mode.md); `azazel_boot.dirty_write` with
 `azazel_boot.persistence` implements D4 and D5, see
 [persistence](../persistence.md) §4.1; and `azazel_boot.snapshot` implements
-D6, D7 and D8, with D9's host-write and fence-bypass refusals asserted across
-all three — see [snapshot and recovery](../snapshot-and-recovery.md). All of it
-on no hardware: no passphrase has been attempted, no volume opened, no USB SSD
+D6, D7 and D8 — see [snapshot and recovery](../snapshot-and-recovery.md).
+
+**D9 and D10 are held by static scan, and a static scan is not a proof of
+absence.** An adversarial review defeated this repository's reachability
+guards twice: once by assembling module names from fragments for `__import__`,
+and once by walking `().__class__.__base__.__subclasses__()` to `open` with no
+import statement at all, writing to the host disk with the whole suite green.
+Both holes are closed and both are now named in the guards; the honest reading
+of that history is that the next one is closed when it is found, not that none
+remains. All of it on no hardware: no passphrase has been attempted, no volume opened, no USB SSD
 pulled mid-write, no snapshot written and no restore run on any device.
 [#7](https://github.com/01rabbit/Azazel-Boot/issues/7) stays open, and so do
 the three children this record names.
@@ -258,7 +266,7 @@ medium has been pulled mid-write.** D1–D3 exist as decision logic in
 `azazel_boot.session_mode`, D4–D5 in `azazel_boot.dirty_write` and
 `azazel_boot.persistence`, and D6–D8 in `azazel_boot.snapshot`. All three open
 nothing, write nothing and read nothing: they decide what an outcome reported
-by something else means. D9 and D10 are rules those modules are held to by
-test, not components with code of their own. #7 and its three
+by something else means. **D9 and D10 have no code of their own and are held by
+static scan only** — see the status line above for what that is worth. #7 and its three
 children stay open, and every one of them carries `hardware-unverified` until a
 real USB SSD and a real laptop say otherwise.
