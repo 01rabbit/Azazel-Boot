@@ -114,6 +114,11 @@ def test_the_severity_order_covers_every_refusal_an_image_check_can_raise() -> N
     someone adds a fault to `verify_initramfs` and forgets the order, and the
     build gate crashes past every `except` — went straight through. Two
     manifests raise every fault the function can raise between them.
+
+    The sample is these two manifests, so a fault reached through a **new
+    manifest field** needs a third one here. The consequence of missing one is
+    now bounded rather than fatal: `ImageRefused` sorts an unranked refusal last
+    instead of raising.
     """
 
     everything_wrong = manifest(

@@ -72,10 +72,13 @@ device with no rule.
 
 **What a device says about itself decides nothing.** Classification is identity
 against identity. When a device carrying the medium's identity says it is *not*
-the medium, the classification is unaffected and the disagreement is written to
-the audit as `identity_claim_mismatch`: duplicate or blank serials on USB and
-NVMe bridges are a known class of hardware, nothing in this repository yet
-constrains how an identity is constructed, and a collision nobody notices is
+the medium — **or a device on another identity claims that it is** — the
+classification is unaffected and the disagreement is written to the audit as
+`identity_claim_mismatch`. Both directions are recorded: duplicate or blank
+serials on USB and NVMe bridges are a known class of hardware and nothing here
+yet constrains how an identity is constructed, while a device *asserting* it is
+the medium is a deliberate claim of the kind the threat model's
+transient-physical-access adversary would present. A collision nobody notices is
 worse than one that is merely allowed. An earlier version consulted the class a device asserts, and a
 second review showed the consequence: one hostile or garbled observation could
 demote the medium for the rest of the session — an untrusted input could not
@@ -144,6 +147,13 @@ is not consumed by an export; an operator who wants it to end calls
 after a refusal the previous approval is still live even though the audit's last
 approval entry reads as a refusal. The audit records the grant, any
 supersession, the withdrawal, and a withdrawal that had nothing to withdraw.
+
+**The audit is unbounded and RAM-resident.** Every evaluated attempt appends an
+entry, and a flapping device appends one per re-appearance. Threat model
+section 4 treats devices arriving and leaving as expected, so a long session with
+a misbehaving bridge grows the record without limit. Nothing caps or summarises
+it yet; a cap with a suppressed-count would keep the record's meaning and bound
+the memory, and that is a design decision rather than a fix.
 
 The audit keeps the **quarantine's own conclusion** — not the class the device
 claimed, which an impostor sets freely — with the action and the verdict, and it

@@ -342,13 +342,20 @@ class Quarantine:
         is_medium = device.identity == self._boot_medium_identity
         disposition = Disposition.BOOT_MEDIUM if is_medium else Disposition.QUARANTINED
 
-        if is_medium and device.device_class is not DeviceClass.BOOT_MEDIUM:
-            # The identity says medium and the device says otherwise. Identity
-            # decides — the class is untrusted — but the disagreement is
-            # information, and an unrecorded collision is an invisible one.
-            # Duplicate or blank serials on USB and NVMe bridges are a known
-            # class of hardware, and nothing in this repository yet constrains
-            # how an identity is constructed.
+        if is_medium != (device.device_class is DeviceClass.BOOT_MEDIUM):
+            # The identity and the device's own claim disagree, in either
+            # direction. Identity decides — the class is untrusted — but the
+            # disagreement is information, and an unrecorded collision is an
+            # invisible one.
+            #
+            # Both directions matter, and the first version recorded only one.
+            # The medium's identity carried by a device saying it is host
+            # storage is an accident: duplicate or blank serials on USB and NVMe
+            # bridges are a known class of hardware, and nothing here yet
+            # constrains how an identity is constructed. A device on another
+            # identity *asserting* it is the medium is a deliberate claim, and
+            # it is what the threat model's transient-physical-access adversary
+            # would present.
             self._record(disposition, "identity_claim_mismatch", "recorded")
 
         if previous is not None:
@@ -356,6 +363,18 @@ class Quarantine:
 
         self._dispositions[device.identity] = disposition
         return disposition
+
+    def __repr__(self) -> str:
+        """Deliberately says nothing about what has been observed.
+
+        A dataclass-generated repr printed `_dispositions`, so every observed
+        identity reached any traceback, log line or debugger frame holding a
+        `Quarantine` — the property `AuditEntry` and `ExportRefused` are built to
+        preserve. Dropping the dataclass fixed it incidentally; this makes it a
+        decision.
+        """
+
+        return f"Quarantine(session=<redacted>, observed={len(self._dispositions)})"
 
     def medium_is_bound(self) -> bool:
         """Whether the medium has been seen this session.
@@ -365,6 +384,9 @@ class Quarantine:
         was refused", which is what the audit shows either way.
         """
 
+        # Identity equality decides classification, so "present in the map" and
+        # "holds BOOT_MEDIUM" are the same question today. The stricter form is
+        # written out so a future change to `observe` cannot quietly widen it.
         return self._dispositions.get(self._boot_medium_identity) is Disposition.BOOT_MEDIUM
 
     def disposition(self, device: Device) -> Disposition | None:
@@ -467,7 +489,12 @@ class Quarantine:
             )
 
     def _withdraw_on_reappearance(self, identity: str, disposition: Disposition) -> None:
-        """A device that appeared again may not be the device that was approved."""
+        """A device that appeared again may not be the device that was approved.
+
+        No disposition test here: an approval can never name the medium, so
+        every approval this could match belongs to a quarantined device.
+        Restricting it would be a redundancy, not a check.
+        """
 
         if self._approval is not None and self._approval.target_identity == identity:
             self._approval = None

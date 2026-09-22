@@ -72,11 +72,14 @@ def test_the_boot_medium_is_recognised_by_identity() -> None:
     assert a_quarantine().disposition(BOOT_MEDIUM) is Disposition.BOOT_MEDIUM
 
 
-def test_a_device_claiming_to_be_the_boot_medium_is_quarantined() -> None:
-    """Identity decides. A class an impostor sets on itself does not."""
+def test_a_device_claiming_to_be_the_boot_medium_is_quarantined_and_recorded() -> None:
+    """Identity decides. A class an impostor sets on itself does not — and it is
+    a deliberate assertion, so it is written down."""
 
+    quarantine = a_quarantine()
     impostor = Device(identity="another-usb", device_class=DeviceClass.BOOT_MEDIUM)
-    assert a_quarantine().observe(impostor) is Disposition.QUARANTINED
+    assert quarantine.observe(impostor) is Disposition.QUARANTINED
+    assert [entry.action for entry in quarantine.audit()] == ["identity_claim_mismatch"]
 
 
 @pytest.mark.parametrize("claimed", list(DeviceClass), ids=lambda c: c.value)
@@ -381,6 +384,17 @@ def test_a_device_disagreeing_with_the_medium_identity_is_recorded() -> None:
     ] == ["identity_claim_mismatch"]
     quarantine.observe(BOOT_MEDIUM)
     assert [entry.action for entry in quarantine.audit()] == ["identity_claim_mismatch"]
+
+
+def test_the_quarantine_itself_renders_no_identity() -> None:
+    """A generated repr printed every observed identity into any traceback."""
+
+    quarantine = a_quarantine()
+    quarantine.observe(HOST_NVME)
+    rendered = repr(quarantine)
+    for identity in (MEDIUM_ID, HOST_NVME.identity):
+        assert identity not in rendered
+    assert "s1" not in rendered
 
 
 # --- the audit -------------------------------------------------------------
