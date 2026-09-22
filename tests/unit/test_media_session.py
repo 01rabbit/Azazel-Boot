@@ -87,7 +87,7 @@ def test_an_ineligible_device_is_listed_without_a_code() -> None:
     assert offers[0].eligibility is Eligibility.INTERNAL_DISK
     assert offers[0].target_code is None
     with pytest.raises(SelectionRefused):
-        session.claim("m1-01")
+        session.claim("m1-1-01")
 
 
 def test_only_eligible_devices_consume_a_code() -> None:
@@ -101,31 +101,52 @@ def test_only_eligible_devices_consume_a_code() -> None:
         ]
     )
     codes = [offer.target_code for offer in offers]
-    assert codes == [None, "m1-01", None, "m1-02"]
+    assert codes == [None, "m1-1-01", None, "m1-1-02"]
 
 
 def test_a_code_resolves_to_the_device_as_enumerated() -> None:
     session = MediaSession("m1")
     session.offer([candidate(identity="usb-a")])
-    assert session.claim("m1-01").identity == "usb-a"
+    assert session.claim("m1-1-01").identity == "usb-a"
 
 
 def test_a_code_is_single_use() -> None:
     session = MediaSession("m1")
     session.offer([candidate(identity="usb-a")])
-    session.claim("m1-01")
+    session.claim("m1-1-01")
     with pytest.raises(SelectionRefused) as refused:
-        session.claim("m1-01")
+        session.claim("m1-1-01")
     assert refused.value.refusal is Refusal.ALREADY_USED
 
 
 def test_a_code_from_an_earlier_listing_does_not_resolve() -> None:
-    """Re-enumerating invalidates the previous view of the world."""
+    """Re-enumerating invalidates the previous view of the world.
+
+    An adversarial review found the first version of this module reissuing the
+    same positional code, so a code an operator had written down for a blank
+    stick resolved, after a re-listing, to an evidence disk. The substitution
+    happened here — upstream of every check the writer performs.
+    """
 
     session = MediaSession("m1")
     session.offer([candidate(identity="usb-a")])
     session.offer([candidate(identity="usb-b")])
-    assert session.claim("m1-01").identity == "usb-b"
+    with pytest.raises(SelectionRefused) as refused:
+        session.claim("m1-1-01")
+    assert refused.value.refusal is Refusal.UNKNOWN_CODE
+    assert session.claim("m1-2-01").identity == "usb-b"
+
+
+def test_a_spent_code_stays_spent_across_a_re_listing() -> None:
+    """Re-enumeration must not hand a used code back."""
+
+    session = MediaSession("m1")
+    session.offer([candidate(identity="usb-a")])
+    session.claim("m1-1-01")
+    session.offer([candidate(identity="usb-b")])
+    with pytest.raises(SelectionRefused) as refused:
+        session.claim("m1-1-01")
+    assert refused.value.refusal is Refusal.ALREADY_USED
 
 
 def test_a_code_from_another_session_does_not_resolve() -> None:
@@ -134,7 +155,7 @@ def test_a_code_from_another_session_does_not_resolve() -> None:
     second = MediaSession("m2")
     second.offer([candidate(identity="usb-a")])
     with pytest.raises(SelectionRefused) as refused:
-        second.claim("m1-01")
+        second.claim("m1-1-01")
     assert refused.value.refusal is Refusal.UNKNOWN_CODE
 
 
@@ -144,6 +165,15 @@ def test_the_operator_screen_carries_no_identity() -> None:
     screen = offers[0].describe_for_screen()
     assert set(screen) == {*SCREEN_FIELDS, "eligibility", "target_code"}
     assert "stable-identity-1" not in repr(screen)
+
+
+def test_no_default_rendering_prints_the_identity() -> None:
+    """`describe_for_screen` is a discipline; `repr` is what a log actually calls."""
+
+    session = MediaSession("m1")
+    offers = session.offer([candidate(identity="WWN-0x5001234")])
+    for rendered in (repr(offers[0]), repr(offers[0].candidate), f"{offers[0]}"):
+        assert "WWN-0x5001234" not in rendered
 
 
 def test_the_screen_carries_what_a_human_needs_to_pick_the_right_object() -> None:

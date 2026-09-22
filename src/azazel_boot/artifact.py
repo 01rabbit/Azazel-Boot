@@ -128,9 +128,21 @@ class ArtifactRecord:
 
 @dataclass(frozen=True)
 class Verification:
-    """The answer, with the reason when the answer is no."""
+    """The answer, the reason when the answer is no, and **what it is about**.
+
+    An adversarial review found the first version of this type carried only an
+    outcome. A caller could then pair a verified artifact's `Verification` with
+    a different record and a different file, and the writer — which checked only
+    "some verification succeeded" — would write the unverified image and label
+    the medium valid. So the answer now names its subject, and the writer
+    compares both digests against what it is actually about to write.
+    """
 
     outcome: VerificationOutcome
+    #: The digest measured over the artifact that was checked.
+    measured_digest: str
+    #: The digest the record claims for its payload.
+    record_digest: str
     refusal: VerificationRefusal | None = None
 
     @property
@@ -138,6 +150,14 @@ class Verification:
         """Only a verified signature authorises a destructive write."""
 
         return self.outcome is VerificationOutcome.SIGNATURE_VERIFIED
+
+    def is_about(self, record: ArtifactRecord, measured_digest: str) -> bool:
+        """Whether this answer is about *this* record and *these* bytes."""
+
+        return (
+            self.record_digest == record.unsigned_payload_digest
+            and self.measured_digest == measured_digest
+        )
 
 
 #: A signature verifier: (record, signature) -> bool. There is no default
@@ -153,10 +173,15 @@ def parse(document: object) -> ArtifactRecord:
 
     unknown = sorted(set(document) - set(RECORD_FIELDS))
     if unknown:
-        raise RecordRefused(Refusal.UNKNOWN_FIELD, str(unknown))
+        raise RecordRefused(Refusal.UNKNOWN_FIELD, _bounded(str(unknown)))
 
     for name in RECORD_FIELDS:
         if name in OPTIONAL_FIELDS:
+            # Absent is a valid value here. *Present and empty* is not: an
+            # empty signature would read as signed, which is the one place
+            # where a truncated record decides whether a medium may be written.
+            if document.get(name) is not None and not str(document[name]).strip():
+                raise RecordRefused(Refusal.EMPTY_FIELD, name)
             continue
         if name not in document:
             raise RecordRefused(Refusal.MISSING_FIELD, name)
@@ -166,7 +191,7 @@ def parse(document: object) -> ArtifactRecord:
 
     claim = document["compatibility_claim"]
     if claim not in COMPATIBILITY_CLAIMS:
-        raise RecordRefused(Refusal.UNKNOWN_COMPATIBILITY_CLAIM, repr(claim))
+        raise RecordRefused(Refusal.UNKNOWN_COMPATIBILITY_CLAIM, _bounded(repr(claim)))
 
     if document.get("signature") is not None and document.get("signed_artifact_digest") is None:
         raise RecordRefused(
@@ -198,14 +223,32 @@ def verify(
     module opens no file: what it is given is what it judges.
     """
 
+    about = {
+        "measured_digest": measured_digest,
+        "record_digest": record.unsigned_payload_digest,
+    }
     if measured_digest != record.unsigned_payload_digest:
-        return Verification(VerificationOutcome.REFUSED, VerificationRefusal.DIGEST_MISMATCH)
+        return Verification(
+            VerificationOutcome.REFUSED, refusal=VerificationRefusal.DIGEST_MISMATCH, **about
+        )
     if not record.is_signed:
-        return Verification(VerificationOutcome.DIGEST_ONLY, VerificationRefusal.UNSIGNED)
+        return Verification(
+            VerificationOutcome.DIGEST_ONLY, refusal=VerificationRefusal.UNSIGNED, **about
+        )
     if signature_verifier is None:
-        return Verification(VerificationOutcome.DIGEST_ONLY, VerificationRefusal.NO_VERIFIER)
+        return Verification(
+            VerificationOutcome.DIGEST_ONLY, refusal=VerificationRefusal.NO_VERIFIER, **about
+        )
     if not signature_verifier(record, str(record["signature"])):
         return Verification(
-            VerificationOutcome.REFUSED, VerificationRefusal.SIGNATURE_INVALID
+            VerificationOutcome.REFUSED,
+            refusal=VerificationRefusal.SIGNATURE_INVALID,
+            **about,
         )
-    return Verification(VerificationOutcome.SIGNATURE_VERIFIED)
+    return Verification(VerificationOutcome.SIGNATURE_VERIFIED, **about)
+
+
+def _bounded(value: str, limit: int = 120) -> str:
+    """Keep an untrusted value from becoming an unbounded log line."""
+
+    return value if len(value) <= limit else value[:limit] + "...(truncated)"

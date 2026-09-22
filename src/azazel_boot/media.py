@@ -8,20 +8,25 @@ the disk they cannot afford to lose. A target code exists so that the identity
 the operator confirmed and the device the writer opens are the same object,
 checked, rather than the same string, trusted.
 
-Three properties are structural rather than enforced by care:
+Three properties carry the safety here:
 
-*A candidate carries no model and no serial.* Not "does not print them" — the
-dataclass has no field for them, so a rendering cannot leak what the model
-cannot hold (contract section 7.6).
+*A candidate carries no model and no serial.* The dataclass has no field for
+them, so a rendering cannot leak what the model cannot hold. The stable
+`identity` **is** a field — the writer needs it — so it is kept out of renderings
+by an explicit `__repr__` rather than by absence, and contract section 7.6
+covers it too.
 
 *An ineligible device is never given a code.* It is listed with its refusal so
 an operator can see why their disk is not offered, and there is no code to type
 for it. A refusal that can still be selected is a prompt, and a prompt is
 something people click through.
 
-*A code belongs to one session and one use.* Codes are issued per enumeration.
-A code from an earlier listing does not resolve, so a device cannot be selected
-against a view of the world that has since changed.
+*A code names one enumeration, and is spent by one use.* The code carries the
+enumeration it came from, so a code written down before a re-listing does not
+resolve afterwards — it does not silently come to mean whichever device now
+occupies that position. An adversarial review found exactly that defect in the
+first version of this module: `m1-01` was reissued by the next listing and a
+code an operator had noted for a blank stick resolved to an evidence disk.
 """
 
 from __future__ import annotations
@@ -62,7 +67,7 @@ class SelectionRefused(Exception):
         self.detail = detail
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class MediaCandidate:
     """A device as enumerated.
 
@@ -81,14 +86,36 @@ class MediaCandidate:
     internal: bool
     holds_running_root: bool
 
+    def __repr__(self) -> str:
+        """Redacted: a default repr would print the identity into any log.
 
-@dataclass(frozen=True)
+        `logging.info("%s", candidate)`, an f-string, a traceback with captured
+        locals — each of those is a rendering nobody wrote, and the identity is
+        what contract section 7.6 keeps off them.
+        """
+
+        return (
+            f"MediaCandidate(identity=<redacted>, capacity_bytes={self.capacity_bytes}, "
+            f"partition_table={self.partition_table!r}, bus_path={self.bus_path!r}, "
+            f"physical_label={self.physical_label!r}, removable={self.removable}, "
+            f"mounted={self.mounted}, internal={self.internal}, "
+            f"holds_running_root={self.holds_running_root})"
+        )
+
+
+@dataclass(frozen=True, repr=False)
 class MediaOffer:
     """One enumerated device, with a code if it may be written to."""
 
     candidate: MediaCandidate
     eligibility: Eligibility
     target_code: str | None
+
+    def __repr__(self) -> str:
+        return (
+            f"MediaOffer(candidate={self.candidate!r}, "
+            f"eligibility={self.eligibility}, target_code={self.target_code!r})"
+        )
 
     def describe_for_screen(self) -> dict[str, object]:
         """What an operator sees. Identity never appears here."""
@@ -130,14 +157,23 @@ class MediaSession:
 
     def __init__(self, session_id: str) -> None:
         self.session_id = session_id
+        self._enumeration = 0
         self._offered: dict[str, MediaCandidate] = {}
+        #: Spent codes, kept for the whole session. Clearing this on a new
+        #: listing would make a spent code usable again.
         self._used: set[str] = set()
 
     def offer(self, candidates: list[MediaCandidate]) -> tuple[MediaOffer, ...]:
-        """Assess every candidate; issue a code only to the eligible ones."""
+        """Assess every candidate; issue a code only to the eligible ones.
 
+        Each listing gets its own code space. A code from an earlier listing
+        therefore fails to resolve rather than resolving to whichever device now
+        occupies that position — the substitution would otherwise happen here,
+        upstream of every check the writer performs.
+        """
+
+        self._enumeration += 1
         self._offered = {}
-        self._used = set()
         offers: list[MediaOffer] = []
         issued = 0
         for candidate in candidates:
@@ -145,7 +181,7 @@ class MediaSession:
             code: str | None = None
             if eligibility is Eligibility.ELIGIBLE:
                 issued += 1
-                code = f"{self.session_id}-{issued:02d}"
+                code = f"{self.session_id}-{self._enumeration}-{issued:02d}"
                 self._offered[code] = candidate
             offers.append(MediaOffer(candidate, eligibility, code))
         return tuple(offers)
@@ -154,11 +190,14 @@ class MediaSession:
         """Resolve a code to the candidate as it was enumerated, once."""
 
         if target_code in self._used:
-            raise SelectionRefused(Refusal.ALREADY_USED, target_code)
+            raise SelectionRefused(
+                Refusal.ALREADY_USED, "a code names one write, and this one is spent"
+            )
         if target_code not in self._offered:
             raise SelectionRefused(
                 Refusal.UNKNOWN_CODE,
-                "the code was not issued by this listing; re-run list-media",
+                "the code was not issued by the current listing; re-run list-media "
+                "and read the code off the device you mean",
             )
         self._used.add(target_code)
         return self._offered[target_code]

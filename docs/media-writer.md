@@ -29,6 +29,13 @@ Verification produces one of three outcomes:
 | `digest_only` | the digest matched; the record is unsigned, or no verifier was wired | no |
 | `refused` | the digest did not match, or the signature was rejected | no |
 
+A verification also carries **what it is about** — the digest it was measured
+over and the digest its record claims. The write authority re-measures the
+artifact and refuses unless the verification is about that record and those
+bytes. Without that binding, a verification obtained for one artifact
+authorises writing another, which is what an adversarial review of the first
+version of these modules demonstrated.
+
 **Verification is injected and the default verifies nothing.** Boot has no
 signing key, no signer role and no signed artifact
 ([release policy](release-policy.md) section 1), and Ed25519 is outside the
@@ -61,32 +68,60 @@ An ineligible device is listed with its refusal and **no code**, so there is
 nothing to type for it. A refusal that can still be selected is a prompt, and a
 prompt is something people click through.
 
-Codes are issued per enumeration, belong to one session, and are single-use. A
-code from an earlier listing does not resolve: a device must not be selected
-against a view of the world that has since changed.
+Codes carry the enumeration that issued them (`m1-2-01` is the first eligible
+device of the second listing), belong to one session, and are spent by one use.
+A code from an earlier listing does not resolve, and a spent code stays spent
+across a re-listing.
 
-`MediaCandidate` has **no model field and no serial field**. Not "does not print
-them" — the model cannot hold them, so no rendering, log, report or export can
-leak them. The operator screen carries capacity, bus path, physical label,
-eligibility and the code; the stable identity never reaches it.
+The first version of this module reissued the same positional code on every
+listing, so a code an operator had written down for a blank stick resolved,
+after they re-ran `list-media`, to an evidence disk — a substitution upstream of
+every check the writer performs. That is why the enumeration is in the code.
+
+`MediaCandidate` has **no model field and no serial field**: the model cannot
+hold them, so no rendering can leak them. The stable identity *is* a field —
+the writer needs it — so it is kept out of renderings by an explicit `__repr__`
+on every type that holds one (`MediaCandidate`, `MediaOffer`, `Planned`,
+`TargetConfirmed`, `Authorised`), because a default repr reaches a log through
+an f-string nobody thought about. The operator screen carries capacity, bus
+path, physical label, eligibility and the code.
 
 ## 3. The write
 
-The two confirmations are types, not flags: `plan` then `confirm_target` then
-`confirm_destruction` then `execute`, and `execute` accepts only the value the
-last of those produces. There is no `force` and no `yes`.
+An authorisation is **issued, not constructed**. A `WriteAuthority` holds the
+enumeration session, claims the target itself, re-measures the artifact, and
+mints a nonce; `execute` refuses an authorisation it did not issue and spends
+the nonce, so an authorisation is single-use rather than replayable. The first
+version made the three states public dataclasses and let `execute` trust what it
+was handed — one line built an authorisation around an unverified artifact and
+the medium was erased and reported valid.
+
+The two confirmations remain separate steps: `plan`, `confirm_target`,
+`confirm_destruction`, `execute`. There is no `force` and no `yes`.
 
 At write time, before anything is touched, the writer re-reads the device and
-compares identity, removability, capacity and partition table against the
-enumeration the code was issued against. Any difference is a refusal. So is a
-device that disappeared, one that has become ineligible since the listing, and
-one that could not be unmounted.
+compares identity, removability, capacity, partition table, **bus path and
+physical label** against the enumeration the code was issued against. The last
+two are there because they are what an operator physically identifies the object
+by; comparing only machine attributes accepts a different stick of the same
+model in a different port. Comparing the identity a probe was queried with
+against the identity it returns is a check on the probe, not on the device, and
+is documented as such.
 
-Afterwards the medium is read back and digested against the record. There is no
-outcome meaning "written but unchecked": `written_and_verified` requires the
-match, and anything else is `verification_failed`, whose medium is never
-described as valid. `inspect` on such a medium reports the mismatch rather than
-the record.
+Afterwards the medium is read back over the artifact's own measured length —
+not over the number the writer reports about its own work — and digested against
+the record. A short write fails on its own terms. There is no outcome meaning
+"written but unchecked": `written_and_verified` requires both, and anything else
+is `verification_failed`, whose medium is never described as valid. `inspect` on
+such a medium reports the mismatch rather than the record, and takes a candidate
+from a listing rather than a bare device name.
+
+**A mounted device is refused with no remedy offered here.** `list-media` will
+not offer a stick a desktop has automounted, and this version deliberately does
+not unmount it on the operator's behalf. The operator unmounts it and re-runs
+`list-media`. An explicit unmount-then-write step is a change to
+[the contract](builder-writer-contract.md) section 7.4 and would need its own
+revision; it is named here so nobody discovers the gap while holding a stick.
 
 Persistence is not part of this. Creating encrypted persistence is a separate
 explicit operation on the USB medium only
@@ -96,8 +131,11 @@ modules can start it.
 ## 4. How this is tested, and what that does not prove
 
 Every test uses a file as the device. **No test touches `/dev`, a real disk or a
-loop device**, and a syntax-tree scan asserts the writer module names no device
-path and imports nothing that could open one.
+loop device.** A syntax-tree scan asserts that none of the three modules carries
+a device-path literal, that the writer imports none of the named modules that
+could open a device, and that it calls no `open()`. That is a blacklist plus a
+structural fact — every filesystem effect is behind a `Protocol` — rather than a
+proof that nothing can be opened.
 
 That gives a complete exercise of the decision logic and **no evidence at all**
 about hardware. Nothing here shows that a medium can be written, that a written

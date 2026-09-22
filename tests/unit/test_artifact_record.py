@@ -181,6 +181,33 @@ def test_only_a_verified_signature_authorises_a_write() -> None:
     assert result.may_be_written is True
 
 
+@pytest.mark.parametrize("name", OPTIONAL_FIELDS)
+@pytest.mark.parametrize("value", ["", "   "])
+def test_a_present_but_empty_optional_field_is_refused(name: str, value: str) -> None:
+    """Absent is valid; present and empty is a truncated record reading as signed."""
+
+    with pytest.raises(RecordRefused) as refused:
+        parse(a_record(**{name: value}))
+    assert refused.value.refusal is Refusal.EMPTY_FIELD
+
+
+def test_an_empty_signature_does_not_read_as_signed() -> None:
+    with pytest.raises(RecordRefused):
+        parse(a_record(signature="", signed_artifact_digest="sha256:" + "8" * 64))
+
+
+def test_a_verification_names_the_record_and_the_bytes_it_is_about() -> None:
+    """A verification that named nothing authorised writing a different artifact."""
+
+    result = verify(parse(signed_record()), DIGEST, signature_verifier=lambda _r, _s: True)
+    assert result.measured_digest == DIGEST
+    assert result.record_digest == DIGEST
+    assert result.is_about(parse(signed_record()), DIGEST) is True
+    assert result.is_about(parse(signed_record()), "sha256:" + "0" * 64) is False
+    other = a_record(unsigned_payload_digest="sha256:" + "f" * 64)
+    assert result.is_about(parse(other), DIGEST) is False
+
+
 def test_an_evaluation_record_does_not_parse_as_a_release_record() -> None:
     """ADR-0009 D8.1: an evaluation build cannot become writable by renaming."""
 

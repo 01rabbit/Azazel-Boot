@@ -53,6 +53,11 @@ class Component:
 COMPONENTS: tuple[Component, ...] = (
     Component("image_builder", "absent", "no image is built; no builder is chosen"),
     Component("initramfs_quarantine", "absent", "the no-host-write property has no implementation"),
+    Component(
+        "media_writer",
+        "absent",
+        "decision logic only: it opens no device, and no medium has been written",
+    ),
     Component("persistence", "absent", "no encrypted USB persistence"),
     Component("commissioning", "absent", "no hardware inventory and no operator confirmation flow"),
     Component("networking", "absent", "no NIC roles, no capture, no enforcement"),
