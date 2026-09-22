@@ -312,6 +312,28 @@ PREFLIGHT_ORDER = (
 #: not once the stage is terminal.
 _MOVES_DURING_A_RECOVERY = frozenset({"_stage", "_snapshot", "_pinned", "_candidate"})
 
+#: The edges the stage may travel. Naming the fields that move was not enough:
+#: `_stage` and `_pinned` were both on the list above and `NOT_STARTED` and
+#: `TRIAL_OPEN` are both non-terminal, so a review jumped straight between them
+#: and minted a candidate whose entire audit was `['recovery_completed']` — no
+#: start, no operator, no trial — through a bound method on every instance.
+#: Written once, when the workflow starts, and never again.
+_PINNED_AT_THE_START = frozenset({"_snapshot", "_pinned"})
+
+_STAGE_EDGES = frozenset(
+    {
+        ("not_started", "preflight_passed"),
+        ("not_started", "refused"),
+        ("not_started", "interrupted"),
+        ("preflight_passed", "trial_open"),
+        ("preflight_passed", "refused"),
+        ("preflight_passed", "interrupted"),
+        ("trial_open", "committed"),
+        ("trial_open", "refused"),
+        ("trial_open", "interrupted"),
+    }
+)
+
 
 def _require_a_real_quarantine(quarantine: object) -> None:
     """`type(...) is`, not `isinstance`.
@@ -667,7 +689,17 @@ class RecoveryGate(Enum):
 
     MEDIUM_FENCED = "medium_fenced"
     NOTHING_TO_RECOVER = "nothing_to_recover"
+    #: **Which medium is being recovered.** This gate used to be the host
+    #: binding wearing D8 gate 1's name: `binding_applies` compares a host
+    #: fingerprint and a sitting, and a review committed a recovery over a
+    #: quarantine that had never observed *any* device, and over two different
+    #: media identities in turn, because nothing in the workflow ever asked
+    #: what it was recovering. The quarantine is asked, through its own
+    #: question, so no device identity enters this module.
     TARGET_BINDING = "target_binding"
+    #: The host and the sitting — what `binding_applies` actually answers, now
+    #: named for what it is rather than borrowed for D8 gate 1.
+    HOST_BINDING = "host_binding"
     KEY_ACQUISITION = "key_acquisition"
     INTEGRITY_VERIFICATION = "integrity_verification"
     OPERATOR_CONFIRMATION = "operator_confirmation"
@@ -690,6 +722,16 @@ class Refusal(Enum):
     #: write — for an audit whose only positive classification is "a snapshot
     #: was written", n records for one write is a false count.
     VERDICT_ALREADY_SPENT = "verdict_already_spent"
+    #: The medium moved between the preflight and the act. A verdict carries no
+    #: session, no medium, no boot and no clock, so a review held one minted
+    #: before a fence and spent it after — a durable bearer token for a large
+    #: write to a volume since judged torn, which is what ADR-0010 D9 refuses.
+    MEDIUM_MOVED_SINCE_THE_PREFLIGHT = "medium_moved_since_the_preflight"
+    #: A passing verdict that names fewer than the ten checks. `evaluated`
+    #: reports honestly what was asked; until something asked it back, a
+    #: rebound `PREFLIGHT_ORDER` produced a pass over a fenced, quarantined,
+    #: binding-failing medium from a single check.
+    VERDICT_DID_NOT_ASK_EVERY_CHECK = "verdict_did_not_ask_every_check"
 
 
 class RecoveryRefused(Exception):
@@ -927,7 +969,17 @@ class RecoveryWorkflow:
         raise TypeError("a RecoveryWorkflow is not serialisable")
 
     def __repr__(self) -> str:
-        return f"RecoveryWorkflow(stage={self._stage.value})"
+        """Survives a half-built instance, because that is when it is called.
+
+        `__init__` validates before it assigns, so a `TypeError` from one of
+        its checks left an object with no `_stage` — and the traceback
+        machinery, asked for captured locals, died inside the redacting repr
+        with an `AttributeError`. A clean message-only refusal became a crash
+        in the code written to keep refusals clean.
+        """
+
+        stage = getattr(self, "_stage", None)
+        return f"RecoveryWorkflow(stage={stage.value if stage is not None else 'unbuilt'})"
 
     @property
     def stage(self) -> RecoveryStage:
@@ -987,7 +1039,12 @@ class RecoveryWorkflow:
         # frozen descriptor in place between the stages, committed on a
         # different schema version and fingerprint, and the audit recorded two
         # fingerprints across one workflow with no substitution between them.
-        self._sealed_assign("_pinned", _fields_of(snapshot))
+        # A **copy**, built here from the values read at this moment. Holding
+        # the caller's object made the comparison a self-comparison; holding a
+        # tuple of its fields fixed that, and this goes one further so that
+        # what the commit mints comes from an object the caller never had a
+        # reference to.
+        self._sealed_assign("_pinned", SnapshotDescriptor(*_fields_of(snapshot)))
         self._sealed_assign("_stage", RecoveryStage.PREFLIGHT_PASSED)
         self._record(
             SnapshotAuditEvent.RECOVERY_STARTED,
@@ -1051,6 +1108,15 @@ class RecoveryWorkflow:
         self._require_the_gates(
             snapshot, observations, session_id=session_id, acquisition=acquisition
         )
+        # **Again, after the prompt.** The two quarantine flags were re-read
+        # after `attempt()` and the pin was not, so a review mutated the frozen
+        # descriptor from inside the acquisition and committed on a different
+        # schema version and fingerprint — reaching `COMMITTED`, minting a
+        # candidate `candidate_applies_to` accepted, and recording a
+        # `recovery_completed` naming a snapshot no gate had judged, with no
+        # `RECOVERY_SNAPSHOT_SUBSTITUTED` anywhere. The substitution this whole
+        # design exists to notice, through the one wait in the function.
+        self._require_the_same_snapshot(snapshot)
         if not confirmed:
             self._refuse_gate(RecoveryGate.OPERATOR_CONFIRMATION)
 
@@ -1058,13 +1124,18 @@ class RecoveryWorkflow:
         # terminal, because `_sealed_assign` refuses to move anything once it
         # is. The order is the rule's, not a preference: a terminal workflow
         # moves nothing, including the field that would record its own answer.
-        minted = RecoveryCandidate(snapshot.schema_version, snapshot.fingerprint)
+        # From `_pinned`, not from the argument: the values judged at the
+        # start, held in an object the caller never had. Re-reading the
+        # argument here is what let a mutation during the prompt into both the
+        # candidate and the audit.
+        judged = self._pinned
+        minted = RecoveryCandidate(judged.schema_version, judged.fingerprint)
         self._sealed_assign("_candidate", minted)
         self._sealed_assign("_stage", RecoveryStage.COMMITTED)
         self._record(
             SnapshotAuditEvent.RECOVERY_COMPLETED,
-            schema_version=snapshot.schema_version,
-            fingerprint=snapshot.fingerprint,
+            schema_version=judged.schema_version,
+            fingerprint=judged.fingerprint,
         )
         return minted
 
@@ -1162,7 +1233,7 @@ class RecoveryWorkflow:
         # are pinned to exactly `int` and exactly `str` in `__post_init__`, so
         # neither operand can answer for the comparison either.
         pinned = self._pinned
-        same = pinned is not None and _fields_of(snapshot) == pinned
+        same = pinned is not None and _fields_of(snapshot) == _fields_of(pinned)
         if not same:
             self._sealed_assign("_stage", RecoveryStage.REFUSED)
             self._record(SnapshotAuditEvent.RECOVERY_SNAPSHOT_SUBSTITUTED)
@@ -1196,8 +1267,26 @@ class RecoveryWorkflow:
             # automatically, made deliberately over something that was fine.
             self._refuse_gate(RecoveryGate.NOTHING_TO_RECOVER)
 
-        if not binding_applies(self._binding, observations, session_id=session_id):
+        # D8 gate 1 is about the **target**: which medium this recovery is
+        # for. `medium_is_bound()` is the quarantine's own question — has this
+        # medium been seen this session — and it answers `False` after a fence,
+        # so no identity crosses into this module to ask it. What is *not*
+        # checked here is ADR-0008 D4.1.1's key-protected media binding, which
+        # needs a `BindingKey`; bringing key material into a decision module
+        # would break the rule that the secret never arrives, so that check
+        # stays with `azazel_boot.persistence` and is named in the docs as a
+        # limit rather than claimed here.
+        if not self._quarantine.medium_is_bound():
             self._refuse_gate(RecoveryGate.TARGET_BINDING)
+        # And the quarantine has to be this sitting's. `PersistenceSession`
+        # refuses the identical pairing with `QUARANTINE_FROM_ANOTHER_SESSION`;
+        # this module type-checked the quarantine, the binding and the sitting
+        # and never compared the first with the third.
+        if self._quarantine.session_id != self._session_id:
+            self._refuse_gate(RecoveryGate.TARGET_BINDING)
+
+        if not binding_applies(self._binding, observations, session_id=session_id):
+            self._refuse_gate(RecoveryGate.HOST_BINDING)
 
         if acquisition is not None:
             if acquisition.channel is not PassphraseChannel.LOCAL_HIDDEN_PROMPT:
@@ -1282,6 +1371,20 @@ class RecoveryWorkflow:
                 "this workflow has ended; a terminal stage is terminal, and a "
                 "further attempt is a new workflow that runs every gate again"
             )
+        if name == "_stage" and (self._stage.value, value.value) not in _STAGE_EDGES:
+            raise AttributeError(
+                "the stage travels its own graph; a jump between stages is not "
+                "a stage this workflow reached"
+            )
+        if name in _PINNED_AT_THE_START and self._stage is not RecoveryStage.NOT_STARTED:
+            raise AttributeError(
+                "the snapshot a workflow judges is pinned when it starts and "
+                "not afterwards"
+            )
+        if name == "_candidate" and self._stage is not RecoveryStage.TRIAL_OPEN:
+            raise AttributeError(
+                "a candidate is minted by a commit and by nothing else"
+            )
         object.__setattr__(self, name, value)
 
 
@@ -1339,11 +1442,17 @@ class MigrationLedger:
     back at the moment it is needed.
     """
 
-    __slots__ = ("_audit", "_sealed")
+    __slots__ = ("_audit", "_written", "_sealed")
 
     def __init__(self) -> None:
         object.__setattr__(self, "_sealed", False)
         self._audit: list[SnapshotAuditEntry] = []
+        #: The snapshots this ledger has already recorded a write for, by
+        #: value. Marking the *verdict* spent was one `preflight()` call wide:
+        #: a preflight is free, read-only and unlimited, so four of them over
+        #: one snapshot minted four spendable verdicts and this ledger recorded
+        #: four writes for one write. Spent-ness belongs to the snapshot.
+        self._written: list[tuple[object, ...]] = []
         object.__setattr__(self, "_sealed", True)
 
     def __setattr__(self, name: str, value: object) -> None:
@@ -1360,7 +1469,7 @@ class MigrationLedger:
     def audit(self) -> tuple[SnapshotAuditEntry, ...]:
         return tuple(self._audit)
 
-    def may_migrate(self, verdict: PreflightVerdict) -> bool:
+    def may_migrate(self, verdict: PreflightVerdict, *, quarantine: Quarantine) -> bool:
         """Say whether a migration may run, and record a refusal.
 
         The verdict must be one **this module minted**. A hand-built
@@ -1381,6 +1490,8 @@ class MigrationLedger:
                 "a migration runs on a verdict this module produced; a value "
                 "that merely has the right shape is not one",
             )
+        self._require_the_medium_now(quarantine)
+        self._require_every_gate_was_asked(verdict)
 
         if not verdict.may_migrate:
             self._audit.append(
@@ -1391,8 +1502,65 @@ class MigrationLedger:
             return False
         return True
 
+    def _require_every_gate_was_asked(self, verdict: PreflightVerdict) -> None:
+        """A passing verdict names all ten checks, or it is not a pass.
+
+        `evaluated` was added so that "not evaluated" and "passed" stop being
+        the same answer — and a review pointed out that nothing consumed it, so
+        the honesty bought nothing: rebinding `PREFLIGHT_ORDER` produced a
+        legitimately minted passing verdict that had been asked **one** check,
+        over a medium that was fenced, quarantined and failing its binding, and
+        this ledger accepted it. Asking is what makes the completeness a check
+        rather than a note.
+        """
+
+        if verdict.may_migrate and verdict.evaluated != PREFLIGHT_ORDER:
+            raise RecoveryRefused(
+                Refusal.VERDICT_DID_NOT_ASK_EVERY_CHECK,
+                "a passing verdict is one that was asked every check in "
+                "order; a shorter one answers a question nobody finished",
+            )
+
+    def _require_the_medium_now(self, quarantine: Quarantine) -> None:
+        """The fence and the quarantine, **at the moment of use**.
+
+        `preflight` asks them first, and `PREFLIGHT_ORDER`'s table justifies
+        the fence with ADR-0010 D9 — a version upgrade is not a way round it.
+        A verdict, though, has no session, no medium, no boot and no clock: a
+        review held one minted before a fence, fenced the medium, quarantined
+        the volume, and the ledger still answered `True` and recorded a write.
+        A durable bearer token for "a large write to this volume may run" is
+        exactly what D9 refuses.
+
+        `RecoveryWorkflow` re-reads its gates before the trial, before the
+        commit and again after the prompt, for this reason. The migration path
+        re-read nothing.
+        """
+
+        _require_a_real_quarantine(quarantine)
+        if quarantine.is_fenced or quarantine.volume_is_quarantined:
+            self._audit.append(
+                SnapshotAuditEntry(
+                    event=SnapshotAuditEvent.MIGRATION_REFUSED,
+                    check=(
+                        PreflightCheck.MEDIUM_FENCED
+                        if quarantine.is_fenced
+                        else PreflightCheck.VOLUME_QUARANTINED
+                    ),
+                )
+            )
+            raise RecoveryRefused(
+                Refusal.MEDIUM_MOVED_SINCE_THE_PREFLIGHT,
+                "the medium is fenced or the volume is quarantined now; a "
+                "verdict is not a permission that outlives what it judged",
+            )
+
     def note_snapshot_written(
-        self, verdict: PreflightVerdict, snapshot: SnapshotDescriptor
+        self,
+        verdict: PreflightVerdict,
+        snapshot: SnapshotDescriptor,
+        *,
+        quarantine: Quarantine,
     ) -> None:
         """Record that the caller wrote a snapshot. **After** it did.
 
@@ -1408,6 +1576,7 @@ class MigrationLedger:
         """
 
         _require_a_real_snapshot(snapshot)
+        self._require_the_medium_now(quarantine)
         if (
             not verdict_was_minted_here(verdict)
             or not verdict.may_migrate
@@ -1419,13 +1588,14 @@ class MigrationLedger:
                 "that snapshot; a passing verdict for a different one is not "
                 "permission to record this one",
             )
-        if verdict in _ALREADY_SPENT:
+        if verdict in _ALREADY_SPENT or _fields_of(snapshot) in self._written:
             raise RecoveryRefused(
                 Refusal.VERDICT_ALREADY_SPENT,
-                "this preflight's write is already recorded; a second record "
+                "this snapshot's write is already recorded; a second record "
                 "against it would be a second write that did not happen",
             )
         _ALREADY_SPENT.add(verdict)
+        self._written.append(_fields_of(snapshot))
 
         self._audit.append(
             SnapshotAuditEntry(

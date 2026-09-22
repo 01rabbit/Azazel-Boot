@@ -75,6 +75,19 @@ quarantine's state compared before and after — every slot, plus
 assignment afterwards. The static rules above remain, and are worth what they
 are worth.
 
+A fifth review then rebound `Quarantine.volume_is_quarantined` itself — a
+property that answered `False` for chosen instances. No slot moved, the dunder
+identities held, the seal still refused an ordinary assignment, and the medium
+was out of quarantine for every caller in the process. The class is state too,
+so the guard compares the whole of `vars(Quarantine)` by identity, asks every
+function and property on it which module it was defined in, and puts the
+question to a control instance — an answer that changed is an answer that is
+wrong, however it changed. The same review called a permitted-name `__init__`
+with the quarantine as its `self`, which the `__setattr__`-call rule never
+looked at because the call site's name was `__init__`: no dunder is called
+through an attribute now, except `object.__setattr__` in its four functions and
+a bare `super().__init__`.
+
 ## The snapshot (D6)
 
 Inside the single existing encrypted persistence partition. **No second
@@ -148,10 +161,26 @@ on the object cannot be copied off it. The limit stated elsewhere is unchanged:
 this module is importable, so this is careless-caller defence and not a
 capability boundary.
 
-**One preflight, one recorded write.** Nothing marked a verdict spent, and a
+**One snapshot, one recorded write.** Nothing marked a verdict spent, and a
 review recorded four `SNAPSHOT_WRITTEN` classifications across two ledgers from
-one judged snapshot. The spent-ness is kept module-side, because a second
-ledger is not a second write.
+one judged snapshot. Marking the *verdict* spent was then one `preflight()`
+call wide — a preflight is free, read-only and unlimited, so four of them over
+one snapshot mint four spendable verdicts — so the ledger also refuses a
+snapshot whose write it has already recorded.
+
+**A verdict is not a permission that outlives what it judged.** It carries no
+session, no medium, no boot and no clock, and a review minted one over a
+healthy volume, fenced the medium, quarantined the volume, and the ledger still
+answered and recorded a write — a durable bearer token for a large write to a
+volume since judged torn, which is what D9 refuses under the name of an
+upgrade. `may_migrate` and `note_snapshot_written` take the quarantine and
+re-read it, as the workflow's gates do.
+
+**And the ledger asks `evaluated` back.** Reporting which checks ran bought
+nothing while nothing consumed it: rebinding `PREFLIGHT_ORDER` produced a
+legitimately minted passing verdict, asked one check, over a medium that was
+fenced, quarantined and failing its binding. A passing verdict now has to name
+all ten, in order, or it is not a pass.
 
 Each failing check refuses with **its own classification**, so an operator
 learns which one — and nothing behind it.
@@ -198,10 +227,16 @@ runs every gate again — which is what starting one does.
 
 **The gates run before the trial opens and again before the commit**, not once
 at the start — except key acquisition, which runs only at the commit, because
-that is where an operator is asked to type. **And the medium is read once
-more after the prompt returns**: `attempt()` is the only step in this workflow
-that blocks on a human, and the last fence read used to sit before it, so a
-medium pulled while the operator typed committed anyway. A medium can be pulled while an
+that is where an operator is asked to type. **And the medium *and the snapshot* are read once more after the prompt
+returns**: `attempt()` is the only step in this workflow that blocks on a
+human, and it is caller-supplied code. The last fence read used to sit before
+it, so a medium pulled while the operator typed committed anyway — and when
+that was fixed for the flags it was not fixed for the snapshot, so a review
+mutated the frozen descriptor from inside the acquisition, reached
+`COMMITTED`, and recorded a `recovery_completed` naming a schema version and a
+fingerprint no gate had judged. The commit now re-checks the pin there too,
+and mints the candidate from `_pinned` — a copy built at `start`, which the
+caller never had a reference to — rather than from the argument. A medium can be pulled while an
 operator reads a confirmation screen, and a gate checked once is a gate checked
 at a moment that has passed. Tests fence the quarantine between the start and
 the trial, and again between the trial and the commit, and assert each refuses;
@@ -214,16 +249,30 @@ The gates, in order — D8's four, with two that precede them:
 2. **there is something to recover** — running this over a healthy volume would
    be a restore of live data from a snapshot: the write D8 refuses to make
    automatically, made deliberately over something that was fine
-3. **target binding** — [ADR-0008 D4.1.1](adr/0008-debian-13-live-baseline.md)'s,
-   re-derived from the supplied inventory, not a stored answer
-4. **key acquisition** — `session_mode`'s `KeyAcquisition` Protocol, reused
+3. **target binding** — *which medium this recovery is for*. The quarantine is
+   asked its own question, `medium_is_bound()`, which is also `False` after a
+   fence, so no device identity crosses into this module. It used to be the
+   **host** binding wearing this gate's name: a review committed a whole
+   recovery over a quarantine that had never observed any device, and over two
+   different media in turn, and the audit said `recovery_completed` for a
+   volume the module could not name. The quarantine must also be this
+   sitting's — `PersistenceSession` refuses the identical pairing, and this
+   type-checked all three inputs and compared none of them.
+   **What is not checked here**: ADR-0008 D4.1.1's key-protected media binding
+   needs a `BindingKey`, and key material in a decision module would break the
+   rule that the secret never arrives. That check stays in
+   `azazel_boot.persistence`; this gate is not it, and does not claim to be.
+4. **host binding** — `commissioning.binding_applies`, re-derived from the
+   supplied inventory rather than re-compared against a stored answer, now
+   named for what it answers
+5. **key acquisition** — `session_mode`'s `KeyAcquisition` Protocol, reused
    rather than reimplemented, so what crosses back is the same single enum and
    this module never sees a passphrase. `commit` **requires** one: `None` used
    to skip the gate entirely and leave an audit byte-identical to a legitimate
    commit, so nothing downstream could tell a recovery that unlocked the volume
    from one where nobody was ever prompted
-5. **integrity verification**
-6. **operator confirmation** — `confirmed` grants nothing by itself, which the
+6. **integrity verification**
+7. **operator confirmation** — `confirmed` grants nothing by itself, which the
    first test in the file drives: the volume is still quarantined afterwards
 
 Each is driven failing on its own to show the next is not reached. A binding
@@ -276,7 +325,7 @@ which at module level *is* the module dict, into which CPython puts
 `__builtins__`, reached with no import, no subscript, no `getattr` and no
 `except`, and with the spelling assembled from fragments the scan never reads.
 
-Two things follow, and only the second is a claim. The name rule is no longer a
+Four things follow, and only the last two are claims. The name rule is no longer a
 denylist: **every free name the module reads is listed, and the assertion is
 equality**, so a builtin that is not one of the fourteen is unreachable by any
 spelling. And the question is asked of the runtime instead — the workflow is
@@ -285,8 +334,19 @@ installed, and the assertion is that **no audited operation happens at all**,
 whatever it was spelled. That also covers what this module *calls*: the same
 escape placed in `azazel_boot.quarantine`, whose `is_fenced` every gate reads,
 left the suite green, because a per-file scan is not a bound on anything but
-its own file. The limit of the runtime check, stated: it covers the paths that
-drive reaches.
+its own file.
+
+The fifth review broke both of those too, and the fixes are the same shape
+again. The import allowlist was by module *root*, so `from .inventory import
+Path` — root `inventory`, already allowed — re-exported `pathlib` and wrote to
+the host filesystem **at import time**, which the hook never saw because it was
+installed afterwards. So the imported **names** are listed and asserted by
+equality, and the hook goes on before the module is imported, with an allowlist
+of what the interpreter's own import machinery does and bytecode writing off.
+And the drive held `binding_holds`, the capacity and `current_schema` at their
+passing values, so a write on the binding branch never ran under the hook: the
+drive varies them now. The limit of the runtime check, stated and unchanged:
+it covers the paths that drive reaches.
 
 Nine audit classifications. `SnapshotAuditEntry` has five fields — `event`,
 `check`, `gate`, `schema_version`, `fingerprint` — and **no** field for

@@ -62,6 +62,7 @@ from azazel_boot.snapshot import (
     SnapshotAuditEvent,
     SnapshotDescriptor,
     SnapshotIntegrity,
+    _fields_of,
     candidate_applies_to,
     preflight,
     schema_is_compatible,
@@ -133,6 +134,19 @@ class Opens:
     def attempt(self) -> AttemptOutcome:
         self.attempts += 1
         return self._outcome
+
+
+def _a_quarantine_that_never_saw_the_medium() -> Quarantine:
+    """Volume-quarantined, so `NOTHING_TO_RECOVER` passes, and blind.
+
+    `medium_is_bound()` answers `False`. A review committed a whole recovery
+    over exactly this object, because the gate named for the target asked the
+    host binding instead.
+    """
+
+    rule = Quarantine(session_id=SESSION, boot_medium_identity=MEDIUM.identity)
+    rule.quarantine_volume()
+    return rule
 
 
 def a_quarantine(*, fenced: bool = False, quarantined: bool = True) -> Quarantine:
@@ -363,7 +377,18 @@ def test_this_module_never_calls_anything_that_would_change_a_quarantine() -> No
             if isinstance(outer, ast.Attribute) and outer.value is node
         ]
         assert reader, "self._quarantine is used other than as a receiver"
-        assert reader[0].attr in {"is_fenced", "volume_is_quarantined"}, reader[0].attr
+        # Four reads, all questions. `medium_is_bound` and `session_id` were
+        # added deliberately: D8 gate 1 is about the **target**, and the
+        # workflow used to ask the host binding in its name — a review
+        # committed a recovery over a quarantine that had never observed any
+        # device, and over two different media in turn. Both are answers the
+        # quarantine computes, so no device identity enters this module.
+        assert reader[0].attr in {
+            "is_fenced",
+            "volume_is_quarantined",
+            "medium_is_bound",
+            "session_id",
+        }, reader[0].attr
 
     assigned = {
         target.attr
@@ -586,7 +611,7 @@ def test_a_refused_migration_keeps_the_old_schema_usable(observations) -> None:
         generation_holds=True,
         image_digest_holds=True,
     )
-    assert ledger.may_migrate(verdict) is False
+    assert ledger.may_migrate(verdict, quarantine=a_quarantine(quarantined=False)) is False
 
     live = session(observations)
     status = live.unlock(MEDIUM, layout(), observations, **MEDIA_ARGS, **unlock_arguments())
@@ -622,6 +647,32 @@ def test_preflight_is_read_only_by_construction() -> None:
             imported.update(alias.name.split(".")[0] for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
             imported.add((node.module or "").split(".")[0] or ".")
+    # **By name, not only by root.** The set below is module roots, and a
+    # review re-exported `pathlib.Path` through a sibling — `from .inventory
+    # import Path` has root `inventory`, already allowed — then wrote to the
+    # host filesystem at import time with every guard in this file green. So
+    # the names are listed too, and the assertion is equality.
+    named: set[str] = set()
+    for node in ast.walk(TREE):
+        if isinstance(node, ast.ImportFrom):
+            named.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.Import):
+            named.update(alias.name for alias in node.names)
+    assert named == {
+        "annotations",
+        "dataclass",
+        "field",
+        "Enum",
+        "WeakSet",
+        "SessionBinding",
+        "binding_applies",
+        "InterfaceObservation",
+        "Quarantine",
+        "AttemptOutcome",
+        "KeyAcquisition",
+        "PassphraseChannel",
+    }, f"unexpected imported names: {sorted(named)}"
+
     assert imported == {
         "__future__",
         "dataclasses",
@@ -773,7 +824,11 @@ def test_a_binding_from_another_machine_refuses_before_a_key_is_asked_for(
             confirmed=True,
         )
     assert acquisition.attempts == 0
-    assert flow.audit()[-1].gate is RecoveryGate.TARGET_BINDING
+    # `HOST_BINDING`, which is what `binding_applies` answers. It carried D8
+    # gate 1's name until a review committed a recovery over a quarantine that
+    # had never observed a device: the host was right, and nothing had asked
+    # what medium was being recovered.
+    assert flow.audit()[-1].gate is RecoveryGate.HOST_BINDING
 
 
 @pytest.mark.parametrize(
@@ -974,7 +1029,7 @@ def test_a_refused_migration_records_the_check_and_no_figure() -> None:
         image_digest_holds=True,
     )
     assert verdict.refused_by is PreflightCheck.REQUIRED_SPACE
-    assert ledger.may_migrate(verdict) is False
+    assert ledger.may_migrate(verdict, quarantine=a_quarantine(quarantined=False)) is False
 
     rendered = repr(ledger.audit()) + str(ledger.audit())
     assert "987654321" not in rendered
@@ -1211,6 +1266,39 @@ def test_this_module_cannot_reach_a_host_a_network_a_vm_or_a_second_partition() 
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Subscript)
     ]
 
+    # **No dunder is called through an attribute, except `object.__setattr__`
+    # in the four functions below.** The `__setattr__`-call rule inspects only
+    # calls whose `func.attr` is `__setattr__`, so a review wrote a class whose
+    # `__init__` does `object.__setattr__(self, name, False)` — permitted,
+    # since `__init__` is on the list and `self` is its own first parameter —
+    # and then called it as `_Tally.__init__(quarantine, "_volume" + "_quar…")`.
+    # The call site's `func.attr` is `__init__`, so nothing looked at it, and
+    # the assembled name slipped the literal scan. `preflight` lifted the
+    # volume quarantine and the whole suite stayed green.
+    def _is_a_bare_super_init(node: ast.Call) -> bool:
+        """`super().__init__(...)`, the one shape an exception needs."""
+
+        receiver = node.func.value
+        return (
+            node.func.attr == "__init__"
+            and isinstance(receiver, ast.Call)
+            and isinstance(receiver.func, ast.Name)
+            and receiver.func.id == "super"
+            and not receiver.args
+            and not receiver.keywords
+        )
+
+    assert not [
+        node
+        for node in ast.walk(TREE)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr.startswith("__")
+        and node.func.attr.endswith("__")
+        and node.func.attr != "__setattr__"
+        and not _is_a_bare_super_init(node)
+    ]
+
     # **No subscript load outside an annotation.** Refusing only
     # `Subscript`-as-callee was sidestepped by binding the callable to a name
     # first — `writer = builtins["open"]`, then `writer(...)`. This module
@@ -1250,7 +1338,13 @@ def test_this_module_cannot_reach_a_host_a_network_a_vm_or_a_second_partition() 
             continue
         assert len(node.args) == 3, "getattr is permitted only as the seal's read"
         assert isinstance(node.args[0], ast.Name) and node.args[0].id == "self"
-        assert isinstance(node.args[1], ast.Constant) and node.args[1].value == "_sealed"
+        # Two shapes, both reads of this object's own state with a default:
+        # the seal, and the stage the repr renders. The repr needs one because
+        # `__init__` validates before it assigns, and the traceback machinery
+        # calls `repr` on the half-built object — a clean `TypeError` became an
+        # `AttributeError` raised from inside the redacting repr.
+        assert isinstance(node.args[1], ast.Constant)
+        assert node.args[1].value in {"_sealed", "_stage"}, node.args[1].value
 
     # Over **code**, with every docstring excluded — which is the opposite of
     # what `test_dirty_write.py`'s erasure scan does, deliberately. The two
@@ -1511,8 +1605,10 @@ def test_no_public_method_ever_turns_either_flag_off(observations, elsewhere) ->
     )
     unchanged = _flags(quarantine)
     for act in (
-        lambda: ledger.may_migrate(verdict),
-        lambda: ledger.note_snapshot_written(verdict, snap),
+        lambda: ledger.may_migrate(verdict, quarantine=a_quarantine(quarantined=False)),
+        lambda: ledger.note_snapshot_written(verdict, snap,
+            quarantine=a_quarantine(quarantined=False),
+        ),
         lambda: ledger.audit(),
     ):
         try:
@@ -1598,8 +1694,20 @@ def test_a_migration_is_refused_over_a_quarantined_volume() -> None:
             lambda: {"quarantine": a_quarantine(quarantined=False),
                      "bad_acquisition": True, "confirmed": False, "elsewhere": True},
         ),
+        # D8 gate 1, the **target**: a quarantine that never saw the medium.
+        # This used to be the host binding wearing gate 1's name, so a recovery
+        # committed over a quarantine that had observed no device at all.
         (
             RecoveryGate.TARGET_BINDING,
+            lambda: {
+                "quarantine": _a_quarantine_that_never_saw_the_medium(),
+                "elsewhere": True,
+                "bad_acquisition": True,
+                "confirmed": False,
+            },
+        ),
+        (
+            RecoveryGate.HOST_BINDING,
             lambda: {"elsewhere": True, "bad_acquisition": True, "confirmed": False},
         ),
         (
@@ -1635,7 +1743,15 @@ def test_each_gate_refuses_with_every_later_gate_also_failing(
     # the failing conditions are introduced at the commit — which is where all
     # four of D8's gates run.
     good = descriptor()
-    if gate not in (RecoveryGate.MEDIUM_FENCED, RecoveryGate.NOTHING_TO_RECOVER):
+    # The three gates that precede D8's four are refused at `start` already,
+    # so a workflow over one of them never reaches the trial. `TARGET_BINDING`
+    # joined them when it stopped being the host binding under gate 1's name.
+    refused_at_start = (
+        RecoveryGate.MEDIUM_FENCED,
+        RecoveryGate.NOTHING_TO_RECOVER,
+        RecoveryGate.TARGET_BINDING,
+    )
+    if gate not in refused_at_start:
         flow.start(good, observations, session_id=SESSION, started_by_operator=True)
         flow.open_trial(good, observations, session_id=SESSION)
 
@@ -1644,7 +1760,7 @@ def test_each_gate_refuses_with_every_later_gate_also_failing(
     acquisition = Opens(channel=NOT_A_CHANNEL) if options.get("bad_acquisition") else Opens()
     inventory = elsewhere if options.get("elsewhere") else observations
 
-    if gate in (RecoveryGate.MEDIUM_FENCED, RecoveryGate.NOTHING_TO_RECOVER):
+    if gate in refused_at_start:
         with pytest.raises(RecoveryRefused) as refused:
             flow.start(good, inventory, session_id=SESSION, started_by_operator=True)
     else:
@@ -1728,11 +1844,13 @@ def test_a_hand_built_verdict_does_not_authorise_a_migration() -> None:
 
     assert verdict_was_minted_here(forged) is False
     with pytest.raises(RecoveryRefused) as refused:
-        ledger.may_migrate(forged)
+        ledger.may_migrate(forged, quarantine=a_quarantine(quarantined=False))
     assert refused.value.refusal is Refusal.VERDICT_NOT_MINTED_BY_A_PREFLIGHT
 
     with pytest.raises(RecoveryRefused):
-        ledger.note_snapshot_written(forged, descriptor())
+        ledger.note_snapshot_written(forged, descriptor(),
+            quarantine=a_quarantine(quarantined=False),
+        )
     assert ledger.audit() == ()
 
     minted = preflight(
@@ -1746,7 +1864,7 @@ def test_a_hand_built_verdict_does_not_authorise_a_migration() -> None:
         image_digest_holds=True,
     )
     assert verdict_was_minted_here(minted) is True
-    assert ledger.may_migrate(minted) is True
+    assert ledger.may_migrate(minted, quarantine=a_quarantine(quarantined=False)) is True
 
 
 def test_a_snapshot_is_recorded_as_written_only_after_the_caller_acted() -> None:
@@ -1770,10 +1888,10 @@ def test_a_snapshot_is_recorded_as_written_only_after_the_caller_acted() -> None
         image_digest_holds=True,
     )
 
-    assert ledger.may_migrate(minted) is True
+    assert ledger.may_migrate(minted, quarantine=a_quarantine(quarantined=False)) is True
     assert ledger.audit() == ()  # permission granted; nothing written yet
 
-    ledger.note_snapshot_written(minted, judged)
+    ledger.note_snapshot_written(minted, judged, quarantine=a_quarantine(quarantined=False))
     assert ledger.audit()[-1].event is SnapshotAuditEvent.SNAPSHOT_WRITTEN
 
     # **The verdict names the snapshot it judged.** It used to name none, so
@@ -1783,14 +1901,16 @@ def test_a_snapshot_is_recorded_as_written_only_after_the_caller_acted() -> None
     # objects were real and the verdict legitimately minted; nothing tied them.
     other = descriptor(integrity=SnapshotIntegrity.FAILED, schema_version=2)
     with pytest.raises(RecoveryRefused) as refused:
-        ledger.note_snapshot_written(minted, other)
+        ledger.note_snapshot_written(minted, other, quarantine=a_quarantine(quarantined=False))
     assert refused.value.refusal is Refusal.VERDICT_NOT_MINTED_BY_A_PREFLIGHT
 
     # An equal-but-distinct descriptor is not the one that was judged either:
     # the tie is identity, because the point is *which* snapshot the preflight
     # actually looked at.
     with pytest.raises(RecoveryRefused):
-        ledger.note_snapshot_written(minted, descriptor())
+        ledger.note_snapshot_written(minted, descriptor(),
+            quarantine=a_quarantine(quarantined=False),
+        )
 
     # And both methods exist, which the class docstring used to claim while
     # shipping neither.
@@ -1973,11 +2093,34 @@ def test_the_workflow_and_the_ledger_are_sealed(observations) -> None:
     with pytest.raises(AttributeError, match="sealed after construction"):
         ledger._audit = []
 
-    # And the limit, stated rather than implied: `_sealed_assign` is an
-    # unconditional `object.__setattr__` that any caller can reach, so a stage
-    # can be forced without `start()`. `azazel_boot.quarantine` says the same
-    # of its own seal — this is careless-caller defence, not a seal.
-    flow._sealed_assign("_stage", RecoveryStage.TRIAL_OPEN)
+    # `_sealed_assign` used to be an unconditional `object.__setattr__` that
+    # any caller could reach, and this test recorded that as a stated limit. A
+    # review then used it: `NOT_STARTED` and `TRIAL_OPEN` are both non-terminal
+    # and both `_stage` and `_pinned` were on the moves-during-a-recovery list,
+    # so a jump straight between them minted a candidate whose entire audit was
+    # `['recovery_completed']` — no start, no operator, no trial. So the stage
+    # travels its own graph, and the two pinned fields move only at the start.
+    with pytest.raises(AttributeError, match="travels its own graph"):
+        flow._sealed_assign("_stage", RecoveryStage.TRIAL_OPEN)
+    assert flow.stage is RecoveryStage.NOT_STARTED
+
+    flow.start(descriptor(), observations, session_id=SESSION, started_by_operator=True)
+    for name, value in (
+        ("_snapshot", descriptor(schema_version=2)),
+        ("_pinned", descriptor(schema_version=2)),
+    ):
+        with pytest.raises(AttributeError, match="pinned when it starts"):
+            flow._sealed_assign(name, value)
+    with pytest.raises(AttributeError, match="minted by a commit"):
+        flow._sealed_assign("_candidate", RecoveryCandidate(2, FINGERPRINT))
+    assert flow.stage is RecoveryStage.PREFLIGHT_PASSED
+    assert flow.holds(RecoveryCandidate(2, FINGERPRINT)) is False
+
+    # The limit that remains, stated rather than implied: `object.__setattr__`
+    # reaches every one of these directly. `azazel_boot.quarantine` says the
+    # same of its own seal — careless-caller defence, not a capability
+    # boundary. What is gone is the reach of an ordinary method call.
+    object.__setattr__(flow, "_stage", RecoveryStage.TRIAL_OPEN)
     assert flow.stage is RecoveryStage.TRIAL_OPEN
 
 
@@ -2013,7 +2156,7 @@ def test_a_verdict_subclass_carrying_a_stolen_token_is_refused() -> None:
     assert stolen.may_migrate is True
     assert verdict_was_minted_here(stolen) is False
     with pytest.raises(RecoveryRefused):
-        MigrationLedger().may_migrate(stolen)
+        MigrationLedger().may_migrate(stolen, quarantine=a_quarantine(quarantined=False))
 
 
 def test_the_token_cannot_be_read_off_a_verdict_and_reused() -> None:
@@ -2058,7 +2201,7 @@ def test_the_token_cannot_be_read_off_a_verdict_and_reused() -> None:
 
     ledger = MigrationLedger()
     with pytest.raises(RecoveryRefused) as error:
-        ledger.may_migrate(rebuilt)
+        ledger.may_migrate(rebuilt, quarantine=a_quarantine(quarantined=False))
     assert error.value.refusal is Refusal.VERDICT_NOT_MINTED_BY_A_PREFLIGHT
     assert ledger.audit() == ()
 
@@ -2775,6 +2918,13 @@ def test_every_stage_refuses_observations_that_are_not_observations(
 
 QUARANTINE_SETATTR = Quarantine.__setattr__
 QUARANTINE_DELATTR = Quarantine.__delattr__
+#: Every name on the class, by identity. Comparing three dunders was not
+#: enough: a review rebound `Quarantine.volume_is_quarantined` to a property
+#: that answered `False` for chosen instances. No slot moved, the three
+#: identities held, the seal still refused an ordinary assignment — and the
+#: medium was out of quarantine for every caller in the process, including
+#: ones this module was never handed.
+QUARANTINE_CLASS = {name: value for name, value in vars(Quarantine).items()}
 
 
 def _swallow(call, *args, **keywords) -> None:
@@ -2821,10 +2971,32 @@ def _quarantine_defences_intact(rule: Quarantine) -> tuple[object, ...]:
         rule._volume_quarantined = False
     except AttributeError:
         refused = True
+    unchanged = {name: value for name, value in vars(Quarantine).items()}
+
+    # Identity against a snapshot taken when *this* file was imported is not
+    # enough on its own: a rebind performed while `azazel_boot.snapshot` was
+    # importing is already in that snapshot. So the class's own code is asked
+    # where it comes from — every function and every property on `Quarantine`
+    # must be defined in `azazel_boot.quarantine` — and a control instance is
+    # asked the question, so an answer that changed is an answer that is wrong.
+    home = []
+    for value in unchanged.values():
+        owner = value.fget if isinstance(value, property) else value
+        module = getattr(owner, "__module__", "azazel_boot.quarantine")
+        home.append(module == "azazel_boot.quarantine")
+
+    control = Quarantine(session_id="control", boot_medium_identity=MEDIUM.identity)
+    control.observe(MEDIUM)
+    control.quarantine_volume()
+
     return (
         Quarantine.__setattr__ is QUARANTINE_SETATTR,
         Quarantine.__delattr__ is QUARANTINE_DELATTR,
         refused,
+        set(unchanged) == set(QUARANTINE_CLASS),
+        all(unchanged[name] is QUARANTINE_CLASS[name] for name in QUARANTINE_CLASS),
+        all(home),
+        control.volume_is_quarantined is True and control.is_fenced is False,
     )
 
 
@@ -2934,7 +3106,7 @@ def test_no_input_to_this_module_changes_anything_about_the_quarantine(
             f"container={container_version} integrity={integrity.value} "
             f"room={room} reports_hold={reports_hold}"
         )
-        assert _quarantine_defences_intact(rule) == (True, True, True)
+        assert _quarantine_defences_intact(rule) == (True,) * 7
 
     assert drives == 3 * 2 * 3 * 2 * 2 * 2 * 2 * 2 * 2 * len(AttemptOutcome)
 
@@ -2965,6 +3137,16 @@ def test_this_module_performs_no_io_when_it_actually_runs() -> None:
     script = textwrap.dedent(
         """
         import sys
+
+        # **The hook goes on before the module is imported.** It used to be
+        # installed after the imports at the top of this script, so everything
+        # `azazel_boot.snapshot` did at *import* time was invisible: a review
+        # re-exported `pathlib.Path` through a sibling and wrote to the host
+        # filesystem from module scope, with this test green. Import reads
+        # source files, so a read is expected here; a **write**, a socket, a
+        # subprocess or an `exec` is not.
+        at_import = []
+        sys.addaudithook(lambda event, arguments: at_import.append((event, arguments)))
 
         from azazel_boot.commissioning import SessionBinding, host_fingerprint
         from azazel_boot.inventory import InterfaceObservation
@@ -3002,6 +3184,34 @@ def test_this_module_performs_no_io_when_it_actually_runs() -> None:
             rule.quarantine_volume()
             return rule
 
+        # An **allowlist**, of what the interpreter's own import machinery
+        # does: read a file, compile it, exec it, and the bookkeeping around
+        # that. Bytecode writing is off (`PYTHONDONTWRITEBYTECODE`), so no
+        # write-mode `open` and no `os.rename` belong here either. Anything
+        # else — a write, a socket, a subprocess — is the module acting, and
+        # is what this refuses. If a future interpreter adds an event, this
+        # goes red and is widened deliberately, which is the point of a list
+        # of what is permitted rather than a list of what is not.
+        MACHINERY = {
+            "compile",
+            "exec",
+            "import",
+            "marshal.dumps",
+            "marshal.loads",
+            "object.__getattr__",
+            "object.__setattr__",
+            "os.listdir",
+            "sys._getframe",
+            "sys._getframemodulename",
+            "builtins.id",
+        }
+        forbidden_at_import = [
+            (event, arguments)
+            for event, arguments in at_import
+            if event not in MACHINERY
+            and not (event == "open" and (arguments[1] or "r") in ("r", "rb"))
+        ]
+
         binding = SessionBinding(
             host_fingerprint=host_fingerprint(observations), session_id=SESSION
         )
@@ -3017,7 +3227,26 @@ def test_this_module_performs_no_io_when_it_actually_runs() -> None:
         seen = []
         sys.addaudithook(lambda event, arguments: seen.append(event))
 
-        for rule, snapshot in prepared:
+        for index, (rule, snapshot) in enumerate(prepared):
+            # **Varied, not fixed.** These arguments were all held at their
+            # passing values, so any branch gated on them never ran under the
+            # hook — and a review put a host-disk write on the binding branch,
+            # which other tests in this file *do* take, without a hook. The
+            # guard's fixed arguments were a published list of where to hide.
+            holds = index % 2 == 0
+            for offered in (snapshot, None):
+                preflight(
+                    rule,
+                    snapshot=offered,
+                    capacity=CapacityReport(required=100, available=1000)
+                    if holds
+                    else CapacityReport(required=1000, available=1),
+                    current_schema=1 if holds else 2,
+                    target_schema=snapshot.schema_version,
+                    binding_holds=holds,
+                    generation_holds=holds,
+                    image_digest_holds=holds,
+                )
             verdict = preflight(
                 rule,
                 snapshot=snapshot,
@@ -3032,8 +3261,8 @@ def test_this_module_performs_no_io_when_it_actually_runs() -> None:
             schema_is_compatible(current=1, target=snapshot.schema_version)
             ledger = MigrationLedger()
             try:
-                ledger.may_migrate(verdict)
-                ledger.note_snapshot_written(verdict, snapshot)
+                ledger.may_migrate(verdict, quarantine=rule)
+                ledger.note_snapshot_written(verdict, snapshot, quarantine=rule)
             except Exception:
                 pass
             repr(verdict)
@@ -3061,7 +3290,7 @@ def test_this_module_performs_no_io_when_it_actually_runs() -> None:
                 except Exception:
                     pass
 
-        print(repr(sorted(set(seen))))
+        print(repr([sorted(set(seen)), [event for event, _ in forbidden_at_import]]))
         """
     )
 
@@ -3070,13 +3299,24 @@ def test_this_module_performs_no_io_when_it_actually_runs() -> None:
         capture_output=True,
         text=True,
         cwd=MODULE.parents[2],
-        env={**os.environ, "PYTHONPATH": str(MODULE.parents[2] / "src")},
+        env={
+            **os.environ,
+            "PYTHONPATH": str(MODULE.parents[2] / "src"),
+            # So the import machinery writes no bytecode: a `.pyc` write is an
+            # `os.rename` and a write-mode `open`, and neither is this module.
+            "PYTHONDONTWRITEBYTECODE": "1",
+        },
         timeout=120,
         check=False,
     )
     assert finished.returncode == 0, finished.stderr
-    events = ast.literal_eval(finished.stdout.strip())
-    assert events == [], f"the decision path performed audited operations: {events}"
+    while_running, at_import = ast.literal_eval(finished.stdout.strip())
+    assert while_running == [], (
+        f"the decision path performed audited operations: {while_running}"
+    )
+    assert at_import == [], (
+        f"the module performed audited operations while importing: {at_import}"
+    )
 
 
 # --------------------------------------------------------------------------
@@ -3248,7 +3488,9 @@ def test_the_write_record_asks_whether_the_verdict_was_minted() -> None:
 
     ledger = MigrationLedger()
     with pytest.raises(RecoveryRefused) as refused:
-        ledger.note_snapshot_written(never_minted, snapshot)
+        ledger.note_snapshot_written(never_minted, snapshot,
+            quarantine=a_quarantine(quarantined=False),
+        )
     assert refused.value.refusal is Refusal.VERDICT_NOT_MINTED_BY_A_PREFLIGHT
     assert ledger.audit() == ()
 
@@ -3275,12 +3517,14 @@ def test_one_preflight_records_one_write_in_any_ledger() -> None:
         image_digest_holds=True,
     )
     first, second = MigrationLedger(), MigrationLedger()
-    first.note_snapshot_written(verdict, snapshot)
+    first.note_snapshot_written(verdict, snapshot, quarantine=a_quarantine(quarantined=False))
     assert len(first.audit()) == 1
 
     for ledger in (first, second):
         with pytest.raises(RecoveryRefused) as refused:
-            ledger.note_snapshot_written(verdict, snapshot)
+            ledger.note_snapshot_written(verdict, snapshot,
+                quarantine=a_quarantine(quarantined=False),
+            )
         assert refused.value.refusal is Refusal.VERDICT_ALREADY_SPENT
     assert len(first.audit()) == 1
     assert second.audit() == ()
@@ -3319,6 +3563,299 @@ def test_the_write_record_asks_whether_the_verdict_passed() -> None:
 
     ledger = MigrationLedger()
     with pytest.raises(RecoveryRefused) as refused:
-        ledger.note_snapshot_written(refused_verdict, snapshot)
+        ledger.note_snapshot_written(refused_verdict, snapshot,
+            quarantine=a_quarantine(quarantined=False),
+        )
     assert refused.value.refusal is Refusal.VERDICT_NOT_MINTED_BY_A_PREFLIGHT
+    assert ledger.audit() == ()
+
+
+# --------------------------------------------------------------------------
+# The fifth review: the seam between this module and the rest of the package
+# --------------------------------------------------------------------------
+
+
+def test_a_recovery_refuses_a_medium_the_quarantine_never_saw(observations) -> None:
+    """R5: D8 gate 1 is about the **target**, and it asked about the host.
+
+    `RecoveryGate.TARGET_BINDING` called `commissioning.binding_applies`, which
+    compares a host fingerprint and a sitting. A review committed a whole
+    recovery over a quarantine that had **never observed any device**, and over
+    two different media identities in turn, because nothing in the workflow
+    ever asked what it was recovering. The audit said `recovery_completed` with
+    a schema version and a fingerprint, for a volume the module could not name.
+
+    The quarantine is asked through its own question — `medium_is_bound()`,
+    which is also `False` after a fence — so no device identity crosses into
+    this module to ask it.
+    """
+
+    blind = _a_quarantine_that_never_saw_the_medium()
+    assert blind.medium_is_bound() is False
+    assert blind.volume_is_quarantined is True
+
+    flow = workflow(observations, quarantine=blind)
+    with pytest.raises(RecoveryRefused) as refused:
+        flow.start(descriptor(), observations, session_id=SESSION, started_by_operator=True)
+    assert refused.value.refusal is Refusal.GATE_REFUSED
+    assert flow.audit()[-1].gate is RecoveryGate.TARGET_BINDING
+    assert flow.stage is RecoveryStage.REFUSED
+    assert flow.holds(RecoveryCandidate(1, FINGERPRINT)) is False
+
+
+def test_a_recovery_refuses_a_quarantine_from_another_sitting(observations) -> None:
+    """R5: the module type-checked all three and compared none of them.
+
+    `PersistenceSession` refuses the identical pairing with
+    `QUARANTINE_FROM_ANOTHER_SESSION`; this workflow committed. Combined with
+    the gate above it meant neither the medium nor the sitting the quarantine
+    belongs to constrained a recovery.
+    """
+
+    elsewhere = Quarantine(session_id="another-sitting", boot_medium_identity=MEDIUM.identity)
+    elsewhere.observe(MEDIUM)
+    elsewhere.quarantine_volume()
+    assert elsewhere.medium_is_bound() is True
+
+    flow = workflow(observations, quarantine=elsewhere)
+    with pytest.raises(RecoveryRefused) as refused:
+        flow.start(descriptor(), observations, session_id=SESSION, started_by_operator=True)
+    assert refused.value.refusal is Refusal.GATE_REFUSED
+    assert flow.audit()[-1].gate is RecoveryGate.TARGET_BINDING
+
+
+def test_a_verdict_is_not_a_permission_that_outlives_what_it_judged() -> None:
+    """R5: the fence is `PREFLIGHT_ORDER[0]`, and only at the time of check.
+
+    A verdict has no session, no medium, no boot and no clock. A review minted
+    one over a healthy volume, then fenced the medium **and** quarantined the
+    volume, and the ledger still answered `may_migrate` and recorded a write —
+    a durable, transferable bearer token for a large write to a volume since
+    judged torn, which is what ADR-0010 D9 refuses under the name of an
+    upgrade. `RecoveryWorkflow` re-reads its gates three times for this reason;
+    the migration path re-read nothing.
+    """
+
+    medium = a_quarantine(quarantined=False)
+    snapshot = descriptor()
+    verdict = preflight(
+        medium,
+        snapshot=snapshot,
+        capacity=capacity(),
+        current_schema=1,
+        target_schema=2,
+        binding_holds=True,
+        generation_holds=True,
+        image_digest_holds=True,
+    )
+    ledger = MigrationLedger()
+    assert ledger.may_migrate(verdict, quarantine=medium) is True
+
+    medium.quarantine_volume()
+    for act in (
+        lambda: ledger.may_migrate(verdict, quarantine=medium),
+        lambda: ledger.note_snapshot_written(verdict, snapshot, quarantine=medium),
+    ):
+        with pytest.raises(RecoveryRefused) as refused:
+            act()
+        assert refused.value.refusal is Refusal.MEDIUM_MOVED_SINCE_THE_PREFLIGHT
+    assert [entry.check for entry in ledger.audit()] == [
+        PreflightCheck.VOLUME_QUARANTINED,
+        PreflightCheck.VOLUME_QUARANTINED,
+    ]
+
+    medium.fence()
+    with pytest.raises(RecoveryRefused):
+        ledger.may_migrate(verdict, quarantine=medium)
+    assert ledger.audit()[-1].check is PreflightCheck.MEDIUM_FENCED
+    assert not [entry for entry in ledger.audit() if entry.event is not
+                SnapshotAuditEvent.MIGRATION_REFUSED]
+
+
+def test_the_repr_survives_an_instance_that_was_never_built(observations) -> None:
+    """R5: the redaction defeated the tool it exists to serve.
+
+    `__init__` validates before it assigns, so a `TypeError` from one of its
+    checks leaves an object with no `_stage`. The traceback machinery, asked
+    for captured locals — which is what `pytest --showlocals` and ordinary
+    crash reporters do — called the redacting `__repr__` and died inside it
+    with an `AttributeError`. A clean, message-only refusal became a crash in
+    the code written to keep refusals clean.
+    """
+
+    import traceback
+
+    binding = SessionBinding(
+        host_fingerprint=host_fingerprint(observations), session_id=SESSION
+    )
+    for arguments in (
+        {"quarantine": object(), "binding": binding, "session_id": SESSION},
+        {"quarantine": a_quarantine(), "binding": object(), "session_id": SESSION},
+        {"quarantine": a_quarantine(), "binding": binding, "session_id": b"bytes"},
+    ):
+        with pytest.raises(TypeError) as raised:
+            RecoveryWorkflow(
+                arguments["quarantine"],
+                arguments["binding"],
+                session_id=arguments["session_id"],
+            )
+        rendered = "".join(
+            traceback.TracebackException.from_exception(
+                raised.value, capture_locals=True
+            ).format()
+        )
+        assert "RecoveryWorkflow(stage=unbuilt)" in rendered
+        assert FINGERPRINT not in rendered
+        assert MEDIUM.identity not in rendered
+
+
+def test_a_snapshot_mutated_during_the_prompt_is_a_substitution(observations) -> None:
+    """R5: the flags were re-read after the prompt and the pin was not.
+
+    `attempt()` is caller-supplied code and the one step the module documents
+    as blocking on a human. The two quarantine flags learned to be re-read
+    after it; the snapshot pin did not, and the commit then read the
+    descriptor's fields **twice more** on the far side of that wait. A review
+    mutated the frozen descriptor from inside the acquisition and reached
+    `COMMITTED`: `candidate_applies_to` answered `True`, and the audit's
+    `recovery_completed` named a schema version and a fingerprint no gate had
+    judged, with no `RECOVERY_SNAPSHOT_SUBSTITUTED` anywhere.
+
+    This is the substitution the whole design exists to notice, through the
+    one window the fix for the flags left open.
+    """
+
+    snap = descriptor()
+
+    class MutatesDuringThePrompt(Opens):
+        def attempt(self):
+            object.__setattr__(snap, "schema_version", 99)
+            object.__setattr__(snap, "fingerprint", "a-completely-different-snapshot")
+            return super().attempt()
+
+    flow = workflow(observations)
+    flow.start(snap, observations, session_id=SESSION, started_by_operator=True)
+    flow.open_trial(snap, observations, session_id=SESSION)
+
+    with pytest.raises(RecoveryRefused) as refused:
+        flow.commit(
+            snap,
+            observations,
+            session_id=SESSION,
+            acquisition=MutatesDuringThePrompt(),
+            confirmed=True,
+        )
+    assert refused.value.refusal is Refusal.SNAPSHOT_CHANGED_UNDER_THE_WORKFLOW
+    assert flow.stage is RecoveryStage.REFUSED
+    assert SnapshotAuditEvent.RECOVERY_SNAPSHOT_SUBSTITUTED in [
+        entry.event for entry in flow.audit()
+    ]
+    assert not [entry for entry in flow.audit() if entry.schema_version == 99]
+
+
+def test_the_candidate_names_the_snapshot_that_was_judged(observations) -> None:
+    """R5, the other half: minting read the argument, not what was judged.
+
+    Even with the pin re-checked, reading the caller's object again at the
+    moment of minting is reading something the caller still holds. The values
+    come from `_pinned` — a descriptor built at `start` from the fields as they
+    were then, which the caller never had a reference to.
+    """
+
+    snap = descriptor()
+    flow = workflow(observations)
+    flow.start(snap, observations, session_id=SESSION, started_by_operator=True)
+    flow.open_trial(snap, observations, session_id=SESSION)
+
+    held = flow._pinned
+    assert held is not snap
+    assert _fields_of(held) == _fields_of(snap)
+
+    candidate = flow.commit(
+        snap, observations, session_id=SESSION, acquisition=Opens(), confirmed=True
+    )
+    assert candidate.schema_version == 1
+    assert flow.audit()[-1].fingerprint == FINGERPRINT
+    assert flow.audit()[-1].schema_version == 1
+
+
+def test_a_preflight_is_free_so_spending_is_keyed_on_the_snapshot() -> None:
+    """R5: the write-once defence was one `preflight()` call wide.
+
+    `preflight` is read-only, unlimited and free, so four calls over one
+    snapshot mint four distinct spendable verdicts — and one ledger recorded
+    four `SNAPSHOT_WRITTEN` classifications for one write, which is the false
+    count the WeakSet was added to remove. Spent-ness belongs to the snapshot.
+    """
+
+    healthy = a_quarantine(quarantined=False)
+    snapshot = descriptor()
+    ledger = MigrationLedger()
+
+    def judged():
+        return preflight(
+            healthy,
+            snapshot=snapshot,
+            capacity=capacity(),
+            current_schema=1,
+            target_schema=2,
+            binding_holds=True,
+            generation_holds=True,
+            image_digest_holds=True,
+        )
+
+    ledger.note_snapshot_written(judged(), snapshot, quarantine=healthy)
+    for _ in range(3):
+        with pytest.raises(RecoveryRefused) as refused:
+            ledger.note_snapshot_written(judged(), snapshot, quarantine=healthy)
+        assert refused.value.refusal is Refusal.VERDICT_ALREADY_SPENT
+    assert len(ledger.audit()) == 1
+
+    # A *different* snapshot, judged separately, is a different write.
+    other = descriptor(schema_version=2, fingerprint="snapshot-fingerprint-0002")
+    second = preflight(
+        healthy,
+        snapshot=other,
+        capacity=capacity(),
+        current_schema=1,
+        target_schema=2,
+        binding_holds=True,
+        generation_holds=True,
+        image_digest_holds=True,
+    )
+    ledger.note_snapshot_written(second, other, quarantine=healthy)
+    assert len(ledger.audit()) == 2
+
+
+def test_a_passing_verdict_that_skipped_a_check_is_refused() -> None:
+    """R5: `evaluated` reported honestly and nothing asked it back.
+
+    `PREFLIGHT_ORDER` is a module global the loop trusts, so rebinding it
+    produced a **legitimately minted** passing verdict, asked one check, over a
+    medium that was fenced, quarantined and failing its binding — and the
+    ledger accepted it. Completeness that nobody consumes is a note, not a
+    check.
+    """
+
+    verdict = preflight(
+        a_quarantine(quarantined=False),
+        snapshot=descriptor(),
+        capacity=capacity(),
+        current_schema=1,
+        target_schema=2,
+        binding_holds=True,
+        generation_holds=True,
+        image_digest_holds=True,
+    )
+    assert verdict.evaluated == PREFLIGHT_ORDER
+
+    shortened = PREFLIGHT_ORDER[:1]
+    object.__setattr__(verdict, "_evaluated", shortened)
+    assert verdict.may_migrate is True
+    assert verdict_was_minted_here(verdict) is True
+
+    ledger = MigrationLedger()
+    with pytest.raises(RecoveryRefused) as refused:
+        ledger.may_migrate(verdict, quarantine=a_quarantine(quarantined=False))
+    assert refused.value.refusal is Refusal.VERDICT_DID_NOT_ASK_EVERY_CHECK
     assert ledger.audit() == ()
