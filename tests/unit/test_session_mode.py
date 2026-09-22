@@ -771,23 +771,52 @@ def test_this_module_cannot_reach_a_disk_a_device_a_network_or_a_vm() -> None:
 
     assert imported == {"__future__", "dataclasses", "enum", "typing", "azazel_boot"}
 
-    called: set[str] = set()
+    # Attribute calls as well as name calls, and the names that make a call
+    # unnecessary. A review added a function to this module with **no import
+    # statement at all** that read a file and sent it over TCP:
+    #
+    #     b = __builtins__ if isinstance(__builtins__, dict) else vars(__builtins__)
+    #     handle = b["open"](path, "rb"); payload = handle.read()
+    #     net = b["__import__"]("so" + "cket")
+    #
+    # The import allowlist saw nothing, because there is no import; the call
+    # check saw nothing, because `b["open"](...)` is a call on a `Subscript`
+    # and `net.socket(...)` is a call on an `Attribute`. An allowlist of
+    # imports is not an allowlist of reachability while `__builtins__` is a
+    # name in scope.
+    reachable: set[str] = set()
     for node in ast.walk(TREE):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-            called.add(node.func.id)
-    assert not called & {
-        "__import__",
+        if isinstance(node, ast.Name):
+            reachable.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            reachable.add(node.attr)
+    assert not reachable & {
+        "__builtins__",
+        "__loader__",
+        "__spec__",
+        "globals",
+        "vars",
         "eval",
         "exec",
         "compile",
+        "__import__",
         "open",
         "input",
-        "globals",
-        "vars",
-    }
-    # `getattr` is not on that list: `__setattr__` uses it to read `_sealed`
-    # during construction, before the slot exists. It is a real use, so
-    # forbidding it would mean forbidding the seal.
+        "setattr",
+        "delattr",
+    }, sorted(reachable & {"__builtins__", "globals", "vars", "eval", "exec", "compile",
+                           "__import__", "open", "input", "setattr", "delattr"})
+
+    # And no call whose callee is a subscript, which is the shape `b["open"]()`
+    # takes. This module indexes nothing and calls nothing it indexed.
+    assert not [
+        node
+        for node in ast.walk(TREE)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Subscript)
+    ]
+    # `getattr` is deliberately absent from that set: `__setattr__` uses it to
+    # read `_sealed` during construction, before the slot exists, so forbidding
+    # it would mean forbidding the seal.
 
     # And over *code*, not prose: every identifier the module uses and every
     # string literal that is not a docstring. The module docstring says in
