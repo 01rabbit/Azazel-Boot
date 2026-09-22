@@ -1,15 +1,19 @@
 # ADR-0010: Persistence key handling, dirty-write detection, and migration
 
-Status: **accepted (2026-09-22) — nothing implemented.** The owner decided
-D1–D10 below. Implementation has **not** started;
-[#7](https://github.com/01rabbit/Azazel-Boot/issues/7) stays open and is
-decomposed into the three children this record names.
+Status: **accepted (2026-09-22). D1–D3 implemented in software and
+hardware-unverified; D4–D10 not implemented.** The owner decided D1–D10 below.
+`azazel_boot.session_mode` implements D1, D2 and D3 — see
+[session mode](../session-mode.md) — on no hardware: no passphrase has been
+attempted and no volume opened on any device.
+[#7](https://github.com/01rabbit/Azazel-Boot/issues/7) stays open, and so do
+the three children this record names.
 
 Related: [ADR-0008 D4.1 / D4.1.1](0008-debian-13-live-baseline.md) ·
 [ADR-0003 D4](0003-immutable-ab-update.md) ·
 [Threat model](../threat-model.md) §4–§5 ·
 [Quarantine policy](../quarantine-policy.md) §4 ·
-[Persistence](../persistence.md) · [Recovery](../recovery.md)
+[Persistence](../persistence.md) · [Recovery](../recovery.md) ·
+[Session mode](../session-mode.md) — D1–D3 as implemented
 
 ## Context
 
@@ -241,8 +245,10 @@ these values are not traceability.
 
 ## What this record does not establish
 
-**Nothing here is implemented.** No volume has been created, opened, sealed,
-torn, quarantined, snapshotted, migrated or restored on any device. No
-passphrase has been attempted. These are decisions; the work that follows them
-is #7 and its three children, and every one of those carries
-`hardware-unverified` until a real USB SSD and a real laptop say otherwise.
+**No volume has been created, opened, sealed, torn, quarantined, snapshotted,
+migrated or restored on any device. No passphrase has been attempted.** D1–D3
+now exist as decision logic in `azazel_boot.session_mode`, which opens nothing
+and prompts for nothing: it decides what an outcome reported by something else
+means. D4–D10 are decisions with no code behind them at all. #7 and its three
+children stay open, and every one of them carries `hardware-unverified` until a
+real USB SSD and a real laptop say otherwise.
