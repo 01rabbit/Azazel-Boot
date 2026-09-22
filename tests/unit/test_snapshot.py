@@ -3267,3 +3267,41 @@ def test_one_preflight_records_one_write_in_any_ledger() -> None:
         assert refused.value.refusal is Refusal.VERDICT_ALREADY_SPENT
     assert len(first.audit()) == 1
     assert second.audit() == ()
+
+
+def test_the_write_record_asks_whether_the_verdict_passed() -> None:
+    """R4: the `may_migrate` clause had nothing that could fail for its reason.
+
+    Deleting it left the suite green, because a refusal mints with
+    `_snapshot=None` and the identity tie answered first — so the clause is
+    unreachable through `preflight` today, and is the kind a later tidy-up
+    removes as dead. What it guards against is `_mint` one day carrying the
+    snapshot on refusals too, at which point a *refused* verdict would name the
+    snapshot it refused and the tie would no longer answer.
+
+    So it is driven against exactly that shape: a genuinely minted **refusal**
+    that names the presented snapshot. Only this clause can refuse it.
+    """
+
+    snapshot = descriptor(integrity=SnapshotIntegrity.FAILED)
+    refused_verdict = preflight(
+        a_quarantine(quarantined=False),
+        snapshot=snapshot,
+        capacity=capacity(),
+        current_schema=1,
+        target_schema=2,
+        binding_holds=True,
+        generation_holds=True,
+        image_digest_holds=True,
+    )
+    object.__setattr__(refused_verdict, "_snapshot", snapshot)
+
+    assert verdict_was_minted_here(refused_verdict) is True
+    assert refused_verdict._snapshot is snapshot
+    assert refused_verdict.may_migrate is False
+
+    ledger = MigrationLedger()
+    with pytest.raises(RecoveryRefused) as refused:
+        ledger.note_snapshot_written(refused_verdict, snapshot)
+    assert refused.value.refusal is Refusal.VERDICT_NOT_MINTED_BY_A_PREFLIGHT
+    assert ledger.audit() == ()
