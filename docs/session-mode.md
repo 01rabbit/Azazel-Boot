@@ -10,7 +10,9 @@ sealed or created on any device.
 Implements [ADR-0010](adr/0010-persistence-key-and-migration.md) D1, D2 and D3.
 D4–D10 are decided and **not** implemented.
 
-Related: [Persistence](persistence.md) · [Threat model](threat-model.md) §5 ·
+Related: [ADR-0011](adr/0011-unlock-helper-boundary.md) — the shape of the
+acquisition that does not yet exist ·
+[Persistence](persistence.md) · [Threat model](threat-model.md) §5 ·
 [Quarantine policy](quarantine-policy.md) §4 ·
 [Confirmation flow](confirmation-flow.md) ·
 [#40](https://github.com/01rabbit/Azazel-Boot/issues/40)
@@ -209,6 +211,9 @@ file, which the same review armed and walked four forbidden tokens through.
   open.
 - **No acquisition exists.** Nothing in this repository can prompt for a
   passphrase, so nothing can return `OPENED` outside a test.
+  [ADR-0011](adr/0011-unlock-helper-boundary.md) decides what one would look
+  like — an initramfs hook helper reporting a process exit status — and decides
+  it only; no helper is written, and there is no initramfs to put one in.
 - **D4–D10 are not implemented.** Dirty-write detection and volume-wide
   quarantine ([#41](https://github.com/01rabbit/Azazel-Boot/issues/41)) and the
   in-partition snapshot, preflight and recovery workflow
