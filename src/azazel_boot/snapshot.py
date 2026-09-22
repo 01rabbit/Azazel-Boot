@@ -124,6 +124,12 @@ class SnapshotDescriptor:
         if type(self.fingerprint) is not str or not self.fingerprint.strip():
             raise TypeError("fingerprint must be a non-empty opaque string")
 
+    def __reduce__(self):
+        raise TypeError("a SnapshotDescriptor is not serialisable")
+
+    def __getstate__(self):
+        raise TypeError("a SnapshotDescriptor does not hand back its fields")
+
     def __repr__(self) -> str:
         """Redacted. A fingerprint in a repr is a fingerprint in every traceback."""
 
@@ -134,26 +140,49 @@ class SnapshotDescriptor:
         )
 
 
-@dataclass(frozen=True)
 class CapacityReport:
-    """Space, as the caller measured it. **These numbers never reach an audit.**
+    """Space, as the caller measured it. **These numbers never render.**
 
     They describe the operator's medium — how much they are carrying and how
     much of it is used — and ADR-0010 D10's rule about the audit is that it
     holds classifications. Which check refused is a classification; how many
     bytes were short is a measurement of somebody's hardware.
+
+    **Not a dataclass**, which is the whole of the difference. It was one, with
+    a redacting `__repr__`, and the claim in this docstring was "these numbers
+    never reach an audit" while `dataclasses.asdict`, `astuple`, `vars()` and
+    `__getstate__` all handed them back — a review printed both figures through
+    four public paths. A `__repr__` is a rendering, not a boundary. The values
+    live in slots nothing here exposes, the one question this module asks is
+    asked inside the class, and the serialisation hooks refuse.
     """
 
-    required: int
-    available: int
+    __slots__ = ("_required", "_available")
 
-    def __post_init__(self) -> None:
-        for name, value in (("required", self.required), ("available", self.available)):
+    def __init__(self, *, required: int, available: int) -> None:
+        for name, value in (("required", required), ("available", available)):
             if type(value) is not int or value < 0:
                 raise TypeError(f"{name} must be a non-negative integer")
+        object.__setattr__(self, "_required", required)
+        object.__setattr__(self, "_available", available)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError("a CapacityReport is fixed when it is built")
+
+    def __reduce__(self):
+        raise TypeError("a CapacityReport is not serialisable")
+
+    def __getstate__(self):
+        raise TypeError("a CapacityReport does not hand back its figures")
 
     def __repr__(self) -> str:
         return "CapacityReport(<redacted>)"
+
+    def has_room_for_the_snapshot(self) -> bool:
+        """The one question. Asked here, so the figures answer it and travel
+        nowhere: what leaves this object is a `bool`."""
+
+        return self._available >= self._required
 
 
 class PreflightCheck(Enum):
@@ -226,6 +255,9 @@ class PreflightVerdict:
     def __reduce__(self):
         raise TypeError("a PreflightVerdict is not serialisable")
 
+    def __getstate__(self):
+        raise TypeError("a PreflightVerdict does not hand back its fields")
+
     def __repr__(self) -> str:
         decided = self._refused_by.value if self._refused_by is not None else "may_migrate"
         return f"PreflightVerdict({decided})"
@@ -287,6 +319,19 @@ _MINTED_HERE: _WeakSet = _WeakSet()
 #: ledger is the same false count as one replayed into the first.
 _ALREADY_SPENT: _WeakSet = _WeakSet()
 
+#: And the **snapshots**, by value, across every ledger in the process. Marking
+#: the verdict spent was exactly one `preflight()` call wide: a preflight is
+#: free, read-only and unlimited, so a review minted a fresh verdict per ledger
+#: and recorded four writes for one judged snapshot — with the per-ledger list
+#: below satisfied every time, because each ledger was new.
+#:
+#: Weak, and keyed by **value** — `SnapshotDescriptor` is a frozen dataclass,
+#: so an equal descriptor hashes equal — which is what "this snapshot's write
+#: is already recorded" means. Weak so that a descriptor nobody holds any more
+#: is not kept alive by having been recorded: the question is about snapshots
+#: in hand, and this module keeps no census of the ones that are gone.
+_SNAPSHOTS_RECORDED: _WeakSet = _WeakSet()
+
 #: The order the gates are asked in, named once so that it is a contract rather
 #: than the order the lines happen to sit in. A review permuted eight adjacent
 #: pairs and six demotions-to-last with the suite green: no bad input passed —
@@ -319,6 +364,19 @@ _MOVES_DURING_A_RECOVERY = frozenset({"_stage", "_snapshot", "_pinned", "_candid
 #: start, no operator, no trial — through a bound method on every instance.
 #: Written once, when the workflow starts, and never again.
 _PINNED_AT_THE_START = frozenset({"_snapshot", "_pinned"})
+
+#: Issued by `_require_the_gates` when every gate has just passed, and consumed
+#: by the one transition that may follow. Naming the fields that move and the
+#: edges the stage may travel was not enough: `trial_open -> committed` is a
+#: legal edge, and D8's key acquisition and operator confirmation live inside
+#: `commit` rather than in the graph, so a review took that edge with
+#: `_sealed_assign` and minted an accepted candidate for schema 99 with no
+#: acquisition ever constructed and no operator ever asked — with an audit
+#: **byte-identical** to a legitimate commit.
+#:
+#: Issued, not asserted: the value is this object, and nothing a caller can
+#: name produces it.
+_GATES_JUST_PASSED = object()
 
 _STAGE_EDGES = frozenset(
     {
@@ -510,7 +568,12 @@ SUPPORTED_SCHEMA_VERSIONS = (1, 2)
 
 
 def schema_is_compatible(*, current: int, target: int) -> bool:
-    """Forward, by one known step, and never backwards.
+    """Forward, to a version this build knows, and never backwards.
+
+    Not "by one step": the body asks membership of `SUPPORTED_SCHEMA_VERSIONS`
+    and then `target > current`, which is any forward target in the set. The
+    two readings coincide while the set is `(1, 2)` and would part on the day
+    it is not, so the sentence is the one the code implements.
 
     A downgrade is refused rather than attempted: the old schema continuing to
     work is D7's safe outcome, and writing an older layout over a newer one is
@@ -564,7 +627,7 @@ def _gate_fails(
     if check is PreflightCheck.REQUIRED_SPACE:
         # No degraded migration, no "we can fit most of it". A medium too small
         # keeps the old schema and keeps working.
-        return capacity.available < capacity.required
+        return not capacity.has_room_for_the_snapshot()
     if check is PreflightCheck.SCHEMA_COMPATIBILITY:
         return not schema_is_compatible(current=current_schema, target=target_schema)
     if check is PreflightCheck.BINDING:
@@ -675,6 +738,12 @@ TERMINAL_STAGES = (
     RecoveryStage.COMMITTED,
     RecoveryStage.REFUSED,
     RecoveryStage.INTERRUPTED,
+)
+
+#: The two stages a workflow reaches without passing anything: a refusal and
+#: an interruption. Every other stage is arrived at by passing the gates.
+_REACHED_WITHOUT_GATES = frozenset(
+    {RecoveryStage.REFUSED, RecoveryStage.INTERRUPTED}
 )
 
 
@@ -821,6 +890,12 @@ class SnapshotAuditEntry:
         if self.fingerprint is not None:
             _require_an_exact_str("fingerprint", self.fingerprint)
 
+    def __reduce__(self):
+        raise TypeError("a SnapshotAuditEntry is not serialisable")
+
+    def __getstate__(self):
+        raise TypeError("a SnapshotAuditEntry does not hand back its fields")
+
     def __repr__(self) -> str:
         """Redacting, because **this** is the object destined for a log.
 
@@ -894,6 +969,9 @@ class RecoveryCandidate:
             "workflow in one session, not to a file that outlives it"
         )
 
+    def __getstate__(self):
+        raise TypeError("a RecoveryCandidate does not hand back its fields")
+
     def __repr__(self) -> str:
         return (
             f"RecoveryCandidate(schema_version={self._schema_version}, "
@@ -939,6 +1017,7 @@ class RecoveryWorkflow:
         "_snapshot",
         "_pinned",
         "_candidate",
+        "_cleared",
         "_sealed",
     )
 
@@ -958,7 +1037,8 @@ class RecoveryWorkflow:
         self._session_id = session_id
         self._stage = RecoveryStage.NOT_STARTED
         self._snapshot: SnapshotDescriptor | None = None
-        self._pinned: tuple[object, ...] | None = None
+        self._pinned: SnapshotDescriptor | None = None
+        self._cleared: object | None = None
         self._candidate: RecoveryCandidate | None = None
         self._audit: list[SnapshotAuditEntry] = []
         object.__setattr__(self, "_sealed", True)
@@ -974,6 +1054,9 @@ class RecoveryWorkflow:
 
     def __reduce__(self):
         raise TypeError("a RecoveryWorkflow is not serialisable")
+
+    def __getstate__(self):
+        raise TypeError("a RecoveryWorkflow does not hand back its fields")
 
     def __repr__(self) -> str:
         """Survives a half-built instance, because that is when it is called.
@@ -1356,6 +1439,10 @@ class RecoveryWorkflow:
         if snapshot.container_version not in KNOWN_CONTAINER_VERSIONS:
             self._refuse_gate(RecoveryGate.INTEGRITY_VERIFICATION)
 
+        # Every gate passed, just now. The token is spent by the next stage
+        # transition and by nothing else.
+        object.__setattr__(self, "_cleared", _GATES_JUST_PASSED)
+
     def _refuse_gate(self, gate: RecoveryGate) -> None:
         self._sealed_assign("_stage", RecoveryStage.REFUSED)
         self._record(SnapshotAuditEvent.RECOVERY_REFUSED, gate=gate)
@@ -1416,6 +1503,20 @@ class RecoveryWorkflow:
             raise AttributeError(
                 "the stage travels its own graph; a jump between stages is not "
                 "a stage this workflow reached"
+            )
+        # A stage the gates lead to is reached by passing them. `REFUSED` and
+        # `INTERRUPTED` are the two a refusal and an interruption reach, and
+        # they are the only ones a workflow moves to without a clearance.
+        if name == "_stage" and value not in _REACHED_WITHOUT_GATES:
+            if self._cleared is not _GATES_JUST_PASSED:
+                raise AttributeError(
+                    "this stage is reached by passing the gates; a workflow "
+                    "does not arrive at one it did not pass"
+                )
+            object.__setattr__(self, "_cleared", None)
+        if name == "_candidate" and self._cleared is not _GATES_JUST_PASSED:
+            raise AttributeError(
+                "a candidate is minted by a commit whose gates passed"
             )
         if name in _PINNED_AT_THE_START and self._stage is not RecoveryStage.NOT_STARTED:
             raise AttributeError(
@@ -1504,6 +1605,9 @@ class MigrationLedger:
     def __reduce__(self):
         raise TypeError("a MigrationLedger is not serialisable")
 
+    def __getstate__(self):
+        raise TypeError("a MigrationLedger does not hand back its fields")
+
     def __repr__(self) -> str:
         return "MigrationLedger()"
 
@@ -1555,7 +1659,15 @@ class MigrationLedger:
         rather than a note.
         """
 
-        if verdict.may_migrate and verdict.evaluated != PREFLIGHT_ORDER:
+        # Against **`PreflightCheck` itself**, not against `PREFLIGHT_ORDER`.
+        # The rebound global was the attack, and comparing with the same global
+        # is tautologically true while the rebind is live: a review asked one
+        # check and this accepted it. The enum cannot be shortened by an
+        # assignment, so "every check, once" is a question the attacker's own
+        # value cannot answer.
+        asked = verdict.evaluated
+        complete = len(asked) == len(PreflightCheck) and set(asked) == set(PreflightCheck)
+        if verdict.may_migrate and not complete:
             raise RecoveryRefused(
                 Refusal.VERDICT_DID_NOT_ASK_EVERY_CHECK,
                 "a passing verdict is one that was asked every check in "
@@ -1629,14 +1741,25 @@ class MigrationLedger:
                 "that snapshot; a passing verdict for a different one is not "
                 "permission to record this one",
             )
-        if verdict in _ALREADY_SPENT or _fields_of(snapshot) in self._written:
+        # Asked here as well, after the verdict is known to be one of ours. It
+        # was enforced on the **permission** path and not on the **recording**
+        # path, so a verdict `may_migrate` had refused for asking one check was
+        # still accepted as the record of a write.
+        self._require_every_gate_was_asked(verdict)
+        written = _fields_of(snapshot)
+        if (
+            verdict in _ALREADY_SPENT
+            or written in self._written
+            or snapshot in _SNAPSHOTS_RECORDED
+        ):
             raise RecoveryRefused(
                 Refusal.VERDICT_ALREADY_SPENT,
                 "this snapshot's write is already recorded; a second record "
                 "against it would be a second write that did not happen",
             )
         _ALREADY_SPENT.add(verdict)
-        self._written.append(_fields_of(snapshot))
+        self._written.append(written)
+        _SNAPSHOTS_RECORDED.add(snapshot)
 
         self._audit.append(
             SnapshotAuditEntry(

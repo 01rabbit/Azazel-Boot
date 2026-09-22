@@ -40,6 +40,20 @@ paths that drive reaches and no others. The other modules do not have one.
 
 This is a statement of fact about the checks, not a revision of what D9 and D10
 decide.
+
+**Three further facts about this record, none of them a revision.** (1) D8
+gate 2 says "under D2's limit"; `azazel_boot.snapshot` imports neither
+`BootSession` nor `ATTEMPT_BUDGET`, so a recovery's key acquisition is **not**
+under that limit as shipped, and a review drove 26 prompts in one boot with 21
+of them after persistence had been sealed. (2) D8 gate 1 names ADR-0008
+D4.1.1's key-protected media binding; the workflow takes the caller's
+**report** of it as a `bool`, because a `BindingKey` inside a decision module
+is the secret arriving where `session_mode` decided it must not. (3) D4 says
+"leaving quarantine is possible **only** through the explicit recovery workflow
+in D8" — and D8 as implemented does not leave quarantine at all: it hands back
+a candidate, so as written that sentence names an empty set. Each is recorded
+here as an observed difference between this record and the code; reconciling
+them is not this pull request's to do.
 [#7](https://github.com/01rabbit/Azazel-Boot/issues/7) stays open, and so do
 the three children this record names.
 

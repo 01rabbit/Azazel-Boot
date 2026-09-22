@@ -297,11 +297,13 @@ reasoning about a device that is not there.
 
 The quarantine is **one-way within the boot**. There is no clearing call — not
 `clear`, not `reopen`, not `reset` — and a test asserts the absence over the
-public surface rather than trying the obvious spellings one at a time. Leaving
-quarantine is D8's explicit recovery workflow, which is
-[#42](https://github.com/01rabbit/Azazel-Boot/issues/42) and does not exist; a
-method here that ended the state would be that workflow with its four gates
-removed.
+public surface rather than trying the obvious spellings one at a time. There is no
+clearing call here and none in
+[#42](https://github.com/01rabbit/Azazel-Boot/issues/42) either: D8's recovery
+workflow (`azazel_boot.snapshot`) hands back a **candidate** and leaves the
+quarantine exactly as it found it — see
+[snapshot and recovery](snapshot-and-recovery.md). A method here that ended
+the state would be that workflow with all of its gates removed.
 
 ### Nothing is called erased
 

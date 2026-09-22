@@ -142,7 +142,7 @@ successors failing at once.
 | 4 | its container version is known | |
 | 5 | its integrity verified | `INDETERMINATE` lands with `FAILED`; ambiguity refuses |
 | 6 | required vs available space | |
-| 7 | schema compatibility | forward by a known step; a downgrade and a no-op both refuse |
+| 7 | schema compatibility | forward to a version this build knows; a downgrade, a no-op and a version outside the supported set all refuse |
 | 8 | binding, generation, image digest | |
 
 A verdict also names **which checks were asked**, in order, passes included.
@@ -220,6 +220,16 @@ ends at `REFUSED` from `NOT_STARTED`, and an interruption is available
 throughout. An earlier version of this diagram showed `REFUSED` branching only
 from `PREFLIGHT_PASSED` and `INTERRUPTED` only from `TRIAL_OPEN`, which was
 narrower than the code and than the tests.
+
+A stage the gates lead to is **reached by passing them**. Naming the fields
+that move and the edges the stage may travel was not enough: `trial_open →
+committed` is a legal edge, and D8's key acquisition and operator confirmation
+live inside `commit` rather than in the graph — so a review took the legal edge
+from a genuine `TRIAL_OPEN` and minted an accepted candidate for schema 99 with
+no acquisition ever constructed and no operator ever asked, on an audit
+byte-identical to a real commit. `_require_the_gates` issues a clearance when
+every gate has just passed; the next transition spends it. `REFUSED` and
+`INTERRUPTED` need none, being what a refusal and an interruption reach.
 
 `COMMITTED`, `REFUSED` and `INTERRUPTED` are **terminal**. There is no call
 that restarts a finished workflow, because restarting is a new workflow that

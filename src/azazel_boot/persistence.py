@@ -1154,12 +1154,13 @@ class PersistenceSession:
         beside it. The fact belongs to the medium, so it lives on the medium's
         rule.
 
-        There is no call that clears it — not here and not on the quarantine.
-        ADR-0010 D4 puts leaving quarantine behind D8's explicit recovery
-        workflow, which is
-        [#42](https://github.com/01rabbit/Azazel-Boot/issues/42) and does not
-        exist. A method that ended the state would be that workflow, minus its
-        four gates.
+        There is no call that clears it — not here, not on the quarantine, and
+        not in D8's recovery workflow either. `azazel_boot.snapshot`
+        ([#42](https://github.com/01rabbit/Azazel-Boot/issues/42)) hands back a
+        **candidate** and leaves the quarantine exactly as it found it: getting
+        back to ordinary use is a different session, starting over. A method
+        that ended the state here would be that workflow with all of its gates
+        removed.
         """
 
         return self._quarantine.volume_is_quarantined
