@@ -56,6 +56,7 @@ D4.1's three-partition layout is not revised.
 from __future__ import annotations
 
 import threading
+import unicodedata
 from enum import Enum
 from weakref import WeakKeyDictionary as _WeakKeyDictionary
 from weakref import WeakSet as _WeakSet
@@ -967,6 +968,23 @@ def _require_an_opaque_value(name: str, value: str) -> None:
     separator instead of `\n`, and each rendered as a separate line wherever
     the audit was read back. Asking the same function the value would later
     be split by is what makes the check and the rendering agree.
+
+    **Not every dangerous byte is a line boundary.** A round-31 security
+    review pointed out that `ESC` (`\x1b`) is neither a forbidden character
+    above nor a `str.splitlines()` boundary, so a fingerprint carrying raw
+    ANSI/OSC terminal escape sequences — cursor movement, conceal/color
+    codes, an OSC window-title or clipboard-write sequence — passed this
+    check unchanged, as a single "line", and reached the one property this
+    module deliberately leaves unredacted (`fingerprint`, on both
+    `SnapshotDescriptor` and `SnapshotAuditEntry` — the latter "the object
+    actually destined for a log", by this file's own words). This asks
+    `unicodedata.category` rather than enumerating escape sequences by
+    pattern, the same "checkable shape, not a guarantee about meaning"
+    framing as the rest of this function: category `Cc` is the C0/C1
+    control bytes (including `ESC` and the bytes every ANSI/OSC sequence
+    is built from), and `Cf` is the invisible format characters (bidi
+    overrides, zero-width joiners) a spoofed or reordered-looking log line
+    could be built from the same way.
     """
 
     if len(value) > 128:
@@ -980,6 +998,12 @@ def _require_an_opaque_value(name: str, value: str) -> None:
             raise TypeError(
                 f"{name} must be an opaque token; a path, a rendered field or "
                 "a line of text is not one"
+            )
+    for character in value:
+        if unicodedata.category(character) in ("Cc", "Cf"):
+            raise TypeError(
+                f"{name} must be an opaque token; a control or format "
+                "character is not one"
             )
 
 

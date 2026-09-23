@@ -422,6 +422,16 @@ def test_nothing_in_this_module_can_lift_a_quarantine_or_a_fence() -> None:
         # name is a public name whether it names this module's own value or
         # a module it imported.
         "threading",
+        # A second stdlib module, added round 31: `_require_an_opaque_value`
+        # rejects Unicode control/format categories via
+        # `unicodedata.category`, the fix for a fingerprint that could
+        # carry raw terminal escape sequences (ANSI/OSC) unchanged through
+        # to the one place this module deliberately leaves it unredacted
+        # (`SnapshotAuditEntry.fingerprint`, "the object destined for a
+        # log"). Same reasoning as `threading` above: a public name is a
+        # public name whether it names this module's own value or a
+        # module it imported.
+        "unicodedata",
         "Enum",
         "KNOWN_CONTAINER_VERSIONS",
         "PREFLIGHT_ORDER",
@@ -1016,6 +1026,12 @@ def test_preflight_is_read_only_by_construction() -> None:
         # needs a lock and not a re-check to fix — a genuine race in the
         # *state itself*, not merely in which exception type escapes it.
         "threading",
+        # Added deliberately, round 31: `_require_an_opaque_value` asks
+        # `unicodedata.category` to refuse Unicode control/format
+        # characters — the fix for a fingerprint that could carry raw
+        # terminal escape sequences through to the one place this module
+        # deliberately leaves it unredacted.
+        "unicodedata",
         "Enum",
         "WeakKeyDictionary",
         "WeakSet",
@@ -1036,6 +1052,7 @@ def test_preflight_is_read_only_by_construction() -> None:
     assert imported == {
         "__future__",
         "threading",
+        "unicodedata",
         "enum",
         # Added deliberately: `_MINTED_HERE` is a `WeakSet` now, because a
         # sentinel stamped onto a verdict is a sentinel a caller can read off
@@ -5465,18 +5482,30 @@ def test_two_real_threads_preflighting_the_same_medium_both_stay_judged() -> Non
 
 
 def test_the_judged_lock_never_releases_between_the_read_and_the_record() -> None:
-    """R30 (test-suite review): the sibling gap, for `_JUDGED_LOCK`.
+    """R30 (test-suite review): the sibling gap, for `_JUDGED_LOCK`. R31
+    (doctrine review): round 30's first attempt did not reach far enough
+    here either — see the full account in `test_the_write_lock_never_
+    releases_between_the_read_and_the_record`, which this mirrors exactly.
 
-    Same finding as `test_the_write_lock_never_releases_between_the_read_
-    and_the_record`, for the sibling lock: the two-thread race test above
-    proves a full removal of `_JUDGED_LOCK` is caught, but a narrower
-    mutant that releases it right after `_JUDGED_BY.get(quarantine)` and
-    lets `_JUDGED_BY[quarantine] = judged` run unprotected reopens the
-    identical race one statement later, and the race test's own thread
-    "b" stays blocked on the (still-present, just narrower) lock for its
-    whole grace period, never interleaving with "a"'s now-unprotected
-    tail. Asked directly instead of raced for, the same way, with the
-    same technique.
+    Same finding as that test, for the sibling lock: the two-thread race
+    test above proves a full removal of `_JUDGED_LOCK` is caught, but a
+    narrower mutant that releases it right after `_JUDGED_BY.get(quarantine)`
+    and lets `_JUDGED_BY[quarantine] = judged` / `judged.add(verdict)` run
+    unprotected reopens the identical race one or two statements later, and
+    the race test's own thread "b" stays blocked on the (still-present,
+    just narrower) lock for its whole grace period, never interleaving with
+    "a"'s now-unprotected tail. Round 30's original version hooked
+    `_WeakIdentityIndex.__setitem__` as its "write" checkpoint — which
+    fires at `_JUDGED_BY[quarantine] = judged`, *before* `judged.add(verdict)`
+    — so it never observed whether the verdict was actually recorded into
+    the set, only whether the (still-empty) set had been registered. Asked
+    directly instead, the same way its sibling now is: patch
+    `_CountingRLock.release` — called exactly once, synchronously, at the
+    moment `_JUDGED_LOCK`'s `with` block exits — and check, before
+    forwarding to the real release, whether this quarantine's judged-set
+    already has a member. A fresh quarantine (never preflighted before
+    this call) makes the check exact: nothing else in this process could
+    have populated it first.
     """
 
     import azazel_boot.snapshot as module
@@ -5486,24 +5515,18 @@ def test_the_judged_lock_never_releases_between_the_read_and_the_record() -> Non
 
     counting_lock = _CountingRLock()
     original_lock = module._JUDGED_LOCK
-    release_count_at: dict[str, int] = {}
+    original_release = counting_lock.release
     original_get = module._WeakIdentityIndex.get
-    original_setitem = module._WeakIdentityIndex.__setitem__
+    write_landed_by_first_release: list[bool] = []
 
-    def recording_get(self, obj: object) -> object | None:
-        result = original_get(self, obj)
-        if self is module._JUDGED_BY and "read" not in release_count_at:
-            release_count_at["read"] = counting_lock.full_release_count
-        return result
+    def checking_release() -> None:
+        if not write_landed_by_first_release:
+            judged = original_get(module._JUDGED_BY, quarantine)
+            write_landed_by_first_release.append(judged is not None and len(judged) >= 1)
+        original_release()
 
-    def recording_setitem(self, obj: object, value: object) -> None:
-        original_setitem(self, obj, value)
-        if self is module._JUDGED_BY and "write" not in release_count_at:
-            release_count_at["write"] = counting_lock.full_release_count
-
+    counting_lock.release = checking_release
     module._JUDGED_LOCK = counting_lock
-    module._WeakIdentityIndex.get = recording_get
-    module._WeakIdentityIndex.__setitem__ = recording_setitem
     try:
         preflight(
             quarantine,
@@ -5517,15 +5540,13 @@ def test_the_judged_lock_never_releases_between_the_read_and_the_record() -> Non
         )
     finally:
         module._JUDGED_LOCK = original_lock
-        module._WeakIdentityIndex.get = original_get
-        module._WeakIdentityIndex.__setitem__ = original_setitem
 
-    assert "read" in release_count_at
-    assert "write" in release_count_at
-    # The actual claim: not one full release of `_JUDGED_LOCK` happened
-    # between reading which medium this verdict already judged and
-    # recording this one against it.
-    assert release_count_at["read"] == release_count_at["write"]
+    # The actual claim: by the moment `_JUDGED_LOCK` is first released, the
+    # verdict this call minted has already been recorded against this
+    # medium — not merely that the medium's index entry exists (round 30's
+    # gap), the set membership itself.
+    assert write_landed_by_first_release == [True]
+    assert counting_lock.full_release_count == 1
 
 
 def test_one_preflight_records_one_write_in_any_ledger() -> None:
@@ -5691,7 +5712,8 @@ def test_two_real_threads_recording_the_same_write_record_it_once() -> None:
 
 def test_the_write_lock_never_releases_between_the_read_and_the_record() -> None:
     """R30 (test-suite review): a coverage gap the two-thread race test
-    above could not see.
+    above could not see. R31 (doctrine review): round 30's own first
+    attempt at closing it did not actually reach far enough.
 
     `test_two_real_threads_recording_the_same_write_record_it_once` proves
     a full removal of `_WRITE_LOCK` is caught — but a *narrower* mutant,
@@ -5706,12 +5728,26 @@ def test_the_write_lock_never_releases_between_the_read_and_the_record() -> None
     uninterrupted_lock_hold` already closed once for `RecoveryWorkflow._lock`
     (round 21), never extended to this module-level lock.
 
-    This asks the question directly instead of racing for it: swap
-    `_WRITE_LOCK` for a wrapper that counts genuine full releases, record
-    that count immediately after the read and again immediately after the
-    write, and assert they are equal — proving no full release happened
-    anywhere in between, structurally, on every run, with no dependence
-    on thread scheduling at all.
+    Round 30's first version of this test hooked `_WeakIdentityIndex.
+    __setitem__` as its "write" checkpoint — but `__setitem__` only fires
+    on this medium's *first-ever* write, at `_SNAPSHOTS_RECORDED[quarantine]
+    = written`, which happens *before* `written.append(fields)` — the
+    actual mutation this lock exists to protect. A round-31 doctrine
+    review pointed out that checkpoint therefore never observed the append
+    at all, and a hand-built mutant that left exactly that line unprotected
+    (identical in shape to the one above) passed the "fixed" test
+    undetected. `list.append` cannot be patched per-instance the way
+    `_WeakIdentityIndex`'s methods can (`list` accepts no such override),
+    so this asks a different, more direct question instead: patch
+    `_CountingRLock.release` itself — called exactly once, synchronously,
+    at the moment (and only the moment) `_WRITE_LOCK`'s `with` block exits
+    — and check, *before* forwarding to the real release, whether
+    `_SNAPSHOTS_RECORDED` already reflects the completed write. Under the
+    correct implementation the append has already happened by the time
+    release is even called, because both are inside the same unbroken
+    hold; under either shape of narrowed-lock mutant, release fires before
+    the append ever runs, and the check catches it looking at the state
+    directly rather than counting releases around a proxy event.
     """
 
     import azazel_boot.snapshot as module
@@ -5728,41 +5764,36 @@ def test_the_write_lock_never_releases_between_the_read_and_the_record() -> None
         generation_holds=True,
         image_digest_holds=True,
     )
+    fields = _fields_of(snapshot)
 
     counting_lock = _CountingRLock()
     original_lock = module._WRITE_LOCK
-    release_count_at: dict[str, int] = {}
+    original_release = counting_lock.release
     original_get = module._WeakIdentityIndex.get
-    original_setitem = module._WeakIdentityIndex.__setitem__
+    write_landed_by_first_release: list[bool] = []
 
-    def recording_get(self, obj: object) -> object | None:
-        result = original_get(self, obj)
-        if self is module._SNAPSHOTS_RECORDED and "read" not in release_count_at:
-            release_count_at["read"] = counting_lock.full_release_count
-        return result
+    def checking_release() -> None:
+        if not write_landed_by_first_release:
+            written = original_get(module._SNAPSHOTS_RECORDED, quarantine)
+            write_landed_by_first_release.append(
+                written is not None and fields in written
+            )
+        original_release()
 
-    def recording_setitem(self, obj: object, value: object) -> None:
-        original_setitem(self, obj, value)
-        if self is module._SNAPSHOTS_RECORDED and "write" not in release_count_at:
-            release_count_at["write"] = counting_lock.full_release_count
-
+    counting_lock.release = checking_release
     module._WRITE_LOCK = counting_lock
-    module._WeakIdentityIndex.get = recording_get
-    module._WeakIdentityIndex.__setitem__ = recording_setitem
     try:
         ledger = MigrationLedger()
         ledger.note_snapshot_written(verdict, snapshot, quarantine=quarantine)
     finally:
         module._WRITE_LOCK = original_lock
-        module._WeakIdentityIndex.get = original_get
-        module._WeakIdentityIndex.__setitem__ = original_setitem
 
-    assert "read" in release_count_at
-    assert "write" in release_count_at
-    # The actual claim: not one full release of `_WRITE_LOCK` happened
-    # between reading whether this write was already recorded and
-    # recording it.
-    assert release_count_at["read"] == release_count_at["write"]
+    # The actual claim: by the moment `_WRITE_LOCK` is first released, the
+    # write this call was making has already landed — not merely that the
+    # medium's index entry exists (round 30's gap), the recorded fields
+    # themselves.
+    assert write_landed_by_first_release == [True]
+    assert counting_lock.full_release_count == 1
 
 
 def test_the_write_record_asks_whether_the_verdict_passed() -> None:

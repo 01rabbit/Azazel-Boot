@@ -579,10 +579,37 @@ its whole grace period, never getting the chance to interleave with the
 first thread's now-unprotected tail, so the outcome the race test checks
 comes out identical either way. Closed by asking the question directly
 instead of racing for it — the `_CountingRLock` technique — swapping each
-module-level lock for a release-counting wrapper, recording the count
-immediately after the read and again immediately after the write, and
-asserting they are equal: proving no full release happens in between,
-structurally, on every run, independent of thread scheduling.
+module-level lock for a release-counting wrapper.
+
+**Round 30's own first version of that technique did not reach far enough,
+and a round-31 doctrine review found the gap.** It recorded a checkpoint
+from inside `_WeakIdentityIndex.__setitem__`, on the theory that this was
+"the write." But `__setitem__` fires when the index entry is first created
+(`_SNAPSHOTS_RECORDED[quarantine] = written` / `_JUDGED_BY[quarantine] =
+judged`) — one statement *before* the mutation the lock actually exists to
+protect (`written.append(fields)` / `judged.add(verdict)` plus
+`_JUDGED_SOMETHING.add(verdict)`). A mutant that narrows the lock to
+release right after that assignment, leaving the append/add itself
+unprotected, satisfied round 30's checkpoint and passed undetected — the
+gap the two-thread race test already had, reopened one layer down inside
+its own replacement. `list.append` and the weak set's `add` are ordinary
+built-in-type methods and cannot be patched per-instance the way
+`_WeakIdentityIndex.get`/`__setitem__` can, so hooking the mutation call
+itself was not available as a fix.
+
+Closed instead by moving the checkpoint to the one place guaranteed to run
+exactly once, synchronously, at the true end of the critical section: the
+counting lock's own `release()`. Patching `release()` to check the
+protected data structure's actual final state — `fields in written` for
+`_WRITE_LOCK`, `judged is not None and len(judged) >= 1` for
+`_JUDGED_LOCK` — before forwarding to the real release proves the claim
+directly, with no dependence on which internal method happens to run when:
+under the correct implementation the append/add has already happened by
+the time release is first called, so the check is `True`; under either
+shape of narrowed-lock mutant, release fires before the mutation runs, and
+the check is `False`. Re-verified by mutation: narrowing either lock to
+release before its append/add is now caught, where round 30's version let
+it through.
 
 **One pair cannot be contested, and saying so is better than a test that looks
 like it proves it.** D8 orders key acquisition before integrity, but at the
