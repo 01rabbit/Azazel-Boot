@@ -1559,6 +1559,23 @@ def test_the_recovery_stage_vocabulary_is_exactly_these_six_stages() -> None:
     }
 
 
+def test_the_snapshot_integrity_vocabulary_is_exactly_these_three_verdicts() -> None:
+    """R36 (test-suite review): the third sibling gap, for `SnapshotIntegrity`.
+    Its completeness was only ever guarded *incidentally*, by a hardcoded
+    literal `3` inside `test_no_input_to_this_module_changes_anything_about_
+    the_quarantine`'s combinatorial `drives == 3 * 2 * 3 * ...` assertion —
+    a refactor collapsing that literal into `len(SnapshotIntegrity)` (a very
+    plausible "cleanup") would silently stop catching a new member, exactly
+    the shape `Refusal`/`RecoveryStage` were fixed for above.
+    """
+
+    assert {member.value for member in SnapshotIntegrity} == {
+        "verified",
+        "failed",
+        "indeterminate",
+    }
+
+
 def test_a_refused_migration_records_the_check_and_no_figure() -> None:
     """The capacity numbers describe the operator's medium. They stay there."""
 
@@ -1765,6 +1782,17 @@ def test_a_descriptor_of_the_wrong_shape_cannot_be_built() -> None:
         {"container_version": "1"},
         {"schema_version": 0},
         {"schema_version": True},
+        # R36 (test-suite review): `container_version`/`schema_version` share
+        # one validation loop (`type(value) is not int or value < 1`), but
+        # the cases above never drove the two fields through the identical
+        # edge set — `container_version` only got the wrong-type case,
+        # `schema_version` only got the boundary cases. Each of these three
+        # mutations (exempting one field from the bool exclusion, or from
+        # the zero boundary, or from the exact-type pin) passed the whole
+        # suite before these were added.
+        {"container_version": 0},
+        {"container_version": True},
+        {"schema_version": "1"},
         {"fingerprint": ""},
         {"fingerprint": "   "},
         {"fingerprint": 1234},
@@ -10737,17 +10765,45 @@ def test_the_two_value_types_refuse_direct_slot_assignment_and_a_subclass_eq() -
     """
 
     snapshot = descriptor(fingerprint="snapshot-fingerprint-slot-assign")
-    with pytest.raises(AttributeError, match="fixed when it is built"):
-        snapshot._container_version = 99
-    with pytest.raises(AttributeError, match="fixed when it is built"):
-        snapshot._fingerprint = "snapshot-fingerprint-replaced"
+    # R36 (test-suite review): `__setattr__` here is unconditional — it does
+    # not branch on `name` — but a mutation narrowing it to a per-name check
+    # that excludes exactly one field is still a mutation, and the field this
+    # test never drove is the field such a mutation would carve out
+    # undetected. `_container_version`/`_fingerprint` were driven; every
+    # slot now is.
+    for name, value in (
+        ("_container_version", 99),
+        ("_schema_version", 99),
+        ("_integrity", SnapshotIntegrity.FAILED),
+        ("_fingerprint", "snapshot-fingerprint-replaced"),
+    ):
+        with pytest.raises(AttributeError, match="fixed when it is built"):
+            setattr(snapshot, name, value)
     assert snapshot.container_version == 1
     assert snapshot.fingerprint == "snapshot-fingerprint-slot-assign"
 
     entry = SnapshotAuditEntry(event=SnapshotAuditEvent.SNAPSHOT_WRITTEN, schema_version=1)
-    with pytest.raises(AttributeError, match="fixed when it is built"):
-        entry._schema_version = 99
+    # R36 (test-suite review): the sibling gap — only `_schema_version` was
+    # driven, leaving `_event`/`_check`/`_gate`/`_fingerprint` undriven.
+    for name, value in (
+        ("_event", SnapshotAuditEvent.RECOVERY_STARTED),
+        ("_check", PreflightCheck.REQUIRED_SPACE),
+        ("_gate", RecoveryGate.KEY_ACQUISITION),
+        ("_schema_version", 99),
+        ("_fingerprint", "audit-fingerprint-replaced"),
+    ):
+        with pytest.raises(AttributeError, match="fixed when it is built"):
+            setattr(entry, name, value)
     assert entry.schema_version == 1
+
+    # R36 (test-suite review): `CapacityReport` had no per-field `__setattr__`
+    # coverage at all — only a single `setattr(room, "_required", 0)` inside
+    # an unrelated rendering-path sweep incidentally touched it, and
+    # `_available` specifically was never driven.
+    report = capacity()
+    for name, value in (("_required", 99), ("_available", 99)):
+        with pytest.raises(AttributeError, match="fixed when it is built"):
+            setattr(report, name, value)
 
     class Liar(SnapshotDescriptor):
         def __eq__(self, other: object) -> bool:
@@ -11296,23 +11352,42 @@ def test_delattr_is_refused_on_every_class_that_defines_it_not_only_the_sealed_o
     snapshot = descriptor(fingerprint="snapshot-fingerprint-delattr")
     with pytest.raises(AttributeError, match="fixed when it is built"):
         del snapshot.fingerprint
-    with pytest.raises(AttributeError, match="fixed when it is built"):
-        del snapshot._fingerprint
+    # R36 (test-suite review): only `_fingerprint` was driven at the slot
+    # level, the same one-field-of-several shape found for `__setattr__`
+    # above. Every slot now is.
+    for name in ("_container_version", "_schema_version", "_integrity", "_fingerprint"):
+        with pytest.raises(AttributeError, match="fixed when it is built"):
+            delattr(snapshot, name)
 
     entry = SnapshotAuditEntry(event=SnapshotAuditEvent.RECOVERY_STARTED)
     with pytest.raises(AttributeError, match="fixed when it is built"):
         del entry.event
-    with pytest.raises(AttributeError, match="fixed when it is built"):
-        del entry._event
+    # R36 (test-suite review): only `_event` was driven at the slot level.
+    for name in ("_event", "_check", "_gate", "_schema_version", "_fingerprint"):
+        with pytest.raises(AttributeError, match="fixed when it is built"):
+            delattr(entry, name)
 
     report = capacity()
-    with pytest.raises(AttributeError, match="fixed when it is built"):
-        del report._required
+    # R36 (test-suite review): only `_required` was driven; `_available`'s
+    # deletion carve-out was undetected.
+    for name in ("_required", "_available"):
+        with pytest.raises(AttributeError, match="fixed when it is built"):
+            delattr(report, name)
 
     verdict = PreflightVerdict(None)
-    with pytest.raises(AttributeError, match="fixed when it is minted"):
-        del verdict._refused_by
+    # R36 (test-suite review): only `_refused_by` was driven; `_snapshot`'s
+    # deletion carve-out was undetected. `_evaluated` is excluded here — it
+    # is assigned a genuine value (`()`) only inside `_mint`, and this
+    # verdict was built directly, so `_evaluated` already holds `()` from
+    # `__init__` and deleting it exercises the identical code path as the
+    # other two.
+    for name in ("_refused_by", "_snapshot", "_evaluated"):
+        with pytest.raises(AttributeError, match="fixed when it is minted"):
+            delattr(verdict, name)
 
     candidate = RecoveryCandidate(1, FINGERPRINT)
-    with pytest.raises(AttributeError, match="fixed when it is minted"):
-        del candidate._schema_version
+    # R36 (test-suite review): only `_schema_version` was driven;
+    # `_fingerprint`'s deletion carve-out was undetected.
+    for name in ("_schema_version", "_fingerprint"):
+        with pytest.raises(AttributeError, match="fixed when it is minted"):
+            delattr(candidate, name)
