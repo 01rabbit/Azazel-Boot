@@ -41,7 +41,7 @@ paths that drive reaches and no others. The other modules do not have one.
 This is a statement of fact about the checks, not a revision of what D9 and D10
 decide.
 
-**Three further facts about this record, none of them a revision.** (1) D8
+**Four further facts about this record, none of them a revision.** (1) D8
 gate 2 says "under D2's limit"; `azazel_boot.snapshot` imports neither
 `BootSession` nor `ATTEMPT_BUDGET`, so a recovery's key acquisition is **not**
 under that limit as shipped, and a review drove 26 prompts in one boot with 21
@@ -51,9 +51,20 @@ D4.1.1's key-protected media binding; the workflow takes the caller's
 is the secret arriving where `session_mode` decided it must not. (3) D4 says
 "leaving quarantine is possible **only** through the explicit recovery workflow
 in D8" — and D8 as implemented does not leave quarantine at all: it hands back
-a candidate, so as written that sentence names an empty set. Each is recorded
-here as an observed difference between this record and the code; reconciling
-them is not this pull request's to do.
+a candidate, so as written that sentence names an empty set. (4) D7's own text
+above names four preflight checks; `azazel_boot.snapshot.preflight()` asks ten.
+Six of the extra six are load-bearing on other decisions this record already
+makes elsewhere (the fence, on D9; the volume quarantine, on D4; the snapshot's
+existence and container version, on D7's own "no migration without a snapshot"
+before the cheap answers) and are recorded as such next to their checks. Three
+are not: `binding_holds`, `generation_holds` and `image_digest_holds` re-ask,
+before a migration's large write, the same ADR-0008 D4.1.1 media-binding
+elements D8 gate 1 already re-asks before a recovery's write — but nothing in
+this record or in `azazel_boot.snapshot` says so next to the check itself. A
+round-33 doctrine review found the gap; this fact records it rather than
+inventing the rationale after the fact. Each of the four is recorded here as
+an observed difference between this record and the code; reconciling them is
+not this pull request's to do.
 [#7](https://github.com/01rabbit/Azazel-Boot/issues/7) stays open, and so do
 the three children this record names.
 

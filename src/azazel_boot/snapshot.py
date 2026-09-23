@@ -1364,6 +1364,13 @@ def _gate_fails(
     if check is PreflightCheck.SCHEMA_COMPATIBILITY:
         return not schema_is_compatible(current=current_schema, target=target_schema)
     if check is PreflightCheck.BINDING:
+        # Not in D7's own four-item list. A round-33 doctrine review found
+        # these three branches were the only ones in this function with no
+        # citation at all: they re-ask, before a migration's large write, the
+        # same ADR-0008 D4.1.1 media-binding elements D8 gate 1 already
+        # re-asks before a recovery's write. Recorded as an undisclosed
+        # extension of D7 in ADR-0010's "four further facts" note — reconciling
+        # it is not this pull request's to do.
         return not binding_holds
     if check is PreflightCheck.GENERATION:
         return not generation_holds

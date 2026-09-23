@@ -196,7 +196,7 @@ successors failing at once.
 | 5 | its integrity verified | `INDETERMINATE` lands with `FAILED`; ambiguity refuses |
 | 6 | required vs available space | |
 | 7 | schema compatibility | forward to a version this build knows; a downgrade, a no-op and a version outside the supported set all refuse |
-| 8 | binding, generation, image digest | |
+| 8 | binding, generation, image digest | re-asks, before a migration's write, the same ADR-0008 D4.1.1 elements D8 gate 1 re-asks before a recovery's write — undisclosed in D7's own four-item text; see ADR-0010's "four further facts" note |
 
 **Check 7's own function is now guarded on its own terms, not only by its one
 caller's.** `schema_is_compatible(*, current, target)` is public and
