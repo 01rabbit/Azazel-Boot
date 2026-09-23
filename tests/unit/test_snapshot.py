@@ -27,6 +27,7 @@ import pickle
 import subprocess
 import sys
 import textwrap
+import threading
 import weakref as _weakref
 from collections import Counter
 from pathlib import Path
@@ -8322,6 +8323,89 @@ def test_a_gate_refusal_on_an_already_finished_workflow_stays_in_vocabulary(
     assert fenced.stage is RecoveryStage.INTERRUPTED
     assert fenced._candidate is None
     assert fenced._quarantine.volume_is_quarantined is True
+
+
+def test_a_real_second_thread_interrupting_between_the_two_final_writes_stays_in_vocabulary(
+    observations,
+) -> None:
+    """R17 (security review): every re-check above this test's sibling
+    covers a *single-threaded reentrancy* window — caller code, called back
+    from inside `_require_the_gates` via `attempt()`. This is a different,
+    narrower window that only a genuine second OS thread can reach: between
+    `commit`'s two final writes, `_sealed_assign("_candidate", minted)` and
+    `_sealed_assign("_stage", COMMITTED)`, nothing single-threaded runs at
+    all — the gap exists only because the GIL can switch between two
+    separate method calls, not because of any callback this module invokes.
+
+    A real `threading.Thread` calling `interrupt()` in that exact gap moved
+    `_stage` to `INTERRUPTED` (a legal edge needing no clearance), and the
+    `commit` thread's own `_sealed_assign("_stage", COMMITTED)` then met
+    `_sealed_assign`'s terminal-stage guard and raised a bare
+    `AttributeError` — outside `RecoveryRefused`, the same "caller who
+    wrote `except RecoveryRefused:` crashed" shape round 7's re-check
+    closed for the single-threaded case, reopened here for the threaded
+    one. `commit` now re-asks `_require_stage(TRIAL_OPEN)` immediately
+    before that final write.
+
+    The `RecoveryCandidate` `commit` had already minted before the race
+    lands is never returned either way (the exception fires before
+    `return minted`), and `holds()` asks the stage as well as the object —
+    doctrine holds regardless of which thread wins.
+    """
+
+    flow = workflow(observations)
+    snap = descriptor()
+    flow.start(
+        snap, observations, media_binding_holds=True, session_id=SESSION, started_by_operator=True
+    )
+    flow.open_trial(snap, observations, media_binding_holds=True, session_id=SESSION)
+
+    candidate_written = threading.Event()
+    let_commit_continue = threading.Event()
+    original_sealed_assign = RecoveryWorkflow._sealed_assign
+
+    def racy_sealed_assign(self: RecoveryWorkflow, name: str, value: object) -> None:
+        original_sealed_assign(self, name, value)
+        if name == "_candidate":
+            candidate_written.set()
+            let_commit_continue.wait(timeout=5)
+
+    RecoveryWorkflow._sealed_assign = racy_sealed_assign
+    outcome: dict[str, object] = {}
+    try:
+
+        def do_commit() -> None:
+            try:
+                flow.commit(
+                    snap,
+                    observations,
+                    media_binding_holds=True,
+                    session_id=SESSION,
+                    acquisition=Opens(),
+                    confirmed=True,
+                )
+                outcome["kind"] = "returned"
+            except RecoveryRefused as refused:
+                outcome["kind"] = "refused"
+                outcome["refusal"] = refused.refusal
+
+        committer = threading.Thread(target=do_commit)
+        committer.start()
+        assert candidate_written.wait(timeout=5)
+        interrupter = threading.Thread(target=lambda: flow.interrupt(session_id=SESSION))
+        interrupter.start()
+        interrupter.join(timeout=5)
+        let_commit_continue.set()
+        committer.join(timeout=5)
+    finally:
+        RecoveryWorkflow._sealed_assign = original_sealed_assign
+
+    assert outcome["kind"] == "refused"
+    assert outcome["refusal"] is Refusal.WORKFLOW_ALREADY_FINISHED
+    assert flow.stage is RecoveryStage.INTERRUPTED
+    # The minted-but-never-returned candidate holds no authority regardless.
+    assert flow._candidate is not None
+    assert flow.holds(flow._candidate) is False
 
 
 def test_a_rebound_enum_does_not_shorten_what_completeness_is_asked_against(

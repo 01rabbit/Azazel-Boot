@@ -441,6 +441,25 @@ anything raising between those two writes left a workflow stuck at `TRIAL_OPEN`
 answering `True` for a candidate no commit finished. The fence check sits
 before the mint for the same reason.
 
+**And that gap between the two writes is real, not only theoretical.** Every
+re-check named above closes a *single-threaded* reentrancy window — caller
+code invoked back from inside this module, such as `attempt()`. A
+round-seventeen review found a different one: nothing single-threaded runs
+between `commit`'s two final writes at all, so the only way into that gap is
+a genuine second OS thread — an `interrupt()` call racing a `commit()` in
+progress on the same `RecoveryWorkflow`, plausible for this module's own
+documented domain (an operator screen, a device-pull handler, both acting on
+one workflow object). Landing there moved `_stage` to `INTERRUPTED` first,
+and `commit`'s own final `_sealed_assign` then met the seal's terminal-stage
+guard and raised a bare `AttributeError` — the same "outside `RecoveryRefused`"
+shape every other re-check in this section exists to close, reopened for the
+one window none of them reach. `commit` now re-asks `_require_stage(TRIAL_
+OPEN)` immediately before its last write, so either thread's outcome stays in
+`RecoveryRefused`'s vocabulary. The race itself is not eliminated — which
+thread's write lands first is still nondeterministic — and does not need to
+be: the candidate `commit` had already minted is never returned either way,
+and `holds()` asks the stage as well as the object.
+
 **One pair cannot be contested, and saying so is better than a test that looks
 like it proves it.** D8 orders key acquisition before integrity, but at the
 commit the snapshot is pinned to the one the workflow started on — so a

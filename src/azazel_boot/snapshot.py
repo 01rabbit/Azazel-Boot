@@ -1999,6 +1999,23 @@ class RecoveryWorkflow:
         judged = self._pinned
         minted = RecoveryCandidate(judged.schema_version, judged.fingerprint)
         self._sealed_assign("_candidate", minted)
+        # **A real second thread, not only reentrant caller code.** Every
+        # re-check above this line is for a single-threaded reentrancy
+        # window — `attempt()` calling back into caller code while this
+        # method waits. A round-seventeen review found a genuine two-thread
+        # race in the different, narrower window that opens right here:
+        # nothing stops an `interrupt()` running on another thread between
+        # the candidate write above and the stage write below, and
+        # `_sealed_assign`'s terminal-stage guard then answers a bare
+        # `AttributeError` — the seal's structural vocabulary, correct for
+        # a direct malicious call, wrong for two ordinary callers racing
+        # through the public API — instead of `RecoveryRefused`. The
+        # candidate this method already wrote is not returned either way
+        # (the exception below fires before `return minted`, and `holds()`
+        # asks the stage as well as the object), so re-checking cannot
+        # itself grant anything; it only chooses which vocabulary a raise
+        # in this exact window uses.
+        self._require_stage(RecoveryStage.TRIAL_OPEN)
         self._sealed_assign("_stage", RecoveryStage.COMMITTED)
         self._record(
             SnapshotAuditEvent.RECOVERY_COMPLETED,
