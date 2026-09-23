@@ -315,6 +315,13 @@ def test_nothing_in_this_module_can_lift_a_quarantine_or_a_fence() -> None:
         "KeyAcquisition",
         "PassphraseChannel",
         "annotations",
+        # A stdlib module, not a symbol from one — `import threading`, not
+        # `from threading import Lock`, so the module itself is what `vars()`
+        # sees. Added round eighteen: `_WRITE_LOCK` is a `threading.Lock`,
+        # the fix for a real TOCTOU in `_remember_a_write_if_new`. A public
+        # name is a public name whether it names this module's own value or
+        # a module it imported.
+        "threading",
         "Enum",
         "KNOWN_CONTAINER_VERSIONS",
         "PREFLIGHT_ORDER",
@@ -445,13 +452,19 @@ def test_this_module_never_calls_anything_that_would_change_a_quarantine() -> No
             # this same walk covers), into `type(...)` for the exact-type pin,
             # and into the workflow's one slot.
             #
-            # And four more, added with the two module-side indexes that
+            # And three more, added with the two module-side indexes that
             # replaced a `_judged` slot on the verdict: the slot handed the
             # live `Quarantine` to every verdict holder, so the association
             # moved off the object — and an association has to hold the object
             # to be one. Each is a named function whose whole body is the one
             # index operation, so the travel is a line on this list rather
             # than a shape this walk happens not to look at.
+            #
+            # `_remember_a_write` and `_a_write_is_recorded` were two of the
+            # four; a round-eighteen review merged them into one atomic
+            # `_remember_a_write_if_new` (the two-call shape was the TOCTOU
+            # gap a real second thread landed in), so this list now names
+            # three functions where it named four.
             passed_to = [
                 outer
                 for outer in ast.walk(TREE)
@@ -465,8 +478,7 @@ def test_this_module_never_calls_anything_that_would_change_a_quarantine() -> No
                     "_mint",
                     "_remember_the_medium",
                     "_medium_was_judged",
-                    "_remember_a_write",
-                    "_a_write_is_recorded",
+                    "_remember_a_write_if_new",
                 }
                 and any(argument is node for argument in outer.args)
             ]
@@ -842,6 +854,11 @@ def test_preflight_is_read_only_by_construction() -> None:
             named.update(alias.name for alias in node.names)
     assert named == {
         "annotations",
+        # Added deliberately, round eighteen: `_WRITE_LOCK` is a
+        # `threading.Lock`, closing a real TOCTOU `_remember_a_write_if_new`
+        # needs a lock and not a re-check to fix — a genuine race in the
+        # *state itself*, not merely in which exception type escapes it.
+        "threading",
         "Enum",
         "WeakKeyDictionary",
         "WeakSet",
@@ -861,6 +878,7 @@ def test_preflight_is_read_only_by_construction() -> None:
 
     assert imported == {
         "__future__",
+        "threading",
         "enum",
         # Added deliberately: `_MINTED_HERE` is a `WeakSet` now, because a
         # sentinel stamped onto a verdict is a sentinel a caller can read off
@@ -2251,9 +2269,19 @@ def test_each_gate_refuses_with_every_later_gate_also_failing(
     # the failing conditions are introduced at the commit — which is where all
     # four of D8's gates run.
     good = descriptor()
-    # The three gates that precede D8's four are refused at `start` already,
-    # so a workflow over one of them never reaches the trial. `TARGET_BINDING`
-    # joined them when it stopped being the host binding under gate 1's name.
+    # Three of the four gates that precede D8's own four are refused at
+    # `start` already, so a workflow over one of them never reaches the
+    # trial. `HOST_BINDING`, the fourth, can be refused at `start` too — it
+    # is left out of this tuple on purpose, so this drive's row for it
+    # reaches `commit` instead and exercises the re-check path there.
+    #
+    # (R18 doctrine review: this used to say "`TARGET_BINDING` joined them
+    # when it stopped being the host binding under gate 1's name" — true when
+    # written, stale since: `TARGET_BINDING` was renamed to
+    # `MEDIUM_NOT_RECOGNISED`, already reflected in the tuple below, and the
+    # name `TARGET_BINDING` was then reused for the unrelated D8 gate 1 media
+    # binding check `RecoveryGate`'s own class docstring names. Corrected to
+    # describe what this tuple and the row below it actually do.)
     refused_at_start = (
         RecoveryGate.MEDIUM_FENCED,
         RecoveryGate.NOTHING_TO_RECOVER,
@@ -2637,6 +2665,15 @@ def test_the_no_payload_events_carry_no_payload_field_either(observations) -> No
     "no-payload" event, `RECOVERY_SNAPSHOT_SUBSTITUTED`, already has this
     coverage via the generic `schema_version==99` sweep elsewhere in this
     file; these four did not.
+
+    R18 (test-suite review): `schema_version`/`fingerprint` are not this
+    entry's whole payload. `check` and `gate` were asked nowhere in this
+    test either — a mutation adding `check=PreflightCheck.REQUIRED_SPACE` to
+    any of the four calls, or `gate=RecoveryGate.MEDIUM_FENCED` to the ones
+    that do not already carry a legitimate gate, survived undetected too.
+    Extended to ask all four fields of every "classification, and nothing
+    behind it" event, `RECOVERY_SNAPSHOT_SUBSTITUTED` included, rather than
+    trusting the class name to say what it does not check.
     """
 
     # RECOVERY_FOREIGN_SITTING
@@ -2653,8 +2690,11 @@ def test_the_no_payload_events_carry_no_payload_field_either(observations) -> No
     assert entry.event is SnapshotAuditEvent.RECOVERY_FOREIGN_SITTING
     assert entry.schema_version is None
     assert entry.fingerprint is None
+    assert entry.check is None
+    assert entry.gate is None
 
-    # RECOVERY_REFUSED, via any gate failure
+    # RECOVERY_REFUSED, via any gate failure — `gate` is this event's own
+    # legitimate payload, so only `check` and the schema fields are asked.
     refused_flow = workflow(observations)
     with pytest.raises(RecoveryRefused):
         refused_flow.start(
@@ -2668,6 +2708,8 @@ def test_the_no_payload_events_carry_no_payload_field_either(observations) -> No
     assert entry.event is SnapshotAuditEvent.RECOVERY_REFUSED
     assert entry.schema_version is None
     assert entry.fingerprint is None
+    assert entry.check is None
+    assert entry.gate is not None
 
     # RECOVERY_TRIAL_OPENED
     snap = descriptor()
@@ -2680,6 +2722,8 @@ def test_the_no_payload_events_carry_no_payload_field_either(observations) -> No
     assert entry.event is SnapshotAuditEvent.RECOVERY_TRIAL_OPENED
     assert entry.schema_version is None
     assert entry.fingerprint is None
+    assert entry.check is None
+    assert entry.gate is None
 
     # RECOVERY_INTERRUPTED
     interrupted_flow = workflow(observations)
@@ -2691,6 +2735,30 @@ def test_the_no_payload_events_carry_no_payload_field_either(observations) -> No
     assert entry.event is SnapshotAuditEvent.RECOVERY_INTERRUPTED
     assert entry.schema_version is None
     assert entry.fingerprint is None
+    assert entry.check is None
+    assert entry.gate is None
+
+    # RECOVERY_SNAPSHOT_SUBSTITUTED — the fifth "no-payload" event. Elsewhere
+    # in this file it is driven through a generic `schema_version==99` sweep
+    # that only ever checks the entry does not carry *that* schema version;
+    # this drives it directly and asks all four fields.
+    substituted_flow = workflow(observations)
+    substituted_flow.start(
+        snap, observations, media_binding_holds=True, session_id=SESSION, started_by_operator=True
+    )
+    with pytest.raises(RecoveryRefused):
+        substituted_flow.open_trial(
+            descriptor(schema_version=2),
+            observations,
+            media_binding_holds=True,
+            session_id=SESSION,
+        )
+    entry = substituted_flow.audit()[-1]
+    assert entry.event is SnapshotAuditEvent.RECOVERY_SNAPSHOT_SUBSTITUTED
+    assert entry.schema_version is None
+    assert entry.fingerprint is None
+    assert entry.check is None
+    assert entry.gate is None
 
 
 def test_the_payload_carrying_events_carry_only_their_own_payload(observations) -> None:
@@ -3787,13 +3855,19 @@ def test_the_seal_writes_only_the_three_fields_a_recovery_moves(observations) ->
     )
     flow.interrupt(session_id=SESSION)
     assert flow.stage is RecoveryStage.INTERRUPTED
+    # R18 (security review): this used to be a bare `AttributeError` — the
+    # seal's structural vocabulary — for a fact every other terminal-stage
+    # check in this module expresses through `RecoveryRefused`. Aligned here
+    # too, the same move round ten made for the fence check: see
+    # `_sealed_assign`'s own comment.
     for name, value in (
         ("_stage", RecoveryStage.TRIAL_OPEN),
         ("_pinned", descriptor(schema_version=2)),
         ("_candidate", RecoveryCandidate(2, FINGERPRINT)),
     ):
-        with pytest.raises(AttributeError, match="has ended"):
+        with pytest.raises(RecoveryRefused) as refused:
             flow._sealed_assign(name, value)
+        assert refused.value.refusal is Refusal.WORKFLOW_ALREADY_FINISHED
     assert flow.stage is RecoveryStage.INTERRUPTED
     assert flow.holds(RecoveryCandidate(2, FINGERPRINT)) is False
 
@@ -3967,10 +4041,16 @@ def _swallow(call, *args, **keywords):
 #: raises `AttributeError` at all. `test_a_clearance_is_spent_over_the_
 #: medium_the_gates_read` and the R10 fence-landing-mid-commit test drive it
 #: through `RecoveryRefused`, not through this fragment list.
+#:
+#: The terminal-stage rule (`"has ended"`) was a third and is gone the same
+#: way, for the same reason, at round 18: a genuine second thread could reach
+#: it through the legitimate path — racing `commit`/`start`/`open_trial`/
+#: `interrupt` against another ordinary call — and met the identical bare
+#: `AttributeError`. It answers `RecoveryRefused(WORKFLOW_ALREADY_FINISHED)`
+#: now, so it is driven through that, not through this fragment list either.
 _SEAL_RULES = (
     "a RecoveryWorkflow is sealed after construction",
     "only the stage, the snapshot's pinned fields",
-    "has ended",
     "travels its own graph",
     "reached by passing the gates",
     "a candidate is minted by a commit whose gates passed",
@@ -5015,6 +5095,63 @@ def test_one_preflight_records_one_write_in_any_ledger() -> None:
         assert refused.value.refusal is Refusal.VERDICT_ALREADY_SPENT
     assert len(first.audit()) == 1
     assert second.audit() == ()
+
+
+def test_two_real_threads_recording_the_same_write_record_it_once() -> None:
+    """R18 (security review, finding 1): a genuine TOCTOU, not a race in
+    which exception type escapes.
+
+    `note_snapshot_written` used to call two separate module functions,
+    `_a_write_is_recorded` then `_remember_a_write`, with nothing between
+    them but ordinary statements. Two real threads racing this call for the
+    same verdict, the same medium and the same judged snapshot both reached
+    the check before either reached the write, both saw "not yet recorded",
+    and both recorded — two `SNAPSHOT_WRITTEN` entries for one preflight
+    authorization, contradicting this method's own "once". `threading.
+    Barrier` forces both threads to reach the call at the same instant
+    rather than leaving the interleaving to chance.
+    """
+
+    judged_medium = a_quarantine(quarantined=False)
+    snapshot = descriptor(fingerprint="snapshot-fingerprint-race")
+    verdict = preflight(
+        judged_medium,
+        snapshot=snapshot,
+        capacity=capacity(),
+        current_schema=1,
+        target_schema=2,
+        binding_holds=True,
+        generation_holds=True,
+        image_digest_holds=True,
+    )
+
+    barrier = threading.Barrier(2)
+    outcomes: dict[str, dict[str, object]] = {}
+
+    def do_record(label: str) -> None:
+        outcomes[label] = {}
+        ledger = MigrationLedger()
+        barrier.wait(timeout=5)
+        try:
+            ledger.note_snapshot_written(verdict, snapshot, quarantine=judged_medium)
+            outcomes[label]["kind"] = "recorded"
+            outcomes[label]["ledger"] = ledger
+        except RecoveryRefused as refused:
+            outcomes[label]["kind"] = "refused"
+            outcomes[label]["refusal"] = refused.refusal
+
+    threads = [threading.Thread(target=do_record, args=(label,)) for label in ("a", "b")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    kinds = sorted(outcome["kind"] for outcome in outcomes.values())
+    assert kinds == ["recorded", "refused"], outcomes
+    refused = next(outcome for outcome in outcomes.values() if outcome["kind"] == "refused")
+    assert refused["refusal"] is Refusal.VERDICT_ALREADY_SPENT
+    recorded = next(outcome for outcome in outcomes.values() if outcome["kind"] == "recorded")
+    assert len(recorded["ledger"].audit()) == 1
 
 
 def test_the_write_record_asks_whether_the_verdict_passed() -> None:
@@ -7569,10 +7706,14 @@ def test_a_clearance_is_spent_over_the_medium_the_gates_read(observations) -> No
     # Terminal, and audited — a fence caught here is an event, the same as
     # everywhere else this module catches one, not a typo to retry past. A
     # further stage move, even to the one a genuine interruption reaches, is
-    # refused as a terminal workflow, not honoured.
+    # refused as a terminal workflow, not honoured. R18 (security review):
+    # `_sealed_assign`'s own terminal-stage guard now answers
+    # `RecoveryRefused` too, so this is `RecoveryRefused` rather than the
+    # bare `AttributeError` it used to be.
     assert flow.stage is RecoveryStage.REFUSED
-    with pytest.raises(AttributeError, match="has ended"):
+    with pytest.raises(RecoveryRefused) as terminal:
         flow._sealed_assign("_stage", RecoveryStage.INTERRUPTED)
+    assert terminal.value.refusal is Refusal.WORKFLOW_ALREADY_FINISHED
     assert flow.stage is RecoveryStage.REFUSED
 
 
@@ -8428,8 +8569,20 @@ def test_a_real_second_thread_interrupting_between_the_two_final_writes_stays_in
     `AttributeError` — outside `RecoveryRefused`, the same "caller who
     wrote `except RecoveryRefused:` crashed" shape round 7's re-check
     closed for the single-threaded case, reopened here for the threaded
-    one. `commit` now re-asks `_require_stage(TRIAL_OPEN)` immediately
-    before that final write.
+    one. Round seventeen closed it with a `_require_stage(TRIAL_OPEN)`
+    re-check immediately before that final write.
+
+    **R18 (test-suite review) proved the re-check itself was never enough**:
+    it and the write it guards are two separate statements, so the identical
+    race re-opens in the gap between *them* — reproduced directly against
+    round seventeen's own fix. There is no re-check that closes a gap of
+    this shape; round seventeen's re-check is gone, and `_sealed_assign`'s
+    terminal-stage guard now answers `RecoveryRefused` itself, closing the
+    window at the one place every one of these writes passes through
+    regardless of how many statements precede it. This test still drives
+    the same real race in the same real gap; the mutation this test now
+    detects is round eighteen's fix at `_sealed_assign`, not round
+    seventeen's re-check, which no longer exists to mutate.
 
     The `RecoveryCandidate` `commit` had already minted before the race
     lands is never returned either way (the exception fires before
@@ -8490,6 +8643,259 @@ def test_a_real_second_thread_interrupting_between_the_two_final_writes_stays_in
     # The minted-but-never-returned candidate holds no authority regardless.
     assert flow._candidate is not None
     assert flow.holds(flow._candidate) is False
+
+
+def test_a_real_second_thread_interrupting_before_commits_candidate_is_written_stays_in_vocabulary(
+    observations,
+) -> None:
+    """R18 (security review, finding 2): the other half of `commit`'s gap.
+
+    The test above races `interrupt()` between the candidate write and the
+    stage write. This races it one statement earlier — between
+    `_require_an_unfenced_medium()`'s return and `_sealed_assign("_candidate",
+    minted)` — so the candidate write itself is the one landing after the
+    workflow has gone terminal. Before round 18's fix this met
+    `_sealed_assign`'s terminal-stage guard and raised a bare
+    `AttributeError`, the same vocabulary break, one statement earlier than
+    round 17's own test drove it.
+    """
+
+    flow = workflow(observations)
+    snap = descriptor()
+    flow.start(
+        snap, observations, media_binding_holds=True, session_id=SESSION, started_by_operator=True
+    )
+    flow.open_trial(snap, observations, media_binding_holds=True, session_id=SESSION)
+
+    fence_checked = threading.Event()
+    let_commit_continue = threading.Event()
+    original_require_an_unfenced_medium = RecoveryWorkflow._require_an_unfenced_medium
+
+    def racy_require_an_unfenced_medium(self: RecoveryWorkflow) -> None:
+        original_require_an_unfenced_medium(self)
+        fence_checked.set()
+        let_commit_continue.wait(timeout=5)
+
+    RecoveryWorkflow._require_an_unfenced_medium = racy_require_an_unfenced_medium
+    outcome: dict[str, object] = {}
+    try:
+
+        def do_commit() -> None:
+            try:
+                flow.commit(
+                    snap,
+                    observations,
+                    media_binding_holds=True,
+                    session_id=SESSION,
+                    acquisition=Opens(),
+                    confirmed=True,
+                )
+                outcome["kind"] = "returned"
+            except RecoveryRefused as refused:
+                outcome["kind"] = "refused"
+                outcome["refusal"] = refused.refusal
+
+        committer = threading.Thread(target=do_commit)
+        committer.start()
+        assert fence_checked.wait(timeout=5)
+        interrupter = threading.Thread(target=lambda: flow.interrupt(session_id=SESSION))
+        interrupter.start()
+        interrupter.join(timeout=5)
+        let_commit_continue.set()
+        committer.join(timeout=5)
+    finally:
+        RecoveryWorkflow._require_an_unfenced_medium = original_require_an_unfenced_medium
+
+    assert outcome["kind"] == "refused"
+    assert outcome["refusal"] is Refusal.WORKFLOW_ALREADY_FINISHED
+    assert flow.stage is RecoveryStage.INTERRUPTED
+    # No candidate was ever minted this time: the race landed before the
+    # write that would have held one.
+    assert flow._candidate is None
+
+
+def test_a_real_second_thread_interrupting_during_starts_stage_write_stays_in_vocabulary(
+    observations,
+) -> None:
+    """R18 (security review, finding 3): the same shape in `start`.
+
+    `start` reads `_require_an_unfenced_medium()` and then writes
+    `_stage` to `PREFLIGHT_PASSED`. Nothing stops a real second thread's
+    `interrupt()` landing in that gap; before round 18's fix the stage write
+    then met `_sealed_assign`'s terminal-stage guard and raised a bare
+    `AttributeError`.
+    """
+
+    flow = workflow(observations)
+    snap = descriptor()
+
+    fence_checked = threading.Event()
+    let_start_continue = threading.Event()
+    original_require_an_unfenced_medium = RecoveryWorkflow._require_an_unfenced_medium
+
+    def racy_require_an_unfenced_medium(self: RecoveryWorkflow) -> None:
+        original_require_an_unfenced_medium(self)
+        fence_checked.set()
+        let_start_continue.wait(timeout=5)
+
+    RecoveryWorkflow._require_an_unfenced_medium = racy_require_an_unfenced_medium
+    outcome: dict[str, object] = {}
+    try:
+
+        def do_start() -> None:
+            try:
+                flow.start(
+                    snap,
+                    observations,
+                    media_binding_holds=True,
+                    session_id=SESSION,
+                    started_by_operator=True,
+                )
+                outcome["kind"] = "returned"
+            except RecoveryRefused as refused:
+                outcome["kind"] = "refused"
+                outcome["refusal"] = refused.refusal
+
+        starter = threading.Thread(target=do_start)
+        starter.start()
+        assert fence_checked.wait(timeout=5)
+        interrupter = threading.Thread(target=lambda: flow.interrupt(session_id=SESSION))
+        interrupter.start()
+        interrupter.join(timeout=5)
+        let_start_continue.set()
+        starter.join(timeout=5)
+    finally:
+        RecoveryWorkflow._require_an_unfenced_medium = original_require_an_unfenced_medium
+
+    assert outcome["kind"] == "refused"
+    assert outcome["refusal"] is Refusal.WORKFLOW_ALREADY_FINISHED
+    assert flow.stage is RecoveryStage.INTERRUPTED
+
+
+def test_a_real_second_thread_interrupting_during_open_trials_stage_write_stays_in_vocabulary(
+    observations,
+) -> None:
+    """R18 (security review, finding 4): the same shape in `open_trial`.
+
+    `open_trial` reads `_require_an_unfenced_medium()` and then writes
+    `_stage` to `TRIAL_OPEN`. The same real second-thread `interrupt()` race
+    lands in that gap; before round 18's fix the stage write then met
+    `_sealed_assign`'s terminal-stage guard and raised a bare
+    `AttributeError`.
+    """
+
+    flow = workflow(observations)
+    snap = descriptor()
+    flow.start(
+        snap, observations, media_binding_holds=True, session_id=SESSION, started_by_operator=True
+    )
+
+    fence_checked = threading.Event()
+    let_open_trial_continue = threading.Event()
+    original_require_an_unfenced_medium = RecoveryWorkflow._require_an_unfenced_medium
+
+    def racy_require_an_unfenced_medium(self: RecoveryWorkflow) -> None:
+        original_require_an_unfenced_medium(self)
+        fence_checked.set()
+        let_open_trial_continue.wait(timeout=5)
+
+    RecoveryWorkflow._require_an_unfenced_medium = racy_require_an_unfenced_medium
+    outcome: dict[str, object] = {}
+    try:
+
+        def do_open_trial() -> None:
+            try:
+                flow.open_trial(
+                    snap, observations, media_binding_holds=True, session_id=SESSION
+                )
+                outcome["kind"] = "returned"
+            except RecoveryRefused as refused:
+                outcome["kind"] = "refused"
+                outcome["refusal"] = refused.refusal
+
+        opener = threading.Thread(target=do_open_trial)
+        opener.start()
+        assert fence_checked.wait(timeout=5)
+        interrupter = threading.Thread(target=lambda: flow.interrupt(session_id=SESSION))
+        interrupter.start()
+        interrupter.join(timeout=5)
+        let_open_trial_continue.set()
+        opener.join(timeout=5)
+    finally:
+        RecoveryWorkflow._require_an_unfenced_medium = original_require_an_unfenced_medium
+
+    assert outcome["kind"] == "refused"
+    assert outcome["refusal"] is Refusal.WORKFLOW_ALREADY_FINISHED
+    assert flow.stage is RecoveryStage.INTERRUPTED
+
+
+def test_two_real_threads_interrupting_the_same_workflow_stay_in_vocabulary(
+    observations,
+) -> None:
+    """R18 (security review, finding 5): `interrupt` racing itself.
+
+    `interrupt` checks `self._stage in TERMINAL_STAGES` once, at entry, and
+    writes `_stage` to `INTERRUPTED` later in the same call — with
+    `_require_this_sitting` in between. Nothing stops a second, genuinely
+    concurrent `interrupt()` call from an equally legitimate caller landing
+    in that gap: the loser's entry check already passed, so before round 18's
+    fix its own stage write met `_sealed_assign`'s terminal-stage guard and
+    raised a bare `AttributeError` rather than the `RecoveryRefused` every
+    other terminal encounter in this module answers with.
+    """
+
+    flow = workflow(observations)
+    snap = descriptor()
+    flow.start(
+        snap, observations, media_binding_holds=True, session_id=SESSION, started_by_operator=True
+    )
+
+    sitting_checked = threading.Event()
+    let_first_interrupt_continue = threading.Event()
+    paused_once = threading.Event()
+    original_require_this_sitting = RecoveryWorkflow._require_this_sitting
+
+    def racy_require_this_sitting(self: RecoveryWorkflow, session_id: str) -> None:
+        original_require_this_sitting(self, session_id)
+        # Only the first call through pauses here — the second call is the
+        # one this test needs to run to completion, unblocked, while the
+        # first waits.
+        if not paused_once.is_set():
+            paused_once.set()
+            sitting_checked.set()
+            let_first_interrupt_continue.wait(timeout=5)
+
+    RecoveryWorkflow._require_this_sitting = racy_require_this_sitting
+    outcomes: dict[str, dict[str, object]] = {}
+    try:
+
+        def do_interrupt(label: str) -> None:
+            outcomes[label] = {}
+            try:
+                flow.interrupt(session_id=SESSION)
+                outcomes[label]["kind"] = "returned"
+            except RecoveryRefused as refused:
+                outcomes[label]["kind"] = "refused"
+                outcomes[label]["refusal"] = refused.refusal
+
+        first = threading.Thread(target=do_interrupt, args=("first",))
+        first.start()
+        assert sitting_checked.wait(timeout=5)
+        second = threading.Thread(target=do_interrupt, args=("second",))
+        second.start()
+        second.join(timeout=5)
+        let_first_interrupt_continue.set()
+        first.join(timeout=5)
+    finally:
+        RecoveryWorkflow._require_this_sitting = original_require_this_sitting
+
+    # The second call, unblocked, moved the stage to `INTERRUPTED` first and
+    # returned normally. The first call's own write then met an already
+    # terminal workflow — refused, in vocabulary, not a crash.
+    assert outcomes["second"]["kind"] == "returned"
+    assert outcomes["first"]["kind"] == "refused"
+    assert outcomes["first"]["refusal"] is Refusal.WORKFLOW_ALREADY_FINISHED
+    assert flow.stage is RecoveryStage.INTERRUPTED
 
 
 def test_a_rebound_enum_does_not_shorten_what_completeness_is_asked_against(

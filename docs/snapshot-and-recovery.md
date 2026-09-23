@@ -453,12 +453,27 @@ one workflow object). Landing there moved `_stage` to `INTERRUPTED` first,
 and `commit`'s own final `_sealed_assign` then met the seal's terminal-stage
 guard and raised a bare `AttributeError` — the same "outside `RecoveryRefused`"
 shape every other re-check in this section exists to close, reopened for the
-one window none of them reach. `commit` now re-asks `_require_stage(TRIAL_
-OPEN)` immediately before its last write, so either thread's outcome stays in
-`RecoveryRefused`'s vocabulary. The race itself is not eliminated — which
-thread's write lands first is still nondeterministic — and does not need to
-be: the candidate `commit` had already minted is never returned either way,
-and `holds()` asks the stage as well as the object.
+one window none of them reach. Round seventeen closed it with a
+`_require_stage(TRIAL_OPEN)` re-check immediately before that last write.
+
+**A round-eighteen review proved a re-check of that shape can never fully
+close the gap, and found three more instances of it.** A re-check and the
+write it guards are still two separate statements, so the identical race
+just re-opens one call-frame narrower, forever — reproduced directly against
+round seventeen's own fix. The same shape exists wherever this module writes
+`_stage` or `_candidate` without a lock around the read-then-write: `commit`'s
+candidate write (one statement earlier than the gap round seventeen closed),
+`start`'s and `open_trial`'s own stage writes, and `interrupt` racing a second,
+equally legitimate call to itself. All four are closed by one change instead
+of four narrower re-checks: `_sealed_assign`'s own terminal-stage guard now
+answers `RecoveryRefused(WORKFLOW_ALREADY_FINISHED)` rather than a bare
+`AttributeError`, at the one place every one of these writes passes through
+regardless of how many statements precede it. Round seventeen's re-check is
+removed rather than kept alongside the general fix — a guard that cannot fail
+is not a guard. The race itself is still not eliminated — which thread's
+write lands first is still nondeterministic — and still does not need to be:
+no write these races contest is ever returned to a caller, and `holds()` asks
+the stage as well as the object.
 
 **One pair cannot be contested, and saying so is better than a test that looks
 like it proves it.** D8 orders key acquisition before integrity, but at the
@@ -680,6 +695,24 @@ records once per `(medium, judged values)`. A caller that performs several
 writes under one verdict gets one record, because one preflight judged one
 snapshot — the contract is one write per judged snapshot, and this module
 cannot see how many the caller actually made.
+
+**And "once" needs the check and the record to be one act, not two.** The
+module-wide spent-ness record was, until round eighteen, a check —
+`_a_write_is_recorded` — and a record — `_remember_a_write` — as two separate
+module functions called one after the other, with nothing between them but
+ordinary Python statements. This is not the vocabulary-break class the
+previous section closes: no exception raced here, the *state itself* went
+wrong. A round-eighteen review drove two real threads through
+`note_snapshot_written` for the same verdict, the same medium and the same
+judged values, and both reached the check before either reached the record —
+both saw "not yet recorded", and both recorded, producing two
+`SNAPSHOT_WRITTEN` audit entries for the one preflight this verdict
+authorised. A re-check cannot fix a defect in the state itself, only in which
+exception a caller meets, so the fix is different in kind from the rest of
+this section: the check and the record are merged into one function,
+`_remember_a_write_if_new`, and its one `dict`-then-`list` critical section
+runs under a module-level `threading.Lock`. The rule is unchanged — one
+preflight, one recordable write — only how it is enforced.
 
 The refusal raised from `_raise_gate_refused` holds **nothing** in its frame —
 no gate, no snapshot, no binding, no sitting. A stage asked for another

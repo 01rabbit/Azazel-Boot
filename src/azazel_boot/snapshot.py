@@ -55,6 +55,7 @@ D4.1's three-partition layout is not revised.
 
 from __future__ import annotations
 
+import threading
 from enum import Enum
 from weakref import WeakKeyDictionary as _WeakKeyDictionary
 from weakref import WeakSet as _WeakSet
@@ -1027,26 +1028,48 @@ def _medium_was_judged(verdict: PreflightVerdict, quarantine: Quarantine) -> boo
     return judged is not None and verdict in judged
 
 
-def _remember_a_write(quarantine: Quarantine, fields: tuple[object, ...]) -> None:
-    """Record that a write was recorded over this medium, for this value."""
+#: Guards the one critical section this module has: check-then-record over
+#: `_SNAPSHOTS_RECORDED`. It was two separate module functions —
+#: `_a_write_is_recorded` then `_remember_a_write` — called one after the
+#: other from `note_snapshot_written`, with nothing between the check and the
+#: record but ordinary Python statements a second thread can land between. A
+#: round-eighteen review drove two real threads through `note_snapshot_written`
+#: for the same verdict, the same medium and the same judged values, and both
+#: observed "not yet recorded" before either wrote — two `SNAPSHOT_WRITTEN`
+#: audit entries for one preflight authorization, contradicting the method's
+#: own "once" the docstring promises. This is not the vocabulary-break class
+#: `_sealed_assign`'s terminal-stage guard closes elsewhere in this module: no
+#: exception raced here at all, the state itself was wrong — a second write
+#: really was recorded — so a re-check that only changes which exception type
+#: escapes cannot fix it. It needs the check and the record to be one
+#: uninterruptible act, which is what a lock is for.
+_WRITE_LOCK: threading.Lock = threading.Lock()
 
-    written = _SNAPSHOTS_RECORDED.get(quarantine)
-    if written is None:
-        written = []
-        _SNAPSHOTS_RECORDED[quarantine] = written
-    written.append(fields)
 
+def _remember_a_write_if_new(quarantine: Quarantine, fields: tuple[object, ...]) -> bool:
+    """Record a write over this medium, for these values — atomically.
 
-def _a_write_is_recorded(quarantine: Quarantine, fields: tuple[object, ...]) -> bool:
-    """Whether **this** medium already has a write recorded for these values.
+    Replaces `_a_write_is_recorded` followed by `_remember_a_write`: that was
+    a check and a record as two separate calls, and a second thread landing
+    between them saw the same "not yet recorded" answer the first thread had
+    already acted on. Merged into one critical section under `_WRITE_LOCK`,
+    the check and the record happen as one act; the caller is told whether
+    *this* call is the one that recorded it, and refuses when it is not.
 
     The medium is the key, so its identity is the lookup; the values are
     compared by equality, because two media in one sitting are two media and
     the same snapshot value written over each is two writes.
     """
 
-    written = _SNAPSHOTS_RECORDED.get(quarantine)
-    return written is not None and fields in written
+    with _WRITE_LOCK:
+        written = _SNAPSHOTS_RECORDED.get(quarantine)
+        if written is None:
+            written = []
+            _SNAPSHOTS_RECORDED[quarantine] = written
+        if fields in written:
+            return False
+        written.append(fields)
+        return True
 
 
 def _raise_already_spent() -> None:
@@ -2005,17 +2028,21 @@ class RecoveryWorkflow:
         # method waits. A round-seventeen review found a genuine two-thread
         # race in the different, narrower window that opens right here:
         # nothing stops an `interrupt()` running on another thread between
-        # the candidate write above and the stage write below, and
-        # `_sealed_assign`'s terminal-stage guard then answers a bare
-        # `AttributeError` — the seal's structural vocabulary, correct for
-        # a direct malicious call, wrong for two ordinary callers racing
-        # through the public API — instead of `RecoveryRefused`. The
-        # candidate this method already wrote is not returned either way
-        # (the exception below fires before `return minted`, and `holds()`
-        # asks the stage as well as the object), so re-checking cannot
-        # itself grant anything; it only chooses which vocabulary a raise
-        # in this exact window uses.
-        self._require_stage(RecoveryStage.TRIAL_OPEN)
+        # the candidate write above and the stage write below. It closed
+        # that window with a `_require_stage(TRIAL_OPEN)` re-check
+        # immediately above this comment — and a round-eighteen review
+        # proved a re-check can never fully close it: the re-check and the
+        # write it guards are still two separate statements, so the same
+        # race just re-opens one call-frame narrower, forever. There is no
+        # finite number of re-checks that closes a gap of this shape.
+        #
+        # The close moved to `_sealed_assign` itself instead: its own
+        # terminal-stage guard now answers `RecoveryRefused` rather than a
+        # bare `AttributeError`, so the write below is safe whether or not
+        # a race lands in front of it, without needing a re-check here at
+        # all. The round-seventeen re-check is gone rather than kept
+        # alongside it — a guard that cannot fail is not a guard, and this
+        # module says so about `_require_this_sitting`.
         self._sealed_assign("_stage", RecoveryStage.COMMITTED)
         self._record(
             SnapshotAuditEvent.RECOVERY_COMPLETED,
@@ -2394,10 +2421,34 @@ class RecoveryWorkflow:
                 "candidate move; the quarantine, the binding and the sitting "
                 "cannot be replaced"
             )
+        # **`_refuse`, not a raised `AttributeError` — round eighteen, the
+        # same move round ten made for the fence check below.** Round
+        # seventeen closed a genuine two-thread race here (`commit`'s
+        # candidate-write racing an `interrupt()`) by re-asking the stage
+        # immediately before the final write, and a round-eighteen review
+        # proved that shape can never fully close: `_require_stage` and the
+        # write it guards are two separate statements, so the race just
+        # narrows one call-frame at a time and a second thread can always
+        # land in whatever gap is left, for `commit`'s candidate write, for
+        # `start`'s and `open_trial`'s stage writes, and for `interrupt`
+        # racing a second call to itself. Every one of those writes passes
+        # through here, and this is the last statement before any of them
+        # lands — so the fix is not another re-check upstream, it is this
+        # check answering in this module's own vocabulary. A caller who
+        # correctly wrote `except RecoveryRefused:` used to crash on
+        # whichever of those four races it lost; now it is refused, the
+        # same `WORKFLOW_ALREADY_FINISHED` `interrupt` and `_require_stage`
+        # already answer for the identical fact reached without a race.
+        # Nothing here grants anything either way: the write this call
+        # would have made still never happens, `holds()` still asks the
+        # stage as well as the object, and which thread's write lands
+        # first is still nondeterministic — only which vocabulary the
+        # loser meets has changed.
         if self._stage in TERMINAL_STAGES:
-            raise AttributeError(
-                "this workflow has ended; a terminal stage is terminal, and a "
-                "further attempt is a new workflow that runs every gate again"
+            self._refuse(
+                Refusal.WORKFLOW_ALREADY_FINISHED,
+                "this workflow has ended; a further attempt is a new workflow "
+                "that runs every gate again",
             )
         # **The same gap, a sixth time, and the sharpest yet.** Every other
         # write this method accepts pins the value's exact type before
@@ -2898,9 +2949,18 @@ class MigrationLedger:
         # the failure the module-wide key was given a medium to fix. Two
         # spare guards that could not fire, in front of one that could, one of
         # which refused a legitimate caller when it did.
-        if _a_write_is_recorded(quarantine, judged):
+        #
+        # **One call, not a check and a write.** It used to be
+        # `_a_write_is_recorded(...)` then, on its own line, `_remember_a_
+        # write(...)` — a genuine TOCTOU a round-eighteen review drove with
+        # two real threads: both reached the check before either reached the
+        # write, both saw "not yet recorded", and both recorded — two
+        # `SNAPSHOT_WRITTEN` entries for the one preflight this verdict
+        # authorised. `_remember_a_write_if_new` is the same rule as one
+        # call, under one lock, so there is no gap between the check and the
+        # write for a second thread to land in.
+        if not _remember_a_write_if_new(quarantine, judged):
             _raise_already_spent()
-        _remember_a_write(quarantine, judged)
 
         self._audit.append(
             SnapshotAuditEntry(
