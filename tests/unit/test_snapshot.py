@@ -3329,6 +3329,27 @@ def test_the_workflow_and_the_ledger_are_sealed(observations) -> None:
     ledger = MigrationLedger()
     with pytest.raises(AttributeError, match="sealed after construction"):
         ledger._audit = []
+    # R37 (test-suite review): `__setattr__` here is name-independent — it
+    # gates only on `getattr(self, "_sealed", False)` — but `_sealed` itself
+    # was never driven as an *assignment* target here. A mutation
+    # special-casing `name != "_sealed"` in the guard lets `ledger._sealed =
+    # False` succeed and fully unseal the ledger, after which every later
+    # write — including a forged `_audit` — is unconditionally permitted,
+    # since this class has no further check past the seal the way
+    # `RecoveryWorkflow._sealed_assign` does. Passed the whole suite
+    # undetected.
+    with pytest.raises(AttributeError, match="sealed after construction"):
+        ledger._sealed = False
+    # R37 (test-suite review): the sibling gap for `__delattr__`, which is
+    # unconditional and does not branch on `name` at all — but only
+    # `_sealed`'s own deletion was driven (below, via the shared
+    # every-sealed-class sweep). A mutation making `__delattr__` silently
+    # no-op for `"_audit"` specifically (`if name == "_audit": return`,
+    # introducing no dunder call, so the file's separate "no dunder called
+    # through an attribute" AST scanner does not catch it either) let
+    # `del ledger._audit` appear to succeed instead of refusing.
+    with pytest.raises(AttributeError, match="sealed after construction"):
+        del ledger._audit
 
     # `_sealed_assign` used to be an unconditional `object.__setattr__` that
     # any caller could reach, and this test recorded that as a stated limit. A
@@ -4243,6 +4264,16 @@ def test_the_seal_writes_only_the_three_fields_a_recovery_moves(observations) ->
         # widening `_MOVES_DURING_A_RECOVERY` to include `"_lock"` passed
         # the whole suite before this case was added.
         ("_lock", threading.RLock()),
+        # R37 (test-suite review): `_cleared` itself only had the static
+        # `"_cleared" not in module._MOVES_DURING_A_RECOVERY` check below —
+        # never driven through `_sealed_assign` at runtime. A mutation
+        # special-casing `"_cleared"` in the guard (`name not in
+        # _MOVES_DURING_A_RECOVERY and name != "_cleared"`) reaches
+        # `object.__setattr__` directly, since no later branch in
+        # `_sealed_assign` matches this name — forging the clearance the
+        # gate interlock exists to protect, with no `_require_the_gates`
+        # call anywhere in the path. Passed the whole suite undetected.
+        ("_cleared", object()),
     ):
         with pytest.raises(AttributeError, match="cannot be replaced"):
             flow._sealed_assign(name, value)
