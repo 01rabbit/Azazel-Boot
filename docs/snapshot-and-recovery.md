@@ -464,6 +464,27 @@ with no `RECOVERY_SNAPSHOT_SUBSTITUTED` recorded.
 An older fingerprint, a lower schema version or a weakened integrity verdict
 presented at either stage is refused rather than used.
 
+**A candidate written through `_sealed_assign` directly still has to agree
+with the pin.** `_require_the_gates`/`_sealed_assign` are bound methods at
+`commit`'s own reach, and a round-fourteen review used that reach to write a
+`_candidate` naming a schema version `_pinned` never judged — in one case
+with `_pinned` never even set, `start` skipped entirely, reaching
+`COMMITTED` with `holds()` true and the audit empty. `_sealed_assign` now
+refuses a `_candidate` write when `_pinned is None`, and refuses one whose
+`schema_version` disagrees with `_pinned.schema_version`. Not the
+fingerprint: `RecoveryCandidate._fingerprint` is set once, in `__init__`,
+and read by nothing anywhere in this module — comparing it would be this
+class's first read of a field the whole design keeps deliberately
+write-only, and `schema_version` is the field a caller can act on. A
+round-fifteen review found the comparison itself repeated the same
+container-type/field-type gap as `binding`'s and `quarantine`'s fields:
+`value.schema_version` was compared with `!=` before its type was pinned,
+and a genuine `RecoveryCandidate` built with an `int` subclass whose
+`__ne__` always answers `False` defeated the check the round-fourteen fix
+had just added. `value.schema_version` is now pinned to exactly `int`
+immediately before that comparison, the same way `binding`'s and
+`quarantine`'s fields are pinned before theirs.
+
 ## What never leaves, and what the audit may hold
 
 No second partition, no host disk, no network, no USB export, no temporary file
