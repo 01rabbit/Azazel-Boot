@@ -1929,7 +1929,7 @@ def test_this_module_cannot_reach_a_host_a_network_a_vm_or_a_second_partition() 
             continue
         assert len(node.args) == 3, "getattr is permitted only as the seal's read"
         assert isinstance(node.args[0], ast.Name) and node.args[0].id == "self"
-        # Four shapes, all reads of this object's own state with a default:
+        # Five shapes, all reads of this object's own state with a default:
         # the seal, and one canary field per class whose `__repr__` must
         # survive a half-built instance. `__init__` validates before it
         # assigns in each of these classes, and the traceback machinery
@@ -5784,11 +5784,12 @@ def test_a_snapshot_descriptors_repr_survives_an_instance_that_was_never_built()
     """R22 (security review): the same crash, for a sibling class.
 
     `SnapshotDescriptor.__init__` validates every field before assigning any
-    of them, the identical shape `RecoveryWorkflow.__init__` has, and its
-    `__repr__` read `self.container_version`/`self.schema_version`/
-    `self.integrity` unconditionally — so the same `capture_locals=True`
-    traceback rendering that `RecoveryWorkflow`'s test above drives died the
-    same way here, one validation failure away.
+    of them — a related but not identical shape to `RecoveryWorkflow.__init__`
+    (round 24 made that class seal itself *before* validating, rather than
+    after) — and its `__repr__` read `self.container_version`/
+    `self.schema_version`/`self.integrity` unconditionally, so the same
+    `capture_locals=True` traceback rendering that `RecoveryWorkflow`'s test
+    above drives died the same way here, one validation failure away.
     """
 
     import traceback

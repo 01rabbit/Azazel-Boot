@@ -187,11 +187,15 @@ class SnapshotDescriptor:
     def __repr__(self) -> str:
         """Redacted. A fingerprint in a repr is a fingerprint in every traceback.
 
-        Also survives a half-built instance, the same way
-        `RecoveryWorkflow.__repr__` does and for the same reason: `__init__`
-        validates every field before assigning any of them, so a `TypeError`
-        from one of its checks leaves an object with none of its slots set.
-        A round-22 review found that asking `traceback.TracebackException`
+        Also survives a half-built instance, the same guarded-getattr
+        technique `RecoveryWorkflow.__repr__` uses: `__init__` validates
+        every field before assigning any of them, so a `TypeError` from one
+        of its checks leaves an object with none of its slots set. (This
+        class's `__init__` shape, not `RecoveryWorkflow`'s — round 24 made
+        `RecoveryWorkflow` seal itself before validating, so a half-built
+        `RecoveryWorkflow` now carries one slot already; see that class's
+        own `__repr__` docstring.) A round-22 review found that asking
+        `traceback.TracebackException`
         for captured locals on exactly that `TypeError` — the ordinary shape
         of `pytest --showlocals` and most crash reporters — called this
         unguarded repr and died inside it with a second, unhandled
@@ -1672,13 +1676,17 @@ class SnapshotAuditEntry:
         what an operator-facing log actually holds. A review found it by
         rendering `repr(workflow.audit())`, which the absence test had not.
 
-        Also survives a half-built instance, for the same reason
-        `SnapshotDescriptor.__repr__` and `RecoveryWorkflow.__repr__` do:
-        `__init__` validates every field before assigning any of them, so a
-        rejected fingerprint — the exact leak this constructor's own
-        docstring describes finding — left an object with no `_event` slot,
-        and the redacting repr above died reading it before it ever reached
-        the fingerprint it exists to redact.
+        Also survives a half-built instance, the same guarded-getattr
+        technique `SnapshotDescriptor.__repr__` and `RecoveryWorkflow.__repr__`
+        use: this class's `__init__` validates every field before assigning
+        any of them, so a rejected fingerprint — the exact leak this
+        constructor's own docstring describes finding — left an object with
+        no `_event` slot, and the redacting repr above died reading it
+        before it ever reached the fingerprint it exists to redact.
+        (`RecoveryWorkflow.__init__` no longer has that same validate-then-
+        assign-everything shape itself, since round 24 made it seal first —
+        see that class's own `__repr__` docstring — but its repr uses the
+        identical guarded-read technique for the one slot it does read.)
         """
 
         event = getattr(self, "_event", None)
