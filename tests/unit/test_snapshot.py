@@ -121,16 +121,21 @@ def descriptor(**overrides) -> SnapshotDescriptor:
 
 
 def _half_built(cls, **arguments):
-    """An instance whose `__init__` raised before assigning any slot.
+    """An instance whose `__init__` raised before finishing.
 
     `__new__` always runs before `__init__`, so the instance and its exact
     `type()` exist the moment the constructor call is made — `__init__`
     raising partway through leaves an object of the right class with none
-    of its `__slots__` set, which is exactly the shape a round-22/23
-    security review found several dunder methods unprepared for. Walking
-    the raised exception's own traceback for the `__init__` frame reaches
-    that live half-built `self` directly, the same object a debugger
-    evaluating an expression at a breakpoint would reach.
+    of its ordinary `__slots__` set, which is exactly the shape a
+    round-22/23 security review found several dunder methods unprepared
+    for. `RecoveryWorkflow` is the one exception: round 24 made `_sealed`
+    the very first slot its `__init__` sets, before any validation runs,
+    so a half-built `RecoveryWorkflow` from this helper already carries
+    that one slot — deliberately, so the half-built instance refuses
+    ordinary writes rather than accepting them. Walking the raised
+    exception's own traceback for the `__init__` frame reaches that live
+    half-built `self` directly, the same object a debugger evaluating an
+    expression at a breakpoint would reach.
     """
 
     try:

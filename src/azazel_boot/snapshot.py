@@ -2005,11 +2005,13 @@ class RecoveryWorkflow:
     def __repr__(self) -> str:
         """Survives a half-built instance, because that is when it is called.
 
-        `__init__` validates before it assigns, so a `TypeError` from one of
-        its checks left an object with no `_stage` — and the traceback
-        machinery, asked for captured locals, died inside the redacting repr
-        with an `AttributeError`. A clean message-only refusal became a crash
-        in the code written to keep refusals clean.
+        `__init__` validates before it assigns every field but the seal
+        itself (`_sealed` is set first, round 24 — see that comment above),
+        so a `TypeError` from one of its checks still left an object with no
+        `_stage` — and the traceback machinery, asked for captured locals,
+        died inside the redacting repr with an `AttributeError`. A clean
+        message-only refusal became a crash in the code written to keep
+        refusals clean.
         """
 
         stage = getattr(self, "_stage", None)
