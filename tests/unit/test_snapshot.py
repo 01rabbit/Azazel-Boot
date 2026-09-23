@@ -1951,12 +1951,20 @@ def test_this_module_cannot_reach_a_host_a_network_a_vm_or_a_second_partition() 
         # alone (round 23 doctrine review: an earlier version of this
         # comment claimed `_stage` was also "the first field", which is
         # false and was corrected here without changing the runtime code).
+        # `PreflightVerdict`'s `_refused_by` (round 25) is a fifth: before
+        # round 24 gave `__init__` its first validation, this class could
+        # never raise mid-construction and needed no guard at all; the
+        # validation itself opened the same half-built window its siblings
+        # already had, closed here the same way — except the sentinel is
+        # not `None`, because `None` is `_refused_by`'s own legitimate
+        # "passed" value and would be indistinguishable from "unbuilt".
         assert isinstance(node.args[1], ast.Constant)
         assert node.args[1].value in {
             "_sealed",
             "_stage",
             "_container_version",
             "_event",
+            "_refused_by",
         }, node.args[1].value
 
     # Over **code**, with every docstring excluded — which is the opposite of
@@ -2088,6 +2096,31 @@ def test_a_preflight_verdicts_refused_by_is_pinned_to_the_enum_or_none() -> None
     # `None` and a genuine member still build, unaffected.
     assert PreflightVerdict(None).refused_by is None
     assert PreflightVerdict(PreflightCheck.BINDING).refused_by is PreflightCheck.BINDING
+
+
+def test_a_preflight_verdicts_repr_survives_an_instance_that_was_never_built() -> None:
+    """R25 (security review): round 24's own validation fix opened this gap.
+
+    Before round 24, `PreflightVerdict.__init__` never validated anything
+    and so could never raise partway through — a half-built instance was
+    structurally impossible, and `__repr__` never needed a guard. Round
+    24's fix (rejecting a non-`PreflightCheck` `refused_by`) made a
+    half-built instance reachable for the first time, in the same file that
+    already treats this exact shape as worth fixing for
+    `SnapshotDescriptor`/`SnapshotAuditEntry`/`RecoveryWorkflow` — closed
+    here the same way, via `traceback.TracebackException(...,
+    capture_locals=True)`, the ordinary shape of `pytest --showlocals` and
+    most crash reporters.
+    """
+
+    import traceback
+
+    with pytest.raises(TypeError) as raised:
+        PreflightVerdict("nonsense")
+    rendered = "".join(
+        traceback.TracebackException.from_exception(raised.value, capture_locals=True).format()
+    )
+    assert "PreflightVerdict(unbuilt)" in rendered
 
 
 def test_a_recovery_candidates_repr_does_not_render_a_hostile_schema_version() -> None:
@@ -5707,23 +5740,42 @@ def test_a_half_built_recovery_workflow_is_sealed_and_refuses_every_write(observ
     a genuinely minted one. `_sealed` is now the very first thing `__init__`
     sets, before any validation runs, so every write below now meets the
     same sealed refusal a fully-built workflow already gives.
+
+    Every name in `RecoveryWorkflow.__slots__` is driven, not just three of
+    them — `__setattr__` checks only the seal, never the field or the
+    value, so one placeholder value works for all ten. A round-25
+    test-suite review pointed out an earlier version of this test drove
+    only four names, which happened to be masked by the seal-first
+    architecture (any other field left unconverted to `object.__setattr__`
+    inside `__init__` fails *every* construction, loudly, long before this
+    test's own narrower check could matter) but was not itself a proof
+    covering the remaining six.
     """
 
+    assert set(RecoveryWorkflow.__slots__) == {
+        "_quarantine",
+        "_binding",
+        "_session_id",
+        "_stage",
+        "_audit",
+        "_pinned",
+        "_candidate",
+        "_cleared",
+        "_sealed",
+        "_lock",
+    }
+
     binding = SessionBinding(host_fingerprint=host_fingerprint(observations), session_id=SESSION)
+    placeholder = object()
     for arguments in (
         {"quarantine": object(), "binding": binding, "session_id": SESSION},
         {"quarantine": a_quarantine(), "binding": object(), "session_id": SESSION},
         {"quarantine": a_quarantine(), "binding": binding, "session_id": b"bytes"},
     ):
         half = _half_built(RecoveryWorkflow, **arguments)
-        for name, value in (
-            ("_stage", RecoveryStage.COMMITTED),
-            ("_candidate", RecoveryCandidate(1, FINGERPRINT)),
-            ("_quarantine", a_quarantine()),
-            ("_sealed", False),
-        ):
+        for name in RecoveryWorkflow.__slots__:
             with pytest.raises(AttributeError, match="sealed"):
-                setattr(half, name, value)
+                setattr(half, name, placeholder)
             with pytest.raises(AttributeError, match="sealed"):
                 delattr(half, name)
 

@@ -677,6 +677,19 @@ exists to keep opaque. The repr now renders `schema_version` only when it
 is genuinely `int`, without touching the intentionally permissive
 constructor at all.
 
+**Round 24's own fix opened one more window of this exact shape, found in
+round 25.** Before round 24, `PreflightVerdict.__init__` performed no
+validation at all, so it could never raise partway through construction —
+a half-built `PreflightVerdict` was structurally impossible, and its
+`__repr__` never needed a guard. The moment round 24 gave `refused_by` its
+first-ever type check, a rejected constructor call became reachable for
+the first time, and `__repr__` had not received the same canary-field
+guard `SnapshotDescriptor`/`SnapshotAuditEntry`/`RecoveryWorkflow` already
+carry. Closed the same way — `getattr(self, "_refused_by", <sentinel>)` —
+except the sentinel is not `None`: `None` is `_refused_by`'s own
+legitimate "the preflight passed" value, so a distinct module-level object
+is what tells "unbuilt" and "built and passed" apart.
+
 ## What never leaves, and what the audit may hold
 
 No second partition, no host disk, no network, no USB export, no temporary file

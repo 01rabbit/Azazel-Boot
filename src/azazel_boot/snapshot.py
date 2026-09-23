@@ -382,6 +382,15 @@ class PreflightCheck(Enum):
     IMAGE_DIGEST = "image_digest"
 
 
+#: The `__repr__` canary's "not present" answer, for exactly one field:
+#: `PreflightVerdict._refused_by`. Every other canary in this file uses
+#: `None` as its own default, because `None` never doubles as one of that
+#: field's legitimate values elsewhere — but `_refused_by`'s legitimate,
+#: fully-built "the preflight passed" value *is* `None`, so a distinct
+#: sentinel object is what tells "unbuilt" and "built and passed" apart.
+_UNBUILT_PREFLIGHT_VERDICT = object()
+
+
 class PreflightVerdict:
     """Read-only, and the whole of what a preflight produces.
 
@@ -485,7 +494,23 @@ class PreflightVerdict:
         raise TypeError("a PreflightVerdict does not hand back its fields")
 
     def __repr__(self) -> str:
-        decided = self._refused_by.value if self._refused_by is not None else "may_migrate"
+        """Survives a half-built instance, the same way its siblings do.
+
+        Before round 24, `__init__` never validated `refused_by` and so
+        could never raise — a half-built `PreflightVerdict` was structurally
+        impossible, and this repr never needed a guard. Round 24's own fix
+        (rejecting a non-`PreflightCheck` `refused_by`) made a half-built
+        instance reachable for the first time, in the same file that
+        already treats this exact shape as worth fixing for
+        `SnapshotDescriptor`/`SnapshotAuditEntry`/`RecoveryWorkflow` — a
+        round-25 security review pointed out the new window here had not
+        received the same guard its own fix required elsewhere.
+        """
+
+        refused_by = getattr(self, "_refused_by", _UNBUILT_PREFLIGHT_VERDICT)
+        if refused_by is _UNBUILT_PREFLIGHT_VERDICT:
+            return "PreflightVerdict(unbuilt)"
+        decided = refused_by.value if refused_by is not None else "may_migrate"
         return f"PreflightVerdict({decided})"
 
     @property
