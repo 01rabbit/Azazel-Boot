@@ -2442,6 +2442,22 @@ class RecoveryWorkflow:
                 "the snapshot a workflow judges is pinned when it starts and "
                 "not afterwards"
             )
+        # **The pin's own type, not only when it may be written.** The
+        # `_candidate` branch below checks both *when* a write is legal and
+        # *what* the value says; this branch, above, only ever checked the
+        # former. A round-fifteen review wrote a `_pinned` that was not a
+        # `SnapshotDescriptor` at all through this same bound-method reach,
+        # and the workflow accepted it silently — the crash then landed
+        # several calls later, inside `_fields_of`, as a bare
+        # `AttributeError` from ordinary attribute lookup rather than a
+        # refusal at the point of the bad write. `_require_a_real_snapshot`
+        # is the same check every legitimate entrance (`start`, `open_
+        # trial`, `commit`) already runs on its own `snapshot` argument
+        # before this method is ever reached; reused here rather than
+        # reimplemented, so the pin cannot be written as anything that
+        # check would have refused at the door.
+        if name in _PINNED_AT_THE_START:
+            _require_a_real_snapshot(value)
         if name == "_candidate" and self._stage is not RecoveryStage.TRIAL_OPEN:
             raise AttributeError(
                 "a candidate is minted by a commit and by nothing else"

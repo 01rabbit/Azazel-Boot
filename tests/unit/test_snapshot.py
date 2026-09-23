@@ -1349,6 +1349,70 @@ def test_a_refused_migration_records_the_check_and_no_figure() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        ({"snapshot": None}, PreflightCheck.SNAPSHOT_ABSENT),
+        (
+            {"snapshot": descriptor(container_version=99)},
+            PreflightCheck.SNAPSHOT_CONTAINER_UNKNOWN,
+        ),
+        (
+            {"snapshot": descriptor(integrity=SnapshotIntegrity.FAILED)},
+            PreflightCheck.SNAPSHOT_INTEGRITY,
+        ),
+        ({"capacity": capacity(required=1000, available=999)}, PreflightCheck.REQUIRED_SPACE),
+        ({"current_schema": 2, "target_schema": 1}, PreflightCheck.SCHEMA_COMPATIBILITY),
+        ({"binding_holds": False}, PreflightCheck.BINDING),
+        ({"generation_holds": False}, PreflightCheck.GENERATION),
+        ({"image_digest_holds": False}, PreflightCheck.IMAGE_DIGEST),
+    ],
+)
+def test_may_migrates_audited_check_matches_the_verdicts_refused_by_for_every_check(
+    overrides, expected
+) -> None:
+    """R15 (test-suite review): `may_migrate`'s `check=verdict.refused_by`
+    passthrough was end-to-end proven for exactly one of the eight
+    `PreflightCheck` members it can actually carry through this path.
+
+    `test_each_failing_check_refuses_with_its_own_classification` proves
+    `preflight()` itself produces the right `refused_by`, for all ten
+    members, but never calls `may_migrate` or reads the ledger's audit.
+    `test_a_refused_migration_records_the_check_and_no_figure` is the only
+    test that does, and it only ever drives `REQUIRED_SPACE`. A narrow
+    mutant that mislabels one specific, untested check (e.g. records
+    `BINDING` whenever the real reason was `GENERATION`) survived the whole
+    suite undetected — an operator refused for one reason would be told a
+    different one.
+
+    `MEDIUM_FENCED`/`VOLUME_QUARANTINED` are not parametrized here: fencing
+    and volume-quarantining are both one-way, so a verdict whose preflight
+    refused on either is a verdict over a medium that is *still* fenced or
+    unquarantined by the time `may_migrate` is called — `_require_the_
+    medium_now`, asked first, always refuses those two before this
+    passthrough is ever reached (driven separately, elsewhere in this
+    file, via its own `RecoveryRefused`).
+    """
+
+    judged_medium = a_quarantine(quarantined=False)
+    ledger = MigrationLedger()
+    arguments = {
+        "snapshot": descriptor(),
+        "capacity": capacity(),
+        "current_schema": 1,
+        "target_schema": 2,
+        "binding_holds": True,
+        "generation_holds": True,
+        "image_digest_holds": True,
+    }
+    arguments.update(overrides)
+    verdict = preflight(judged_medium, **arguments)
+    assert verdict.refused_by is expected
+
+    assert ledger.may_migrate(verdict, quarantine=judged_medium) is False
+    assert ledger.audit()[-1].check is expected
+
+
 def test_nothing_rendered_carries_the_fingerprint_a_secret_or_an_identity(
     observations,
 ) -> None:
@@ -6379,6 +6443,32 @@ def test_the_gates_cannot_be_reached_without_all_of_them(observations) -> None:
         )
     assert refused.value.refusal is Refusal.GATE_REFUSED
     assert flow.audit()[-1].gate is RecoveryGate.OPERATOR_CONFIRMATION
+
+
+def test_the_pin_is_typed_when_it_is_written_not_only_when(observations) -> None:
+    """R15 (test-suite review): `_sealed_assign`'s `_pinned` write checked
+    *when* (only from `NOT_STARTED`), never *what*.
+
+    Unlike the `_candidate` branch a few lines below — which checks both
+    when a write is legal and what the value says — the `_pinned` branch
+    only ever checked the former. A `_pinned` written as something other
+    than a `SnapshotDescriptor`, through the same bound-method reach
+    `start` itself has, was accepted silently; the crash then landed
+    several calls later, inside `_fields_of`, as a bare `AttributeError`
+    from ordinary attribute lookup — the exact "caller who wrote `except
+    RecoveryRefused:` crashed" shape this module refuses everywhere else.
+    `_require_a_real_snapshot` is reused here, the same check every
+    legitimate entrance already runs on its own argument.
+    """
+
+    class BogusPin:
+        pass
+
+    flow = workflow(observations)
+    with pytest.raises(TypeError, match="SnapshotDescriptor"):
+        flow._sealed_assign("_pinned", BogusPin())
+    assert flow._pinned is None
+    assert flow.stage is RecoveryStage.NOT_STARTED
 
 
 def test_a_candidate_cannot_be_minted_without_a_pin_via_the_bound_methods_directly(
