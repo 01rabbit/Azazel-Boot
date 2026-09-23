@@ -1929,7 +1929,7 @@ def test_this_module_cannot_reach_a_host_a_network_a_vm_or_a_second_partition() 
             continue
         assert len(node.args) == 3, "getattr is permitted only as the seal's read"
         assert isinstance(node.args[0], ast.Name) and node.args[0].id == "self"
-        # Five shapes, all reads of this object's own state with a default:
+        # Six shapes, all reads of this object's own state with a default:
         # the seal, and one canary field per class whose `__repr__` must
         # survive a half-built instance. `__init__` validates before it
         # assigns in each of these classes, and the traceback machinery
@@ -1958,6 +1958,16 @@ def test_this_module_cannot_reach_a_host_a_network_a_vm_or_a_second_partition() 
         # already had, closed here the same way — except the sentinel is
         # not `None`, because `None` is `_refused_by`'s own legitimate
         # "passed" value and would be indistinguishable from "unbuilt".
+        # `RecoveryCandidate`'s `_schema_version` (round 26) is a sixth,
+        # added pre-emptively rather than in response to a live crash:
+        # `__init__` still cannot raise today (deliberately unvalidated, by
+        # this class's own design), so no caller can reach a half-built one
+        # through the public constructor — but a round-26 security review
+        # flagged that every OTHER class capable of raising mid-construction
+        # already carries this guard, and closing it now costs nothing and
+        # does not touch the deliberately permissive constructor at all.
+        # Same reason as `_refused_by`: the sentinel is not `None`, because
+        # this constructor accepts `None` as a legitimate `schema_version`.
         assert isinstance(node.args[1], ast.Constant)
         assert node.args[1].value in {
             "_sealed",
@@ -1965,6 +1975,7 @@ def test_this_module_cannot_reach_a_host_a_network_a_vm_or_a_second_partition() 
             "_container_version",
             "_event",
             "_refused_by",
+            "_schema_version",
         }, node.args[1].value
 
     # Over **code**, with every docstring excluded — which is the opposite of
@@ -2147,6 +2158,25 @@ def test_a_recovery_candidates_repr_does_not_render_a_hostile_schema_version() -
 
     # A genuine int still renders normally.
     assert "schema_version=1" in repr(RecoveryCandidate(1, FINGERPRINT))
+
+
+def test_a_recovery_candidates_repr_survives_an_instance_that_was_never_built() -> None:
+    """R26 (security review, latent): the same guard, added pre-emptively.
+
+    `RecoveryCandidate.__init__` cannot raise today — it validates nothing,
+    by design — so no caller can reach a half-built instance through the
+    public constructor, and this is not a live crash the way the sibling
+    classes' repr fixes were. `object.__new__` is the only way to build one,
+    the same technique this module's own `_WeakIdentityIndex` and sealed
+    classes' `__delattr__` docstrings describe as "the same reach a
+    debugger or `pickle.__reduce_ex__` would have" — worth guarding now
+    rather than waiting for a future round that adds validation here to
+    reopen the crash, the way round 24's `PreflightVerdict` fix did (found
+    and closed the very next round, round 25).
+    """
+
+    half = object.__new__(RecoveryCandidate)
+    assert repr(half) == "RecoveryCandidate(unbuilt)"
 
 
 # --------------------------------------------------------------------------

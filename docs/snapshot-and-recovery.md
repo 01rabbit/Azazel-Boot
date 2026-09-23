@@ -690,6 +690,21 @@ except the sentinel is not `None`: `None` is `_refused_by`'s own
 legitimate "the preflight passed" value, so a distinct module-level object
 is what tells "unbuilt" and "built and passed" apart.
 
+**Round 26 closed the remaining two instances pre-emptively, before either
+had a live crash to point to.** `RecoveryCandidate.__init__` still cannot
+raise — it validates nothing, deliberately, by this class's own design —
+so no public caller can reach a half-built one; its `__repr__` gained the
+same canary guard anyway (sentinel, not `None`, for the identical reason
+`_refused_by`'s does), reachable only through `object.__new__` today. And
+`MigrationLedger.__init__` — the only other class in the file gating
+`__setattr__` on a `_sealed` flag besides `RecoveryWorkflow` — still set
+`_sealed = False` first and `True` last, the exact pre-round-24 ordering,
+even though it takes no argument and `list()` cannot raise, so there was
+never a live gap. Both were reordered/guarded purely so a future round
+that adds validation to either constructor inherits the safe shape by
+default, rather than reopening the same crash a validation-adding round
+already reopened once, in `PreflightVerdict`, the round before this one.
+
 ## What never leaves, and what the audit may hold
 
 No second partition, no host disk, no network, no USB export, no temporary file

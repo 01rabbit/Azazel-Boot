@@ -1740,6 +1740,14 @@ class SnapshotAuditEntry:
         return hash((SnapshotAuditEntry, *fields))
 
 
+#: `RecoveryCandidate.__repr__`'s "not present" answer for `_schema_version`.
+#: Not `None`: this class's constructor is deliberately unvalidated, and
+#: `None` is as legitimate a caller-supplied `schema_version` as any other
+#: value, so it cannot double as "unbuilt" the way it can for a canary field
+#: whose fully-built value is never `None`.
+_UNBUILT_RECOVERY_CANDIDATE = object()
+
+
 class RecoveryCandidate:
     """What a completed recovery produces. **It is not a volume.**
 
@@ -1828,9 +1836,22 @@ class RecoveryCandidate:
         repr, the one place this class exists to keep opaque. Rendered only
         when it is genuinely `int`; anything else renders a fixed
         placeholder instead of calling back into the hostile object.
+
+        Also guarded for a half-built instance, though nothing today can
+        reach one: `__init__` cannot currently raise, so no caller can hand
+        this repr a `self` with no `_schema_version` slot. A round-26
+        security review flagged the absence of this class's canary as a
+        latent gap — every sibling class in this file that *can* raise
+        mid-construction already carries one — worth closing now rather
+        than waiting for a future validation-adding round to reopen it, the
+        way round 24's `PreflightVerdict` fix did (closed in round 25).
+        `None` is not the sentinel: this constructor's whole point is that
+        it accepts anything, `None` included.
         """
 
-        schema_version = self._schema_version
+        schema_version = getattr(self, "_schema_version", _UNBUILT_RECOVERY_CANDIDATE)
+        if schema_version is _UNBUILT_RECOVERY_CANDIDATE:
+            return "RecoveryCandidate(unbuilt)"
         rendered = schema_version if type(schema_version) is int else "<non-int>"
         return (
             f"RecoveryCandidate(schema_version={rendered}, "
@@ -2996,9 +3017,16 @@ class MigrationLedger:
     __slots__ = ("_audit", "_sealed")
 
     def __init__(self) -> None:
-        object.__setattr__(self, "_sealed", False)
-        self._audit: list[SnapshotAuditEntry] = []
+        # Sealed first, matching `RecoveryWorkflow`'s idiom since round 24
+        # (see that class's own `__init__` comment): takes no argument and
+        # `list()` cannot raise, so there is no live gap this ordering
+        # closes today — a round-26 security review flagged the ordering
+        # itself as the one place in the file that never adopted the
+        # now-established "seal first, assign past it" shape, purely so a
+        # future round that adds construction-time validation here does not
+        # have to remember to reorder these lines as well as insert a check.
         object.__setattr__(self, "_sealed", True)
+        object.__setattr__(self, "_audit", [])
 
     def __setattr__(self, name: str, value: object) -> None:
         if getattr(self, "_sealed", False):
