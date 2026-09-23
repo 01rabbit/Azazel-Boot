@@ -595,6 +595,26 @@ def test_this_module_never_calls_anything_that_would_change_a_quarantine() -> No
                     for target in outer.targets
                 )
             ]
+            # **The same slot, the sealed-construction shape.** Round 24's
+            # security review moved `RecoveryWorkflow.__init__`'s field
+            # writes past the seal (`object.__setattr__(self, "_quarantine",
+            # quarantine)`, not `self._quarantine = quarantine` — see that
+            # class's own comment for why), which is the identical travel
+            # `assigned_to_the_slot` above already permits, spelled as a call
+            # instead of a plain assignment.
+            sealed_assigned_to_the_slot = [
+                outer
+                for outer in ast.walk(TREE)
+                if isinstance(outer, ast.Call)
+                and isinstance(outer.func, ast.Attribute)
+                and isinstance(outer.func.value, ast.Name)
+                and outer.func.value.id == "object"
+                and outer.func.attr == "__setattr__"
+                and len(outer.args) == 3
+                and isinstance(outer.args[1], ast.Constant)
+                and outer.args[1].value == "_quarantine"
+                and outer.args[2] is node
+            ]
             # And compared by identity, which reads nothing off it: the ledger
             # asks whether the quarantine it was handed **is** the one the
             # verdict's preflight judged.
@@ -651,7 +671,12 @@ def test_this_module_never_calls_anything_that_would_change_a_quarantine() -> No
                 )
             ]
             assert (
-                passed_to or method_calls or assigned_to_the_slot or compared or indexed
+                passed_to
+                or method_calls
+                or assigned_to_the_slot
+                or sealed_assigned_to_the_slot
+                or compared
+                or indexed
             ), "a quarantine is used other than as a receiver of its four reads"
             continue
         # Four reads, all questions. `medium_is_bound` and `session_id` were
@@ -2033,6 +2058,57 @@ def test_the_verdict_and_the_candidate_are_capabilities_never_authorities(
     assert verdict.authority == ()
     assert run_to_commit(workflow(observations), observations).authority == ()
     assert PreflightVerdict(PreflightCheck.BINDING).authority == ()
+
+
+def test_a_preflight_verdicts_refused_by_is_pinned_to_the_enum_or_none() -> None:
+    """R24 (security review, medium): `refused_by` took anything at all.
+
+    `preflight` only ever passes `None` or a genuine `PreflightCheck`
+    member, but the public constructor validated nothing, and `__repr__`
+    reads `self._refused_by.value` unconditionally whenever it is not
+    `None`. `PreflightVerdict("nonsense")` used to build cleanly and then
+    crash `repr()` with a bare `AttributeError`; worse, an object whose own
+    `.value` returns caller-chosen text rendered that text verbatim — the
+    same disclosure class `_require_an_exact_str`/`_require_an_opaque_value`
+    exist elsewhere in this file to refuse.
+    """
+
+    class _Leaky:
+        value = "capacity_available=17179869184 medium=usb-SN-AA11BB22"
+
+    for refused_by in ("nonsense", 1, _Leaky()):
+        with pytest.raises(TypeError):
+            PreflightVerdict(refused_by)
+
+    # `None` and a genuine member still build, unaffected.
+    assert PreflightVerdict(None).refused_by is None
+    assert PreflightVerdict(PreflightCheck.BINDING).refused_by is PreflightCheck.BINDING
+
+
+def test_a_recovery_candidates_repr_does_not_render_a_hostile_schema_version() -> None:
+    """R24 (security review, medium): `__repr__` interpolated whatever it
+    was handed.
+
+    `RecoveryCandidate.__init__` takes `schema_version` with no validation
+    at all, by design — the class docstring's own point is that anyone can
+    build `RecoveryCandidate(99, …)` and it will answer `99`. `__repr__`'s
+    f-string calls `format()`/`str()` on that value regardless, so an
+    object whose own `__format__` returns caller-chosen text rendered
+    verbatim through the one place this class exists to keep opaque.
+    """
+
+    class _Leaky:
+        def __format__(self, spec: str) -> str:
+            return "DEVICE_SERIAL=usb-SN-AA11BB22 host=/dev/nvme0n1p3"
+
+    hostile = RecoveryCandidate(_Leaky(), FINGERPRINT)
+    rendered = repr(hostile)
+    assert "usb-SN-AA11BB22" not in rendered
+    assert "/dev/nvme0n1p3" not in rendered
+    assert "<non-int>" in rendered
+
+    # A genuine int still renders normally.
+    assert "schema_version=1" in repr(RecoveryCandidate(1, FINGERPRINT))
 
 
 # --------------------------------------------------------------------------
@@ -5606,6 +5682,45 @@ def test_the_repr_survives_an_instance_that_was_never_built(observations) -> Non
         assert "RecoveryWorkflow(stage=unbuilt)" in rendered
         assert FINGERPRINT not in rendered
         assert MEDIUM.identity not in rendered
+
+
+def test_a_half_built_recovery_workflow_is_sealed_and_refuses_every_write(observations) -> None:
+    """R24 (security review, critical): a half-built workflow used to be
+    writable.
+
+    `__init__` used to set `_sealed = False` only *after* its validation —
+    `_require_a_real_quarantine`, the binding field pins, the `session_id`
+    checks — had already run, so a `TypeError` from any of those left an
+    object with no `_sealed` slot at all. `__setattr__` gates on
+    `getattr(self, "_sealed", False)`, which defaults to `False` — "not
+    sealed, writes permitted" — when the slot was never set. Anyone holding
+    that half-built `self` (reached the same way `_half_built` reaches one)
+    could then write `_stage`, `_candidate` and `_quarantine` by ordinary
+    assignment, and `candidate_applies_to`/`holds` — which check
+    `type(flow) is RecoveryWorkflow` and read `_stage`/`_candidate` straight
+    off the instance — had nothing to tell a forged-by-write workflow from
+    a genuinely minted one. `_sealed` is now the very first thing `__init__`
+    sets, before any validation runs, so every write below now meets the
+    same sealed refusal a fully-built workflow already gives.
+    """
+
+    binding = SessionBinding(host_fingerprint=host_fingerprint(observations), session_id=SESSION)
+    for arguments in (
+        {"quarantine": object(), "binding": binding, "session_id": SESSION},
+        {"quarantine": a_quarantine(), "binding": object(), "session_id": SESSION},
+        {"quarantine": a_quarantine(), "binding": binding, "session_id": b"bytes"},
+    ):
+        half = _half_built(RecoveryWorkflow, **arguments)
+        for name, value in (
+            ("_stage", RecoveryStage.COMMITTED),
+            ("_candidate", RecoveryCandidate(1, FINGERPRINT)),
+            ("_quarantine", a_quarantine()),
+            ("_sealed", False),
+        ):
+            with pytest.raises(AttributeError, match="sealed"):
+                setattr(half, name, value)
+            with pytest.raises(AttributeError, match="sealed"):
+                delattr(half, name)
 
 
 def test_a_snapshot_descriptors_repr_survives_an_instance_that_was_never_built() -> None:

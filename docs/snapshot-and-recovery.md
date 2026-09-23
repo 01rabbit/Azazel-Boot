@@ -629,6 +629,54 @@ insisted-on `is`, while the audit stayed at `RECOVERY_TRIAL_OPENED`
 forever and the workflow became permanently stuck. `_sealed_assign` now
 pins `type(value) is RecoveryStage` before any of those checks read it.
 
+**And the seal itself, at the one moment before it existed at all.** Every
+gap above assumed a `RecoveryWorkflow` that had finished constructing —
+`_sealed_assign`'s guards, the pin checks, all of it runs against an object
+`__init__` already returned. A round-24 security review asked what happens
+*during* construction: `__init__` validated `quarantine`, `binding` and
+`session_id` — checks any caller of this public constructor can fail on
+purpose — and only set `_sealed = False` (`__setattr__`'s "not yet sealed,
+writes permitted" state) **after** all of that validation had already run.
+A `TypeError` raised by any of those checks left a genuinely-typed, live
+`RecoveryWorkflow` with no `_sealed` slot at all — and `__setattr__` gates
+on `getattr(self, "_sealed", False)`, which defaults to `False`, meaning
+unsealed, exactly when the slot was never set. Anyone holding that
+half-built `self` — the same reach this document's own confidentiality
+section treats as real for a half-built `SnapshotDescriptor`/
+`SnapshotAuditEntry` (a debugger, or code shaped like the test suite's own
+`_half_built` helper) — could write `_stage`, `_candidate` and
+`_quarantine` by ordinary assignment: no gate, no stage graph, no audit
+entry. `candidate_applies_to`/`holds` check `type(flow) is RecoveryWorkflow`
+and then read `_stage`/`_candidate` straight off the instance, with nothing
+to tell a forged-by-write workflow from a genuinely minted one — the same
+"rebuild the object a legitimate caller holds" attack this document names
+for `PreflightVerdict` and `MigrationLedger`, reached through construction
+failure instead of through a hand-built stand-in. `_sealed` is now the very
+first thing `__init__` sets, before any validation runs, and every field
+write after it uses `object.__setattr__` directly rather than plain
+assignment — the same idiom `SnapshotDescriptor` already used, for the
+same reason: validate with plain functions first, then assign past a seal
+that is already up.
+
+The same review found two narrower instances of caller-supplied content
+reaching a `__repr__` unchecked. `PreflightVerdict.__init__` validated
+nothing about `refused_by` at all, though `preflight()` itself only ever
+passes `None` or a genuine `PreflightCheck` member — a caller-built
+`PreflightVerdict("nonsense")` constructed cleanly and then crashed
+`__repr__`'s `self._refused_by.value` with a bare `AttributeError`, and an
+object whose own `.value` returns chosen text rendered that text verbatim,
+the same disclosure class `_require_an_exact_str`/`_require_an_opaque_value`
+exist elsewhere to refuse. `refused_by` is now pinned to `None` or an exact
+`PreflightCheck` member, the same treatment every other field in this file
+gets. And `RecoveryCandidate.__repr__`'s f-string interpolated
+`schema_version` — deliberately unvalidated at construction, by this
+class's own design, so anyone can build `RecoveryCandidate(99, …)` and read
+`99` back — through plain `str`/`format()`, so an object whose own
+`__format__` returns chosen text rendered through the one place this class
+exists to keep opaque. The repr now renders `schema_version` only when it
+is genuinely `int`, without touching the intentionally permissive
+constructor at all.
+
 ## What never leaves, and what the audit may hold
 
 No second partition, no host disk, no network, no USB export, no temporary file

@@ -441,6 +441,18 @@ class PreflightVerdict:
         again for the same reason it was written.
         """
 
+        # **Checked here, for the same reason every other field in this
+        # module is.** `refused_by` had no type check at all — `preflight`
+        # only ever passes `None` or a genuine `PreflightCheck` member, but
+        # the public constructor took anything. A round-24 security review
+        # built `PreflightVerdict("nonsense")`, which constructed cleanly and
+        # then crashed `__repr__` with a bare `AttributeError` reading
+        # `"nonsense".value`; worse, a hostile object whose own `.value`
+        # returns caller-chosen text rendered that text verbatim through
+        # `__repr__`, the exact disclosure class `_require_an_exact_str`/
+        # `_require_an_opaque_value` exist elsewhere in this file to refuse.
+        if refused_by is not None and not isinstance(refused_by, PreflightCheck):
+            raise TypeError("refused_by must be a PreflightCheck or None")
         object.__setattr__(self, "_refused_by", refused_by)
         object.__setattr__(self, "_snapshot", None)
         object.__setattr__(self, "_evaluated", ())
@@ -1771,8 +1783,24 @@ class RecoveryCandidate:
         raise TypeError("a RecoveryCandidate does not hand back its fields")
 
     def __repr__(self) -> str:
+        """Redacted, and defensive about the one field it does render.
+
+        `__init__` takes `schema_version` with no validation at all, by
+        design — the class docstring's own point is that anyone can build a
+        `RecoveryCandidate(99, …)` and it will answer `99`. That is fine for
+        `schema_version`; it is not fine for what `f"{...}"` does with it.
+        A round-24 security review built a `schema_version` whose own
+        `__format__` returned caller-chosen text — a capacity figure, a
+        device identity, anything — and it rendered verbatim through this
+        repr, the one place this class exists to keep opaque. Rendered only
+        when it is genuinely `int`; anything else renders a fixed
+        placeholder instead of calling back into the hostile object.
+        """
+
+        schema_version = self._schema_version
+        rendered = schema_version if type(schema_version) is int else "<non-int>"
         return (
-            f"RecoveryCandidate(schema_version={self._schema_version}, "
+            f"RecoveryCandidate(schema_version={rendered}, "
             f"fingerprint=<redacted>)"
         )
 
@@ -1822,6 +1850,34 @@ class RecoveryWorkflow:
     def __init__(
         self, quarantine: Quarantine, binding: SessionBinding, *, session_id: str
     ) -> None:
+        # **Sealed from the instant this method starts, not once validation
+        # has passed.** A round-24 security review pointed out that every
+        # other field write below this comment used the sealed `__setattr__`
+        # (`self._quarantine = quarantine`, and so on) while `_sealed` itself
+        # was only set to `False` — "not yet sealed, writes still permitted"
+        # — after all the validation above had already run. A `TypeError`
+        # raised by any of those checks (a wrong-typed `quarantine`, a
+        # `binding` whose fields fail the pin, an empty `session_id` — every
+        # one of them a caller-controlled input to this public constructor)
+        # left a genuinely-typed, live `RecoveryWorkflow` with no `_sealed`
+        # slot at all, and `__setattr__` gates on `getattr(self, "_sealed",
+        # False)` — `False` by default when the slot was never set, meaning
+        # "unsealed". Anyone holding that half-built `self` — reached the
+        # same way this suite's own `_half_built` helper reaches one, or by
+        # a debugger evaluating an expression at a breakpoint — could then
+        # write `_stage`, `_candidate` and `_quarantine` by ordinary
+        # assignment, entirely bypassing every gate, the stage graph and the
+        # audit trail: `candidate_applies_to`/`holds` check `type(flow) is
+        # RecoveryWorkflow` and read `_stage`/`_candidate` straight off the
+        # instance, with nothing to tell a forged-by-write one from a
+        # genuinely minted one. Sealing first, and switching every
+        # assignment below to `object.__setattr__` (matching
+        # `SnapshotDescriptor`'s idiom: validate with plain functions, then
+        # assign past the seal) closes the window completely — a validation
+        # failure now leaves an object that refuses every ordinary write from
+        # the moment it exists, the same as a `TypeError` from `__init__`
+        # leaves any of this module's other sealed classes.
+        object.__setattr__(self, "_sealed", True)
         _require_a_real_quarantine(quarantine)
         if type(binding) is not SessionBinding:
             raise TypeError("binding must be a SessionBinding")
@@ -1864,15 +1920,18 @@ class RecoveryWorkflow:
         if not session_id.strip():
             raise TypeError("session_id must be a non-empty string")
 
-        object.__setattr__(self, "_sealed", False)
-        self._quarantine = quarantine
-        self._binding = binding
-        self._session_id = session_id
-        self._stage = RecoveryStage.NOT_STARTED
-        self._pinned: SnapshotDescriptor | None = None
-        self._cleared: object | None = None
-        self._candidate: RecoveryCandidate | None = None
-        self._audit: list[SnapshotAuditEntry] = []
+        # Every write below is `object.__setattr__`, not plain assignment:
+        # `_sealed` is already `True` by this point (set above, before any
+        # of the validation that could raise), and the sealed `__setattr__`
+        # refuses ordinary assignment unconditionally once it is.
+        object.__setattr__(self, "_quarantine", quarantine)
+        object.__setattr__(self, "_binding", binding)
+        object.__setattr__(self, "_session_id", session_id)
+        object.__setattr__(self, "_stage", RecoveryStage.NOT_STARTED)
+        object.__setattr__(self, "_pinned", None)
+        object.__setattr__(self, "_cleared", None)
+        object.__setattr__(self, "_candidate", None)
+        object.__setattr__(self, "_audit", [])
         # **One workflow, one operation at a time — a round-nineteen fix.**
         # Round eighteen made a *losing* thread's write meet `RecoveryRefused`
         # instead of a bare `AttributeError`, but it never serialised the
@@ -1909,7 +1968,6 @@ class RecoveryWorkflow:
         # a lock nobody is holding — it would succeed even with a plain,
         # non-reentrant `Lock`.
         object.__setattr__(self, "_lock", threading.RLock())
-        object.__setattr__(self, "_sealed", True)
 
     def __setattr__(self, name: str, value: object) -> None:
         if getattr(self, "_sealed", False):
