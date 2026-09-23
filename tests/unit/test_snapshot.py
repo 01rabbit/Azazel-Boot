@@ -947,6 +947,38 @@ def test_a_schema_downgrade_and_a_no_op_are_both_refused() -> None:
     assert KNOWN_CONTAINER_VERSIONS == (1,)
 
 
+def test_schema_is_compatible_pins_both_operands_on_its_own() -> None:
+    """R28 (security review): checked here, not only by `preflight()`.
+
+    `schema_is_compatible` is public and independently importable, and its
+    body compared `current`/`target` with `in`/`>` — the caller-controlled-
+    operand shape this file guards against everywhere else. Every path
+    through this file already went through `preflight()`'s own
+    `_require_an_exact_int` first, so this was never reachable today, but a
+    future caller that imports this function directly would have walked
+    straight past a hostile `__eq__`/`__gt__` that always answers True.
+    """
+
+    class _Agreeable:
+        def __eq__(self, other: object) -> bool:
+            return True
+
+        def __hash__(self) -> int:
+            return hash(1)
+
+        def __gt__(self, other: object) -> bool:
+            return True
+
+        def __lt__(self, other: object) -> bool:
+            return True
+
+    for bad in (True, False, "1", 1.0, None, _Agreeable()):
+        with pytest.raises(TypeError, match="current"):
+            schema_is_compatible(current=bad, target=1)
+        with pytest.raises(TypeError, match="target"):
+            schema_is_compatible(current=1, target=bad)
+
+
 def test_preflight_is_read_only_by_construction() -> None:
     """It has no port to write through, and nothing to write with.
 
@@ -9615,7 +9647,17 @@ class _BlocksOnAnEvent:
 
     def attempt(self) -> AttemptOutcome:
         self.entered.set()
-        self.release.wait(timeout=10)
+        # A generous timeout, not a tight one — round 27 standardized every
+        # other thread-rendezvous wait in this file to `timeout=30` for
+        # exactly this reason and a round-28 test-suite review found this
+        # one call, a rendezvous wait in every sense (`commit()` sits here
+        # until the main test thread calls `self.release.set()`), had been
+        # missed by that sweep. Left at 10s under this environment's
+        # documented scheduling contention, it can fire before the main
+        # thread reaches the release call, producing a confusing
+        # `'refused' == 'returned'` failure instead of the clear deadlock
+        # diagnosis the test means to give.
+        self.release.wait(timeout=30)
         return AttemptOutcome.OPENED
 
 

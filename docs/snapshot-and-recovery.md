@@ -176,6 +176,17 @@ successors failing at once.
 | 7 | schema compatibility | forward to a version this build knows; a downgrade, a no-op and a version outside the supported set all refuse |
 | 8 | binding, generation, image digest | |
 
+**Check 7's own function is now guarded on its own terms, not only by its one
+caller's.** `schema_is_compatible(*, current, target)` is public and
+independently importable, and its body compared both operands with `in`/`>` —
+the exact caller-controlled-operand shape this file guards against everywhere
+else. `preflight()` already pins `current_schema`/`target_schema` to exactly
+`int` before ever reaching it, so no path through this file was ever exposed —
+but a round-28 security review built an object whose `__eq__`/`__gt__` both
+always answer favorably and found this was the one function left that would
+still walk past it, were a future caller ever to reach it directly. Pinned the
+same way as every other numeric boundary in the file.
+
 A verdict also names **which checks were asked**, in order, passes included.
 It used to be `refused_by is None` and nothing else, so a verdict from a
 `preflight` that ran three gates was indistinguishable from one that ran all

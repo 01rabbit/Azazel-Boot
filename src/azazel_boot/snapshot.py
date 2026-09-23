@@ -1273,8 +1273,22 @@ def schema_is_compatible(*, current: int, target: int) -> bool:
     A downgrade is refused rather than attempted: the old schema continuing to
     work is D7's safe outcome, and writing an older layout over a newer one is
     the opposite of keeping it.
+
+    **Checked here, not only by this function's one caller.** `preflight()`
+    already pins `current_schema`/`target_schema` with `_require_an_exact_int`
+    before ever reaching this function, so every path through this file was
+    already safe — but this function is public and independently importable
+    (asserted by `tests/unit/test_snapshot.py`'s public-surface test), and its
+    own body used `in`/`>`, the exact caller-controlled-operand shape this
+    file's `_require_an_exact_int`/`_require_an_exact_str` exist everywhere
+    else to close. A round-28 security review built an object whose `__eq__`
+    and `__gt__` both always answer favorably and found this the one function
+    in the file that would still have walked past it, had a future caller
+    ever reached it without going through `preflight()` first.
     """
 
+    _require_an_exact_int("current", current)
+    _require_an_exact_int("target", target)
     if current not in SUPPORTED_SCHEMA_VERSIONS or target not in SUPPORTED_SCHEMA_VERSIONS:
         return False
     return target > current
