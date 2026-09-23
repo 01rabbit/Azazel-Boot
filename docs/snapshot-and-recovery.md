@@ -225,6 +225,17 @@ overrides and zero-width joiners, for Unicode's other rendering-only
 mechanism. `Mn`/`Mc`/`Me` joined the category tuple for the same reason
 `Cf` did.
 
+**A third rendering-only mechanism, the same shape again.** A round-38
+security review found the five `Emoji_Modifier` codepoints (U+1F3FB
+through U+1F3FF, the Fitzpatrick skin-tone modifiers — category `Sk`)
+pass every check unchanged too: following an `Emoji_Modifier_Base`
+character, one of these forms a single extended grapheme cluster that
+renders as one glyph with a chosen skin tone — narrower than the
+combining-mark case (a fixed, Unicode-defined set of base characters, not
+arbitrary neighbouring text), but the same "not really an opaque token"
+violation. `Sk` joined the category tuple for the same reason `Mn`/`Mc`/
+`Me` did.
+
 ## Preflight (D7)
 
 Read-only **by construction**: it takes reports and returns a verdict. It has

@@ -9434,6 +9434,13 @@ def test_a_fingerprint_is_an_opaque_token_and_not_a_rendered_record() -> None:
         # base character, isolating the single-character category check
         # from the length/splitlines checks above.
         "\u0300A",
+        # R38 (security review): a third rendering-only mechanism -- an
+        # `Emoji_Modifier` codepoint (category `Sk`, Fitzpatrick skin-tone
+        # modifier) following its base forms one extended grapheme cluster
+        # that renders as a single glyph with a chosen skin tone. Passed
+        # every check above unchanged before `Sk` joined the category
+        # tuple.
+        "\U0001f44d\U0001f3ff",
     ):
         with pytest.raises(TypeError, match="opaque"):
             descriptor(fingerprint=rejected)

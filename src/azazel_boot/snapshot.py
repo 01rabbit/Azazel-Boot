@@ -1052,6 +1052,18 @@ def _require_an_opaque_value(name: str, value: str) -> None:
     spoofed or reordered-looking log line could be built from the same
     way"), for Unicode's other rendering-only mechanism. `Mn`/`Mc`/`Me`
     join the category tuple for the same reason `Cf` did.
+
+    **A third rendering-only mechanism, the same shape again.** A round-38
+    security review found the five `Emoji_Modifier` codepoints (U+1F3FB
+    through U+1F3FF, the Fitzpatrick skin-tone modifiers — category `Sk`)
+    pass every check above unchanged too. Following a character with the
+    `Emoji_Modifier_Base` property, one of these forms a single extended
+    grapheme cluster that every emoji-aware renderer displays as one glyph
+    with a chosen skin tone — narrower than the combining-mark case (a
+    fixed, Unicode-defined set of base characters, not arbitrary
+    neighbouring text), but the identical "not really an opaque token"
+    violation. `Sk` joins the category tuple for the same reason `Mn`/
+    `Mc`/`Me` did.
     """
 
     if len(value) > 128:
@@ -1075,10 +1087,12 @@ def _require_an_opaque_value(name: str, value: str) -> None:
             "Mn",
             "Mc",
             "Me",
+            "Sk",
         ):
             raise TypeError(
                 f"{name} must be an opaque token; a control, format, space, "
-                "surrogate or combining-mark character is not one"
+                "surrogate, combining-mark or modifier-symbol character is "
+                "not one"
             )
     for form in ("NFKC", "NFD"):
         if unicodedata.normalize(form, value) != value:
