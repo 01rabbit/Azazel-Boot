@@ -1020,13 +1020,38 @@ def _require_an_opaque_value(name: str, value: str) -> None:
     no codepoint that is NFKC-stable but NFC-unstable, so checking NFD in
     addition to NFKC — rather than all four normal forms — closes the whole
     family: NFC-stability follows from NFKC-stability, and an NFKD-only
-    decomposition is still caught because NFD is a strict subset of what
-    NFKD decomposes. The same review found lone surrogates (category `Cs`)
+    (compatibility-only) decomposition is caught by the **NFKC** check
+    itself, not the NFD one — NFKC performs the same compatibility
+    decomposition NFKD does, before recomposing, and the brute force above
+    found no codepoint where that recomposition restores stability while
+    the decomposition it undid was dangerous. (A round-37 doctrine review
+    corrected this paragraph: an earlier version of this sentence credited
+    NFD with catching NFKD-only decompositions "because NFD is a strict
+    subset of what NFKD decomposes" — true as a general fact, but backwards
+    as a mechanism, since NFD being a *subset* of NFKD means NFD provably
+    does **not** see everything NFKD does; U+00B2 SUPERSCRIPT TWO is
+    NFD-stable and NFKD/NFKC-unstable, the exact shape that sentence's own
+    logic should have ruled out rather than explained.) The same review
+    found lone surrogates (category `Cs`)
     pass every check unchanged — not a tokenization bypass, but ill-formed
     text a strict-UTF-8 downstream consumer cannot serialize, breaking the
     "opaque token" contract a different way. `Cs` joins the category tuple
     for the same reason `Zs` did: the general case a specific instance was
     never asked to cover.
+
+    **Marks are the other mechanism for changing how a *neighbouring*
+    character renders, and `Cf` alone does not cover them.** A round-37
+    security review found that combining marks — categories `Mn`, `Mc`,
+    `Me` — passed every check above unchanged, with or without a base
+    character in front of them: a base-less run of the same combining mark
+    (no character to combine with at all) visually attaches to whatever
+    precedes it in a rendered line — the audit's own `=` delimiter, or an
+    adjacent field's last character — and a full-length run produces the
+    "Zalgo" visual corruption effect. This is the same *family* of concern
+    round 31 closed with `Cf` (bidi overrides, zero-width joiners — "a
+    spoofed or reordered-looking log line could be built from the same
+    way"), for Unicode's other rendering-only mechanism. `Mn`/`Mc`/`Me`
+    join the category tuple for the same reason `Cf` did.
     """
 
     if len(value) > 128:
@@ -1042,10 +1067,18 @@ def _require_an_opaque_value(name: str, value: str) -> None:
                 "a line of text is not one"
             )
     for character in value:
-        if unicodedata.category(character) in ("Cc", "Cf", "Zs", "Cs"):
+        if unicodedata.category(character) in (
+            "Cc",
+            "Cf",
+            "Zs",
+            "Cs",
+            "Mn",
+            "Mc",
+            "Me",
+        ):
             raise TypeError(
-                f"{name} must be an opaque token; a control, format, space "
-                "or surrogate character is not one"
+                f"{name} must be an opaque token; a control, format, space, "
+                "surrogate or combining-mark character is not one"
             )
     for form in ("NFKC", "NFD"):
         if unicodedata.normalize(form, value) != value:

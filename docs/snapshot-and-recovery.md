@@ -196,13 +196,34 @@ to refuse. A brute-force sweep of every codepoint found `≠` to be the only
 one with this exact shape, and found no codepoint that is NFKC-stable but
 NFC-unstable — so checking NFD in addition to NFKC closes the whole
 family without needing all four normal forms: NFC-stability already
-follows from NFKC-stability, and an NFKD-only decomposition is still
-caught because NFD is a strict subset of what NFKD decomposes. The same
+follows from NFKC-stability, and an NFKD-only (compatibility-only)
+decomposition is caught by the **NFKC** check itself, not the NFD one —
+NFKC performs the same compatibility decomposition NFKD does, before
+recomposing, and the brute force found no codepoint where that
+recomposition restores stability while the decomposition it undid was
+dangerous. (A round-37 doctrine review corrected this paragraph: an
+earlier version credited NFD with catching NFKD-only decompositions
+"because NFD is a strict subset of what NFKD decomposes" — true as a
+general fact, but backwards as a mechanism, since NFD being a *subset* of
+NFKD means NFD provably does **not** see everything NFKD does; U+00B2
+SUPERSCRIPT TWO is NFD-stable and NFKD/NFKC-unstable, the exact shape
+that reasoning should have ruled out rather than explained.) The same
 review found lone surrogates (`Cs`) pass every check unchanged — not a
 tokenization bypass, but ill-formed text a strict-UTF-8 downstream
 consumer cannot serialise, breaking the "opaque token" contract a
 different way. `Cs` joined the category tuple for the same reason `Zs`
 did: the general case a specific instance was never asked to cover.
+
+**Marks are the other mechanism for changing how a neighbouring character
+renders.** A round-37 security review found that combining marks
+(`Mn`/`Mc`/`Me`) passed every check unchanged, with or without a base
+character: a base-less run attaches visually to whatever precedes it
+wherever the value is rendered — the audit's own `=` delimiter, or an
+adjacent field — and a full-length run produces "Zalgo" visual corruption.
+The same family of concern round 31 closed with `Cf` for bidi
+overrides and zero-width joiners, for Unicode's other rendering-only
+mechanism. `Mn`/`Mc`/`Me` joined the category tuple for the same reason
+`Cf` did.
 
 ## Preflight (D7)
 

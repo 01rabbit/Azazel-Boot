@@ -9387,6 +9387,22 @@ def test_a_fingerprint_is_an_opaque_token_and_not_a_rendered_record() -> None:
         # joined the category tuple. Written as a Python escape, not a raw
         # surrogate byte, since this source file is itself valid UTF-8.
         "token\ud800",
+        # R37 (security review): combining marks (categories `Mn`/`Mc`/
+        # `Me`) are Unicode's other mechanism for changing how a
+        # *neighbouring* character renders, the same family `Cf` closed
+        # for bidi overrides -- but `Cf` alone did not cover them. A base
+        # character followed by a full run of the same combining mark
+        # (128 chars total, one combining class, so no reordering) passed
+        # every check above unchanged.
+        "x" + "\u0301" * 127,
+        # R37 (security review): the same category, with no base
+        # character at all -- a run of combining marks that attaches to
+        # whatever precedes it wherever it is rendered.
+        "\u0301" * 120,
+        # R37 (security review): a combining mark placed *before* its
+        # base character, isolating the single-character category check
+        # from the length/splitlines checks above.
+        "\u0300A",
     ):
         with pytest.raises(TypeError, match="opaque"):
             descriptor(fingerprint=rejected)
@@ -11376,11 +11392,14 @@ def test_delattr_is_refused_on_every_class_that_defines_it_not_only_the_sealed_o
 
     verdict = PreflightVerdict(None)
     # R36 (test-suite review): only `_refused_by` was driven; `_snapshot`'s
-    # deletion carve-out was undetected. `_evaluated` is excluded here — it
-    # is assigned a genuine value (`()`) only inside `_mint`, and this
-    # verdict was built directly, so `_evaluated` already holds `()` from
-    # `__init__` and deleting it exercises the identical code path as the
-    # other two.
+    # and `_evaluated`'s deletion carve-outs were undetected. `_evaluated`
+    # needs no special construction to include here: `__init__` already
+    # assigns it `()` unconditionally for every instance, hand-built or
+    # `_mint`-produced, and `__delattr__` is unconditional too — it does not
+    # branch on `name` — so all three slots take the identical refusal path
+    # regardless of how each was populated. (R37 doctrine review: an earlier
+    # version of this comment said `_evaluated` "is excluded here", which
+    # contradicted the loop it sits beside — it was never excluded.)
     for name in ("_refused_by", "_snapshot", "_evaluated"):
         with pytest.raises(AttributeError, match="fixed when it is minted"):
             delattr(verdict, name)
