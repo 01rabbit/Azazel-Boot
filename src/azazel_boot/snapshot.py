@@ -2210,9 +2210,12 @@ class RecoveryWorkflow:
         # it"; `False` is an operator who declined.
         #
         # **And it is a `bool`.** Round 8 pinned the snapshot, the
-        # observations, the sitting and `media_binding_holds` inside this
-        # function precisely because `commit` is not the only way in — and
-        # left `confirmed` checked in `commit` alone. A review called this
+        # observations and the sitting inside this function precisely because
+        # `commit` is not the only way in (`media_binding_holds` was already
+        # pinned here, from the commit that gave D8 gate 1 its own name,
+        # before round 7 — R13 doctrine review: this comment misattributed it
+        # to round 8 alongside the other three) — and left `confirmed`
+        # checked in `commit` alone. A review called this
         # method directly with `confirmed="declined"`, which is truthy, took
         # the **full-D8** clearance because `confirmed is not None`, and
         # reached `COMMITTED` with a forged candidate and no
