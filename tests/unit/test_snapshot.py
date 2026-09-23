@@ -9454,6 +9454,19 @@ def test_a_fingerprint_is_an_opaque_token_and_not_a_rendered_record() -> None:
         # case above -- U+1F7F0 HEAVY EQUALS SIGN, also NFKC/NFD-stable
         # and unrelated to "=" by decomposition.
         "capacity\U0001f7f017179869184",
+        # R40 (security review): two more confusables the same mechanism
+        # reaches, outside round 39's search scope -- VERY HEAVY SOLIDUS and
+        # VERY HEAVY REVERSE SOLIDUS, the Ornamental Dingbats block's own
+        # "Heavy" glyphs, the same undecorated family as the HEAVY EQUALS
+        # SIGN case above.
+        "usb-SN-AA11BB22\U0001f67cdev\U0001f67cnvme0n1p3",
+        "host\U0001f67dAdministrator\U0001f67dDesktop",
+        # R40: the same mechanism applied to a different literal -- space,
+        # not slash/backslash/equals. BRAILLE PATTERN BLANK is a Braille
+        # cell with no dots raised, a well-known real-world "invisible
+        # space" character: category `So` (not `Zs`), NFKC/NFD-stable, no
+        # decomposition relationship to " " at all.
+        "capacity⠀17179869184⠀medium⠀usb-SN-AA11BB22",
     ):
         with pytest.raises(TypeError, match="opaque"):
             descriptor(fingerprint=rejected)

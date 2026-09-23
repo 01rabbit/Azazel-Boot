@@ -962,16 +962,33 @@ def _require_an_exact_str(name: str, value: object) -> None:
 #: covering the slash/backslash/equals look-alikes found during that
 #: review, drawn from the Mathematical Operators and Miscellaneous Symbols
 #: and Arrows blocks. It narrows; it does not guarantee.
+#:
+#: **A round-40 security review found the same mechanism reaches two more
+#: literals this set did not yet cover.** The Ornamental Dingbats block
+#: (outside round 39's stated search scope) holds VERY HEAVY SOLIDUS and
+#: VERY HEAVY REVERSE SOLIDUS — the same "Heavy" visual family as the
+#: already-listed HEAVY EQUALS SIGN, and just as bare/undecorated as the
+#: real `/`/`\`. And the confusable mechanism is not limited to the three
+#: literals with their own forbidden-character-tuple entries that happen to
+#: have a slash/backslash/equals shape — BRAILLE PATTERN BLANK (a Braille
+#: cell with no dots raised) is a well-known real-world "invisible space"
+#: trick, category `So` (not `Zs`), NFKC/NFD-stable, no decomposition
+#: relationship to `" "` at all — the identical bypass shape one literal
+#: over. Both closed the same way: one more named entry each, not a new
+#: mechanism.
 _CONFUSABLE_DELIMITERS = frozenset(
     {
         "∕",  # DIVISION SLASH — confusable with "/"
         "⁄",  # FRACTION SLASH — confusable with "/"
         "⧸",  # BIG SOLIDUS — confusable with "/"
         "⟋",  # MATHEMATICAL RISING DIAGONAL — confusable with "/"
+        "\U0001f67c",  # VERY HEAVY SOLIDUS — confusable with "/"
         "∖",  # SET MINUS — confusable with "\"
         "⧵",  # REVERSE SOLIDUS OPERATOR — confusable with "\"
         "⟍",  # MATHEMATICAL FALLING DIAGONAL — confusable with "\"
+        "\U0001f67d",  # VERY HEAVY REVERSE SOLIDUS — confusable with "\"
         "\U0001f7f0",  # HEAVY EQUALS SIGN — confusable with "="
+        "⠀",  # BRAILLE PATTERN BLANK — confusable with " "
     }
 )
 
@@ -1116,6 +1133,16 @@ def _require_an_opaque_value(name: str, value: str) -> None:
     ordinary-content categories, unlike `Cf`/`Mn`/`Sk` — so this is a
     named, bounded denylist rather than a category exclusion; see
     `_CONFUSABLE_DELIMITERS`'s own comment for why.
+
+    **A round-40 security review confirmed that "named, bounded" is exactly
+    as incomplete as it sounds, and found two more instances the same
+    mechanism reaches** — two more slash/backslash look-alikes outside
+    round 39's search scope, and a well-known "invisible space" character
+    (BRAILLE PATTERN BLANK) confusable with the space literal, not only the
+    three literals round 39's own search happened to focus on. Both closed
+    the same way: named entries added to `_CONFUSABLE_DELIMITERS`, not a
+    new mechanism. See that set's own comment for the specific codepoints
+    and reasoning.
     """
 
     if len(value) > 128:

@@ -253,6 +253,18 @@ a named, bounded denylist (`_CONFUSABLE_DELIMITERS`) instead, the same
 "narrows, does not guarantee" trade-off `KNOWN_CONTAINER_VERSIONS` already
 makes.
 
+**"Named, bounded" is exactly as incomplete as it sounds.** A round-40
+security review found two more instances the same mechanism reaches: VERY
+HEAVY SOLIDUS and VERY HEAVY REVERSE SOLIDUS (the Ornamental Dingbats
+block's own "Heavy" glyphs, outside round 39's search scope, the same
+undecorated family as the already-listed HEAVY EQUALS SIGN), and BRAILLE
+PATTERN BLANK — a Braille cell with no dots raised, a well-known
+real-world "invisible space" character, confusable with the space literal
+rather than slash/backslash/equals, `So` rather than `Zs`, and just as
+NFKC/NFD-stable and decomposition-unrelated as every other confusable in
+this set. Both closed the same way: named entries added to
+`_CONFUSABLE_DELIMITERS`, not a new mechanism.
+
 ## Preflight (D7)
 
 Read-only **by construction**: it takes reports and returns a verdict. It has
