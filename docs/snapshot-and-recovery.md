@@ -377,7 +377,13 @@ four that precede them:
    **requires** one: `None` used to skip the gate entirely and leave an audit
    byte-identical to a legitimate commit, so nothing downstream could tell a
    recovery that unlocked the volume from one where nobody was ever prompted
-7. **integrity verification** (`INTEGRITY_VERIFICATION`)
+7. **integrity verification** (`INTEGRITY_VERIFICATION`) — one gate for two
+   facts: an unverified snapshot and an unrecognised container version both
+   refuse under this same name, where D7's preflight keeps them as two
+   separate `PreflightCheck` members. D8 has eight gates, not ten, and does
+   not split this one further; an operator told `INTEGRITY_VERIFICATION`
+   at recovery time cannot tell which of the two it was without the
+   preflight's own, earlier classification.
 8. **operator confirmation** (`OPERATOR_CONFIRMATION`) — `confirmed` grants
    nothing by itself, which the first test in the file drives: the volume is
    still quarantined afterwards, and it is type-checked inside the gates
@@ -484,7 +490,7 @@ which at module level *is* the module dict, into which CPython puts
 
 Four things follow, and only the last two are claims. The name rule is no longer a
 denylist: **every free name the module reads is listed, and the assertion is
-equality**, so a builtin that is not one of the seventeen is unreachable by any
+equality**, so a builtin that is not one of the nineteen is unreachable by any
 spelling. And the question is asked of the runtime instead — the workflow is
 driven end to end under `sys.addaudithook`, which cannot be removed once
 installed, and the assertion is that **no audited operation happens at all**,
@@ -549,8 +555,14 @@ cheaper than everything built on top of it and let a plain assignment write a
 stage, a candidate, a quarantine and a sitting onto a workflow, reaching
 `COMMITTED` with a forged candidate and an empty audit.
 
-**`_JUDGED_BY` and `_SNAPSHOTS_RECORDED` hold a live `Quarantine` for the life
-of the process**, and each is a two-round history of the same lesson landing
+**`_JUDGED_BY` and `_SNAPSHOTS_RECORDED` can be found holding a live
+`Quarantine`, for as long as one is alive elsewhere in the process** — not
+for the life of the process itself: both are weak, so a medium nobody else
+holds any more is not kept alive by having been judged (R14 doctrine
+review: an earlier wording of this sentence said "for the life of the
+process", which is the opposite of what `_SNAPSHOTS_RECORDED`'s own module
+comment states and what round 10 built the weak indexing to guarantee —
+corrected). Each is a two-round history of the same lesson landing
 somewhere new. They were `WeakKeyDictionary` instances keyed by the medium; a
 round-ten review called the entirely ordinary `.keys()` and got back every
 medium any preflight had judged, live, through the exact container chosen to

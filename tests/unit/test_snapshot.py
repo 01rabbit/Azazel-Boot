@@ -1495,10 +1495,12 @@ def test_this_module_cannot_reach_a_host_a_network_a_vm_or_a_second_partition() 
 
     So the first rule below is not a denylist. Every free name — every name
     this module reads without binding it — is listed, and the assertion is
-    **equality**. A builtin that is not one of these seventeen is not reachable
+    **equality**. A builtin that is not one of these nineteen is not reachable
     by any spelling, because reaching it needs a name, and the name is absent.
-    The count moves as the module grows — it was fourteen, then fifteen — and
-    what holds is the equality, not the number.
+    The count moves as the module grows — it was fourteen, then fifteen,
+    then seventeen (R14 doctrine review: this sentence stopped being
+    updated at seventeen while the set itself kept growing; it is nineteen
+    now) — and what holds is the equality, not the number.
     `locals`, `breakpoint`, `globals`, `vars`, `open`, `__import__`, `eval` and
     whatever the next round finds are all refused by the same line, which is
     the difference between a list of what is forbidden and a list of what is
@@ -2893,11 +2895,23 @@ def test_a_bindings_own_fields_are_pinned_not_only_its_container_type(observatio
             return 0
 
     real_fingerprint = host_fingerprint(observations)
-    for forged in (
-        SessionBinding(host_fingerprint=AlwaysEqual("not the real host"), session_id=SESSION),
-        SessionBinding(host_fingerprint=real_fingerprint, session_id=AlwaysEqual(SESSION)),
+    for forged, expected_pattern in (
+        (
+            SessionBinding(host_fingerprint=AlwaysEqual("not the real host"), session_id=SESSION),
+            r"binding\.host_fingerprint",
+        ),
+        (
+            SessionBinding(host_fingerprint=real_fingerprint, session_id=AlwaysEqual(SESSION)),
+            r"binding\.session_id",
+        ),
     ):
-        with pytest.raises(TypeError, match="binding\\."):
+        # R14 (test-suite review): `match="binding\\."` alone does not say
+        # *which* field's check fired — a label-swap bug (the two
+        # `_require_an_exact_str` calls' name strings exchanged, values
+        # left correct) survived undetected, since both messages still
+        # contained "binding.". Matching the exact expected field name
+        # closes that.
+        with pytest.raises(TypeError, match=expected_pattern):
             RecoveryWorkflow(a_quarantine(), forged, session_id=SESSION)
 
 
@@ -6162,6 +6176,45 @@ def test_a_refusal_names_the_check_the_run_actually_stopped_at() -> None:
     assert ledger.audit() == ()
 
 
+def test_a_preflight_refusal_is_a_bool_and_an_audit_entry_not_a_raised_refusal() -> None:
+    """R14 (test-suite/doctrine review): `Refusal.MIGRATION_REFUSED_BY_
+    PREFLIGHT` was removed — no code path in this module ever raised it.
+
+    `may_migrate` communicates a preflight's own refusal as `False` plus a
+    `SnapshotAuditEvent.MIGRATION_REFUSED` entry, never as a raised
+    `RecoveryRefused`; raising is reserved for structural/adversarial
+    misuse (a forged verdict, a rebound enum, a moved medium). A `Refusal`
+    member matching no raise anywhere is a classification claim resting on
+    nothing — this asserts the absence directly, so a member re-added
+    without a corresponding raise turns this red rather than leaving
+    nothing to notice.
+    """
+
+    assert not hasattr(Refusal, "MIGRATION_REFUSED_BY_PREFLIGHT")
+
+    judged_medium, snapshot, _ = a_migration(
+        snapshot=descriptor(integrity=SnapshotIntegrity.FAILED)
+    )
+    refused_by_preflight = preflight(
+        judged_medium,
+        snapshot=snapshot,
+        capacity=capacity(),
+        current_schema=1,
+        target_schema=2,
+        binding_holds=True,
+        generation_holds=True,
+        image_digest_holds=True,
+    )
+    ledger = MigrationLedger()
+    assert ledger.may_migrate(refused_by_preflight, quarantine=judged_medium) is False
+    assert ledger.audit() == (
+        SnapshotAuditEntry(
+            event=SnapshotAuditEvent.MIGRATION_REFUSED,
+            check=PreflightCheck.SNAPSHOT_INTEGRITY,
+        ),
+    )
+
+
 def test_a_forged_refusal_reason_alone_is_still_caught_with_evaluated_honest() -> None:
     """R12 (test-suite review): the refusal half's own identity check —
     `stopped_at is not verdict.refused_by`, alongside `not in_order` — was
@@ -6326,6 +6379,104 @@ def test_the_gates_cannot_be_reached_without_all_of_them(observations) -> None:
         )
     assert refused.value.refusal is Refusal.GATE_REFUSED
     assert flow.audit()[-1].gate is RecoveryGate.OPERATOR_CONFIRMATION
+
+
+def test_a_candidate_cannot_be_minted_without_a_pin_via_the_bound_methods_directly(
+    observations,
+) -> None:
+    """R14 (test-suite review): reaching `_require_the_gates`/`_sealed_assign`
+    directly — the reach `commit` itself has, and the one this module has
+    never claimed a capability boundary against, only "the accidental
+    reach" — could write a `_candidate` and reach `COMMITTED` **without
+    `start` ever having been called**, `_pinned` still `None`.
+
+    `commit`'s own mint reads `self._pinned.schema_version`, so this state
+    was never reachable through the public surface; nothing stopped it
+    through the bound methods a caller driving the state machine directly
+    already reaches for other reasons (`test_the_gates_cannot_be_reached_
+    without_all_of_them`, above, is exactly that reach). The result: a
+    workflow `COMMITTED`, `holds()` true, `candidate_applies_to` true, and
+    `flow.audit() == ()` — no `RECOVERY_COMPLETED` entry, because only
+    `commit` writes one, and this path skips `commit` too.
+    """
+
+    flow = workflow(observations)
+    snap = descriptor()
+
+    flow._require_the_gates(
+        snap,
+        observations,
+        session_id=SESSION,
+        media_binding_holds=True,
+        acquisition=None,
+        confirmed=None,
+    )
+    flow._sealed_assign("_stage", RecoveryStage.PREFLIGHT_PASSED)
+    flow._require_the_gates(
+        snap,
+        observations,
+        session_id=SESSION,
+        media_binding_holds=True,
+        acquisition=None,
+        confirmed=None,
+    )
+    flow._sealed_assign("_stage", RecoveryStage.TRIAL_OPEN)
+    flow._require_the_gates(
+        snap,
+        observations,
+        session_id=SESSION,
+        media_binding_holds=True,
+        acquisition=Opens(),
+        confirmed=True,
+    )
+
+    assert flow._pinned is None
+    forged = RecoveryCandidate(999, "not-derived-from-any-pin")
+    with pytest.raises(AttributeError, match="there is no pin to mint one from"):
+        flow._sealed_assign("_candidate", forged)
+    assert flow.stage is RecoveryStage.TRIAL_OPEN
+    assert flow.holds(forged) is False
+
+
+def test_a_candidate_names_the_pins_schema_version_not_a_separate_one(observations) -> None:
+    """R14 (test-suite review): the other half — `_pinned` is set, by a real
+    `start`/`open_trial`, but nothing checked that a candidate written
+    through `_sealed_assign` directly agrees with it.
+
+    A candidate naming schema 999 minted over a pin that judged schema 1 is
+    exactly the "which schema version a restore would reach" claim
+    `RecoveryCandidate`'s own docstring makes, made false — reachable
+    without `object.__setattr__` anywhere, through the same bound-method
+    surface `commit` itself uses to mint the real one.
+    """
+
+    snap = descriptor()
+    flow = workflow(observations)
+    flow.start(
+        snap, observations, media_binding_holds=True, session_id=SESSION, started_by_operator=True
+    )
+    flow.open_trial(snap, observations, media_binding_holds=True, session_id=SESSION)
+    flow._require_the_gates(
+        snap,
+        observations,
+        session_id=SESSION,
+        media_binding_holds=True,
+        acquisition=Opens(),
+        confirmed=True,
+    )
+
+    assert flow._pinned.schema_version == 1
+    mismatched = RecoveryCandidate(999, "totally-unrelated-fingerprint")
+    with pytest.raises(AttributeError, match="names the schema version the pin was judged at"):
+        flow._sealed_assign("_candidate", mismatched)
+    assert flow.stage is RecoveryStage.TRIAL_OPEN
+    assert flow.holds(mismatched) is False
+
+    # And the pin's own schema version is still accepted — the check is
+    # about agreement, not about refusing every direct write.
+    matching = RecoveryCandidate(1, "any-fingerprint-the-pin-does-not-constrain")
+    flow._sealed_assign("_candidate", matching)
+    assert flow._candidate is matching
 
 
 def test_one_write_is_one_record_even_after_the_snapshot_is_dropped() -> None:

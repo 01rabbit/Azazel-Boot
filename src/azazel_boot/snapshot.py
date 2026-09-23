@@ -1352,9 +1352,21 @@ class RecoveryGate(Enum):
 
 
 class Refusal(Enum):
-    """Why an act did not happen. Each names a **rule**, never a value."""
+    """Why an act did not happen. Each names a **rule**, never a value.
 
-    MIGRATION_REFUSED_BY_PREFLIGHT = "migration_refused_by_preflight"
+    (R14 doctrine/test-suite review: `MIGRATION_REFUSED_BY_PREFLIGHT` was
+    removed here. `may_migrate` communicates a preflight's own refusal as a
+    `bool` and a `SnapshotAuditEvent.MIGRATION_REFUSED` entry, not as a
+    raised `RecoveryRefused` — that is a deliberate, documented choice
+    (`may_migrate`'s own docstring: "Say whether a migration may run, and
+    record a refusal"), not an omission. The member named a `Refusal` no
+    code path ever raised, matched by no test, a classification claim
+    resting on nothing — the same "absent vocabulary over guarded
+    vocabulary" reasoning this module applies to its module-level indexes
+    applies here: a member this class cannot produce is a member it should
+    not hold.)
+    """
+
     RECOVERY_NOT_STARTED_BY_AN_OPERATOR = "recovery_not_started_by_an_operator"
     STAGE_SKIPPED = "stage_skipped"
     WORKFLOW_ALREADY_FINISHED = "workflow_already_finished"
@@ -2120,7 +2132,14 @@ class RecoveryWorkflow:
         acquisition: KeyAcquisition | None,
         confirmed: bool | None,
     ) -> None:
-        """D8's gates, in D8's order, with the three that precede them.
+        """D8's gates, in D8's order, with the four that precede them.
+
+        (R14 doctrine review: this said "the three that precede them" —
+        stale since the same commit that split what was one combined gate
+        into `MEDIUM_NOT_RECOGNISED` and `HOST_BINDING` made it four,
+        matching `RecoveryGate`'s own class docstring, corrected for the
+        same miscount at round twelve; this sibling occurrence was missed
+        then.)
 
         `acquisition` and `confirmed` are **required**, and `None` means "this
         stage has none" rather than "skip the gate". They had defaults, and a
@@ -2427,6 +2446,40 @@ class RecoveryWorkflow:
             raise AttributeError(
                 "a candidate is minted by a commit and by nothing else"
             )
+        # **A candidate is answerable to the pin, not just to the clearance
+        # and the stage.** The three checks above establish *when* a
+        # candidate may be written; none of them establish *what* it may
+        # say. A round-fourteen review reached `_require_the_gates` and
+        # `_sealed_assign` directly — the same bound-method reach `commit`
+        # itself has, and the reach this module has never claimed a
+        # capability boundary against, only "the accidental reach" — and
+        # used it to write a `RecoveryCandidate` naming a schema version
+        # `_pinned` never judged, in one case with `_pinned` never even set
+        # (`start` skipped entirely): a workflow reached `COMMITTED`,
+        # `holds()` true, `candidate_applies_to` true, over a candidate
+        # `commit`'s own honest mint — reading `_pinned`, never the argument
+        # — would never have produced. Checked here, on the one write this
+        # class actually performs, rather than trusted to `commit`'s own
+        # good behaviour: a candidate's `schema_version` must be the pin's.
+        #
+        # Not the fingerprint: `RecoveryCandidate._fingerprint` is set once,
+        # in `__init__`, and read by nothing anywhere in this module or
+        # this package — not even here. Comparing it would be this class's
+        # first read of a field the whole design keeps deliberately
+        # write-only, and nothing downstream of a candidate ever asks for
+        # it back to decide anything; `schema_version` is the field a
+        # caller can act on, and it is the field pinned.
+        if name == "_candidate":
+            if self._pinned is None:
+                raise AttributeError(
+                    "a candidate is minted from the snapshot a workflow "
+                    "pinned at start; there is no pin to mint one from"
+                )
+            if value.schema_version != self._pinned.schema_version:
+                raise AttributeError(
+                    "a candidate names the schema version the pin was "
+                    "judged at, not one supplied separately"
+                )
         object.__setattr__(self, name, value)
 
 
