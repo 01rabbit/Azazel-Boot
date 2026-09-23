@@ -1513,6 +1513,52 @@ def test_the_audit_vocabulary_is_exactly_nine_classifications() -> None:
     }
 
 
+def test_the_refusal_vocabulary_is_exactly_these_ten_reasons() -> None:
+    """R35 (test-suite review): `PreflightCheck`/`RecoveryGate`/
+    `SnapshotAuditEvent` each have a completeness test of this shape
+    (`set(PREFLIGHT_ORDER) == set(PreflightCheck)`, `reached ==
+    set(RecoveryGate)`, and the test just above, respectively) — `Refusal`
+    never got one. Every current member is referenced by name elsewhere in
+    this file, so a rename or removal is caught immediately, but a member
+    silently added and never wired into any refusal path was not: adding
+    `MUTATION_CANARY_REFUSAL = "mutation_canary_refusal"` to the enum passed
+    the whole suite.
+    """
+
+    assert {refusal.value for refusal in Refusal} == {
+        "recovery_not_started_by_an_operator",
+        "stage_skipped",
+        "workflow_already_finished",
+        "gate_refused",
+        "snapshot_changed_under_the_workflow",
+        "not_this_sitting",
+        "verdict_not_minted_by_a_preflight",
+        "verdict_already_spent",
+        "medium_moved_since_the_preflight",
+        "verdict_did_not_ask_every_check",
+    }
+
+
+def test_the_recovery_stage_vocabulary_is_exactly_these_six_stages() -> None:
+    """R35 (test-suite review): the sibling gap for `RecoveryStage`.
+    `_STAGE_EDGES`, `TERMINAL_STAGES` and `_REACHED_WITHOUT_GATES` are all
+    hand-written against this enum's members but never checked against the
+    enum itself, so a stage added but never wired into any of them would sit
+    inert and untested rather than flagged. Adding
+    `MUTATION_CANARY_STAGE = "mutation_canary_stage"` to the enum passed the
+    whole suite before this test existed.
+    """
+
+    assert {stage.value for stage in RecoveryStage} == {
+        "not_started",
+        "preflight_passed",
+        "trial_open",
+        "committed",
+        "refused",
+        "interrupted",
+    }
+
+
 def test_a_refused_migration_records_the_check_and_no_figure() -> None:
     """The capacity numbers describe the operator's medium. They stay there."""
 
@@ -4160,6 +4206,15 @@ def test_the_seal_writes_only_the_three_fields_a_recovery_moves(observations) ->
         ("_session_id", "another-sitting"),
         ("_sealed", False),
         ("_audit", []),
+        # R35 (test-suite review): `_lock` is the seventh field that must not
+        # move, and was the one `__slots__` name never driven here or pinned
+        # statically like `_cleared` is below. It is the `RLock` rounds
+        # 17-20 spend several docstrings establishing as this class's actual
+        # concurrency guarantee — a caller able to replace it mid-flight
+        # would defeat every one of those guarantees silently. A mutation
+        # widening `_MOVES_DURING_A_RECOVERY` to include `"_lock"` passed
+        # the whole suite before this case was added.
+        ("_lock", threading.RLock()),
     ):
         with pytest.raises(AttributeError, match="cannot be replaced"):
             flow._sealed_assign(name, value)
@@ -8953,6 +9008,14 @@ def test_a_capacity_reports_zero_boundary_is_driven_on_both_sides() -> None:
 
     with pytest.raises(TypeError, match="required must be a non-negative integer"):
         CapacityReport(required=-1, available=1000)
+
+    # R35 (test-suite review): the identical asymmetry a third time — this
+    # file's own comment above already names the pattern from R8 (bool) and
+    # this same test's `required` case, and `available`'s negative boundary
+    # had it too. A mutant loosening `available`'s own check from `>= 0` to
+    # `>= -1` passed the whole suite before this case existed.
+    with pytest.raises(TypeError, match="available must be a non-negative integer"):
+        CapacityReport(required=1000, available=-1)
 
     assert CapacityReport(required=0, available=0).has_room_for_the_snapshot() is True
     assert CapacityReport(required=0, available=1000).has_room_for_the_snapshot() is True
