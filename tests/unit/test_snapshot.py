@@ -7056,6 +7056,17 @@ def test_a_candidate_names_the_pins_schema_version_not_a_separate_one(observatio
     assert flow.stage is RecoveryStage.TRIAL_OPEN
     assert flow.holds(mismatched) is False
 
+    # R21 (security review): every case above is wildly off from the pin
+    # (999 against 1). A range/tolerance check standing in for the exact
+    # `!=` this line uses — accepting, say, `pinned ± 1` — would pass every
+    # existing case here undetected. Isolated the same way R11 isolated
+    # each forbidden character elsewhere in this file: the pin's immediate
+    # neighbour, refused on its own.
+    off_by_one = RecoveryCandidate(2, "one-more-than-the-pin")
+    with pytest.raises(AttributeError, match="names the schema version the pin was judged at"):
+        flow._sealed_assign("_candidate", off_by_one)
+    assert flow.holds(off_by_one) is False
+
     # And the pin's own schema version is still accepted — the check is
     # about agreement, not about refusing every direct write.
     matching = RecoveryCandidate(1, "any-fingerprint-the-pin-does-not-constrain")
@@ -8826,6 +8837,114 @@ def test_a_real_second_thread_interrupting_between_the_two_final_writes_stays_in
     assert flow.holds(commit_outcome["candidate"])
     assert interrupt_outcome["kind"] == "refused"
     assert interrupt_outcome["refusal"] is Refusal.WORKFLOW_ALREADY_FINISHED
+
+
+class _CountingRLock:
+    """Wraps a real `RLock`, counting every time its recursion depth drops
+    back to zero — a genuine full release, not a nested one. Used to prove
+    a *span* of code never lets go of the lock, which a race between two
+    threads landing (or not landing) in a gap cannot prove on its own: a
+    probabilistic race test can show a gap is exploitable when one exists,
+    but "the lock was never fully released across this stretch" is a
+    structural claim about the code's shape, checked more directly by
+    asking the lock itself.
+    """
+
+    def __init__(self) -> None:
+        self._real = threading.RLock()
+        self._own = threading.Lock()
+        self._depth = 0
+        self.full_release_count = 0
+
+    def acquire(self, *args, **kwargs):
+        acquired = self._real.acquire(*args, **kwargs)
+        if acquired:
+            with self._own:
+                self._depth += 1
+        return acquired
+
+    def release(self) -> None:
+        self._real.release()
+        with self._own:
+            self._depth -= 1
+            if self._depth == 0:
+                self.full_release_count += 1
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self.release()
+
+
+def test_commits_candidate_and_stage_writes_share_one_uninterrupted_lock_hold(
+    observations,
+) -> None:
+    """R21 (test-suite review): a coverage gap in the double-commit tests
+    themselves.
+
+    `test_two_real_threads_committing_the_same_workflow_produce_one_
+    candidate` proves two *concurrent* `commit()` calls cannot both
+    succeed — but its checkpoints pause a thread from *inside* the
+    patched `_sealed_assign` call, which means the paused thread still
+    holds `self._lock` throughout the pause: the same protection the
+    lock already gives, exercised again, never landing in a gap that
+    would only exist if `commit()`'s second locked section — mint
+    through the final `RECOVERY_COMPLETED` record, the one round 20's own
+    comment calls "unbroken" — were ever split into two separate acquire/
+    release cycles by a future change. A round-21 review built exactly
+    that mutant (release the lock right after the `"_candidate"` write,
+    reacquire right before the `"_stage"` write) and measured **0/200**
+    detection from the existing race tests, plus a clean full-suite pass
+    — a real, if narrow, regression this file had no test for.
+
+    This asks the question directly instead of racing for it: replace
+    `flow._lock` with a wrapper that counts genuine full releases (depth
+    dropping to zero, not a nested `RLock` reentry), record that count
+    immediately after the `"_candidate"` write and again immediately
+    after the `"_stage"` write, and assert they are equal — proving no
+    full release happened anywhere in between, structurally, on every run,
+    with no dependence on thread scheduling at all.
+    """
+
+    flow = workflow(observations)
+    snap = descriptor()
+    flow.start(
+        snap, observations, media_binding_holds=True, session_id=SESSION, started_by_operator=True
+    )
+    flow.open_trial(snap, observations, media_binding_holds=True, session_id=SESSION)
+
+    counting_lock = _CountingRLock()
+    object.__setattr__(flow, "_lock", counting_lock)
+
+    release_count_at: dict[str, int] = {}
+    original_sealed_assign = RecoveryWorkflow._sealed_assign
+
+    def recording_sealed_assign(self: RecoveryWorkflow, name: str, value: object) -> None:
+        original_sealed_assign(self, name, value)
+        if name in ("_candidate", "_stage"):
+            release_count_at[name] = counting_lock.full_release_count
+
+    RecoveryWorkflow._sealed_assign = recording_sealed_assign
+    try:
+        candidate = flow.commit(
+            snap,
+            observations,
+            media_binding_holds=True,
+            session_id=SESSION,
+            acquisition=Opens(),
+            confirmed=True,
+        )
+    finally:
+        RecoveryWorkflow._sealed_assign = original_sealed_assign
+
+    assert flow.holds(candidate)
+    assert "_candidate" in release_count_at
+    assert "_stage" in release_count_at
+    # The actual claim: not one full release of `self._lock` happened
+    # between minting the candidate and moving the stage to `COMMITTED`.
+    assert release_count_at["_candidate"] == release_count_at["_stage"]
 
 
 def test_two_real_threads_committing_the_same_workflow_produce_one_candidate(
