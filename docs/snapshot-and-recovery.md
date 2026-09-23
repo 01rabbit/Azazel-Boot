@@ -121,9 +121,9 @@ is not a check — `azazel_boot.dirty_write` paid for that lesson when a review
 built its observation out of three strings naming the worst faults there are
 and got a clean write.
 
-`SnapshotDescriptor` and `SnapshotAuditEntry` are not dataclasses — a fourth
-field each, a hand-written `__init__` doing what `__post_init__` did, and an
-explicit `__eq__`/`__hash__`, for the reason `CapacityReport` gives for
+`SnapshotDescriptor` (four fields) and `SnapshotAuditEntry` (five fields) are
+not dataclasses — a hand-written `__init__` doing what `__post_init__` did,
+and an explicit `__eq__`/`__hash__`, for the reason `CapacityReport` gives for
 itself: `dataclasses.asdict()` walks `dataclasses.fields()` directly and
 bypasses `__getstate__`/`__reduce__` entirely, handing a redacted fingerprint
 back in plain sight. Both `__eq__` methods type-check **both** operands before
