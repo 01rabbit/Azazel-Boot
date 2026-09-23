@@ -2620,6 +2620,78 @@ def test_a_workflow_refuses_a_stage_asked_for_another_sitting(observations) -> N
     assert [entry.event for entry in flow.audit()] == [SnapshotAuditEvent.RECOVERY_FOREIGN_SITTING]
 
 
+def test_the_no_payload_events_carry_no_payload_field_either(observations) -> None:
+    """R16 (test-suite review): four `_record` call sites deliberately pass
+    neither `schema_version` nor `fingerprint` — nothing asserted they stay
+    that way.
+
+    `RECOVERY_REFUSED` (via `_refuse_gate`), `RECOVERY_TRIAL_OPENED`,
+    `RECOVERY_INTERRUPTED` and `RECOVERY_FOREIGN_SITTING` are the module's
+    four "classification, and nothing behind it" events. A mutation adding
+    `schema_version=self._pinned.schema_version,
+    fingerprint=self._pinned.fingerprint` to any one of the four calls
+    survived the entire suite undetected — for `RECOVERY_FOREIGN_SITTING`
+    the sharper version leaks `self._session_id`, the raw sitting
+    identifier, not even the caller's own opaque fingerprint. A fifth
+    "no-payload" event, `RECOVERY_SNAPSHOT_SUBSTITUTED`, already has this
+    coverage via the generic `schema_version==99` sweep elsewhere in this
+    file; these four did not.
+    """
+
+    # RECOVERY_FOREIGN_SITTING
+    foreign = workflow(observations)
+    with pytest.raises(RecoveryRefused):
+        foreign.start(
+            descriptor(),
+            observations,
+            media_binding_holds=True,
+            session_id="another-sitting",
+            started_by_operator=True,
+        )
+    entry = foreign.audit()[-1]
+    assert entry.event is SnapshotAuditEvent.RECOVERY_FOREIGN_SITTING
+    assert entry.schema_version is None
+    assert entry.fingerprint is None
+
+    # RECOVERY_REFUSED, via any gate failure
+    refused_flow = workflow(observations)
+    with pytest.raises(RecoveryRefused):
+        refused_flow.start(
+            descriptor(),
+            observations,
+            media_binding_holds=False,
+            session_id=SESSION,
+            started_by_operator=True,
+        )
+    entry = refused_flow.audit()[-1]
+    assert entry.event is SnapshotAuditEvent.RECOVERY_REFUSED
+    assert entry.schema_version is None
+    assert entry.fingerprint is None
+
+    # RECOVERY_TRIAL_OPENED
+    snap = descriptor()
+    trial_flow = workflow(observations)
+    trial_flow.start(
+        snap, observations, media_binding_holds=True, session_id=SESSION, started_by_operator=True
+    )
+    trial_flow.open_trial(snap, observations, media_binding_holds=True, session_id=SESSION)
+    entry = trial_flow.audit()[-1]
+    assert entry.event is SnapshotAuditEvent.RECOVERY_TRIAL_OPENED
+    assert entry.schema_version is None
+    assert entry.fingerprint is None
+
+    # RECOVERY_INTERRUPTED
+    interrupted_flow = workflow(observations)
+    interrupted_flow.start(
+        snap, observations, media_binding_holds=True, session_id=SESSION, started_by_operator=True
+    )
+    interrupted_flow.interrupt(session_id=SESSION)
+    entry = interrupted_flow.audit()[-1]
+    assert entry.event is SnapshotAuditEvent.RECOVERY_INTERRUPTED
+    assert entry.schema_version is None
+    assert entry.fingerprint is None
+
+
 def test_the_audit_repr_does_not_render_the_fingerprint(observations) -> None:
     """M9: the descriptor redacted it and the audit entry rendered it.
 
@@ -6870,6 +6942,50 @@ def test_a_rebound_order_does_not_make_a_short_verdict_complete(observations) ->
         )
         assert verdict.may_migrate is True  # it really was minted, and it really passes
         assert len(verdict.evaluated) == 1
+        with pytest.raises(RecoveryRefused) as refused:
+            MigrationLedger().may_migrate(verdict, quarantine=healthy)
+        assert refused.value.refusal is Refusal.VERDICT_DID_NOT_ASK_EVERY_CHECK
+    finally:
+        object.__setattr__(module, "PREFLIGHT_ORDER", original)
+
+
+def test_a_verdict_that_skipped_exactly_one_check_is_refused(observations) -> None:
+    """R16 (test-suite review): the completeness comparison's own boundary
+    (`len(asked) == len(canonical)`) was only ever driven at length 1 or at
+    the full length 10 — never at 9 of 10, the one length an off-by-one
+    slip (`>=` for `==`, or `len(canonical) - 1`) would let through
+    silently.
+
+    `PREFLIGHT_ORDER` is rebound to the real first nine checks, in the real
+    order — `PREFLIGHT_ORDER[:-1]`, dropping only `IMAGE_DIGEST` — so the
+    verdict this mints is genuinely, legitimately passing every check it
+    was asked; `evaluated` is a real nine-element prefix of the canonical
+    ten, honestly in order. Only its length is short. A mutant loosening
+    the length comparison by exactly one accepts this; the real check
+    refuses it.
+    """
+
+    from azazel_boot import snapshot as module
+
+    healthy = a_quarantine(quarantined=False)
+    original = module.PREFLIGHT_ORDER
+    try:
+        object.__setattr__(module, "PREFLIGHT_ORDER", original[:-1])
+        assert len(module.PREFLIGHT_ORDER) == 9
+        verdict = preflight(
+            healthy,
+            snapshot=descriptor(),
+            capacity=capacity(),
+            current_schema=1,
+            target_schema=2,
+            binding_holds=True,
+            generation_holds=True,
+            image_digest_holds=True,
+        )
+        assert verdict.may_migrate is True
+        assert len(verdict.evaluated) == 9
+        assert verdict.evaluated == original[:-1]
+
         with pytest.raises(RecoveryRefused) as refused:
             MigrationLedger().may_migrate(verdict, quarantine=healthy)
         assert refused.value.refusal is Refusal.VERDICT_DID_NOT_ASK_EVERY_CHECK
