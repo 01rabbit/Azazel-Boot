@@ -659,9 +659,10 @@ From `TRIAL_OPEN`, `_STAGE_EDGES` only reaches a terminal stage, so by the
 time that re-check ran, the workflow was either still `TRIAL_OPEN` or
 already terminal — and every statement between it and the candidate write
 already has an identical backstop: `_require_an_unfenced_medium()` refuses
-through `_refuse_gate`, which carries the same terminal-stage guard
-(originally built, per its own docstring, for exactly the rows this
-re-check did *not* cover), and the candidate write itself goes through
+through `_refuse_gate`, which at the time carried its own terminal-stage
+guard (originally built, per its own docstring, for exactly the rows this
+re-check did *not* cover — round 40 later found that guard itself
+redundant too, see below), and the candidate write itself goes through
 `_sealed_assign`'s own guard. A mutation deleting the re-check passed the
 whole suite. A test built specifically to distinguish it — racing a fence
 and an interruption together, to reach `_refuse_gate` with a different
@@ -669,6 +670,48 @@ classification available — still answered `WORKFLOW_ALREADY_FINISHED`,
 confirming the redundancy is total rather than a common-case coincidence.
 Removed, the same way round eighteen removed its sibling one write later:
 a guard that cannot fail is not a guard.
+
+**The same shape recurred one call-frame deeper, and a round-40 review
+found two more instances.** `_refuse_gate`'s own `if self._stage in
+TERMINAL_STAGES:` guard — the very one the paragraph above leaned on as
+`commit()`'s backstop — turned out to be exactly as redundant with
+`_sealed_assign`'s guard as the re-check round 39 removed. `_refuse_gate`
+calls `self._sealed_assign("_stage", RecoveryStage.REFUSED)`
+unconditionally, with no statement between here and there, under the same
+reentrant `self._lock` — one uninterrupted critical section, not two
+separate reads a race could land between. Verified across all roughly
+fifteen call sites into `_refuse_gate` (direct and via
+`_require_an_unfenced_medium`), and confirmed by a new test that races an
+interruption against `OPERATOR_CONFIRMATION` specifically — a gate
+`_require_the_gates` refuses from inside itself, not through
+`_require_an_unfenced_medium` — rather than only the `MEDIUM_FENCED` gate
+round 39's own race test happened to exercise; both land on
+`WORKFLOW_ALREADY_FINISHED` either way. Removed, with the same doctrine
+comment discipline as round 39's removal: a guard that cannot fail is not
+a guard, one call-frame later.
+
+`interrupt()`'s own top-of-function `if self._stage in TERMINAL_STAGES:`
+check was the third instance, and redundant for a different, more subtle
+reason than the other two: not a shared critical section, but
+`_require_this_sitting`'s write-then-raise shape. A same-sitting caller on
+an already-terminal workflow falls through `_require_this_sitting`
+untouched and meets `_sealed_assign`'s own terminal guard on the write
+below instead. A foreign-sitting caller meets the identical guard one
+statement earlier still, inside `_require_this_sitting` itself, before its
+own `NOT_THIS_SITTING` raise — `_require_this_sitting` calls
+`_sealed_assign` and only then raises, so the terminal guard is reached,
+and refused, before `NOT_THIS_SITTING` ever fires. Every row lands on
+`WORKFLOW_ALREADY_FINISHED` either way, same-sitting or foreign. A new test
+covers the foreign-sitting case specifically — the row `interrupt()`'s
+removed check and `_require_this_sitting`'s own guard could in principle
+have disagreed on, and don't. Both new tests were mutation-tested against
+`_sealed_assign`'s own guard (the real backstop underneath all three
+instances) and fail correctly when it, rather than the already-removed
+checks, is deleted — confirming they anchor to the invariant that remains,
+not to the ones removed. A doctrine review independently re-derived both
+redundancy proofs from `_STAGE_EDGES` and the call graph, not trusting the
+test-suite reviewer's own reasoning, and found no third error the way
+round 37 found a second one in round 36's work.
 
 **`commit` does not hold `self._lock` across its call into
 `_require_the_gates`, and a round-twenty review is why.** `_require_the_

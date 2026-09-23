@@ -2664,16 +2664,22 @@ class RecoveryWorkflow:
         sitting, could end the workflow. Fail-closed, so the exemption only
         ever bought a denial — and a denial is still an outcome somebody else
         chose.
+
+        **This used to re-check the stage here too, before `_require_this_
+        sitting`.** A round-40 review found it fully redundant: a same-
+        sitting caller on an already-terminal workflow falls through
+        `_require_this_sitting` untouched and meets `_sealed_assign`'s own
+        terminal guard on the write below instead; a foreign-sitting caller
+        meets the identical guard one statement earlier still, inside
+        `_require_this_sitting` itself, before its own `NOT_THIS_SITTING`
+        raise — `_require_this_sitting`'s write-then-raise shape means its
+        `_sealed_assign` call is reached, and refused, before that raise
+        ever fires. Every row lands on `WORKFLOW_ALREADY_FINISHED` either
+        way; removed the same way round 39 removed `commit`'s sibling.
         """
 
         with self._lock:
             _require_an_exact_str("session_id", session_id)
-            if self._stage in TERMINAL_STAGES:
-                self._refuse(
-                    Refusal.WORKFLOW_ALREADY_FINISHED,
-                    "this workflow has ended; a further attempt is a new workflow "
-                    "that runs every gate again",
-                )
             self._require_this_sitting(session_id)
             self._sealed_assign("_stage", RecoveryStage.INTERRUPTED)
             self._record(SnapshotAuditEvent.RECOVERY_INTERRUPTED)
@@ -2698,8 +2704,10 @@ class RecoveryWorkflow:
         _require_an_exact_str("session_id", session_id)
         if session_id != self._session_id:
             # Unconditional. This used to be wrapped in `if self._stage not in
-            # TERMINAL_STAGES:`, which can never be false: every caller passes
-            # `_require_stage` — or, in `interrupt`, its own terminal check —
+            # TERMINAL_STAGES:`, which can never be false: every caller passed
+            # `_require_stage` — or, in `interrupt`, its own terminal check,
+            # since removed by a round-40 review as redundant with
+            # `_sealed_assign`'s own guard on the write immediately below —
             # before reaching here. A review narrowed the condition to
             # `NOT_STARTED` and four foreign probes against a live `TRIAL_OPEN`
             # workflow left no record and no terminal stage, with the suite
@@ -2939,24 +2947,30 @@ class RecoveryWorkflow:
         operator who stops mid-prompt and then declines, or stops and has
         the medium pulled, hit `_sealed_assign`'s terminal rule and got an
         `AttributeError`. (A round-39 review found the re-check had become
-        fully redundant with this function's own backstop, below, and
-        removed it — every row now reaches this function, or
-        `_sealed_assign` directly, the same as it always did for all but
-        that one row.) That is outside `RecoveryRefused` and
-        outside `Refused`, so the single `except` this package promises did not
-        catch it, and the unhandled traceback rendered `commit`'s own frame —
-        the acquisition object, the sitting and the descriptor included.
+        fully redundant with this function's own backstop, and removed it —
+        every row now reaches this function, or `_sealed_assign` directly,
+        the same as it always did for all but that one row.) That is
+        outside `RecoveryRefused` and outside `Refused`, so the single
+        `except` this package promises did not catch it, and the unhandled
+        traceback rendered `commit`'s own frame — the acquisition object,
+        the sitting and the descriptor included.
 
-        A guard that fixes one row of the input space is a guard over one row.
-        This is the same fix at the place every row passes through.
+        **A round-40 review found this function's own terminal-stage check
+        had, in turn, become redundant with `_sealed_assign`'s — the same
+        shape one call-frame deeper.** This function calls
+        `self._sealed_assign("_stage", RecoveryStage.REFUSED)`
+        unconditionally, with no statement between here and there, under
+        the same `self._lock` (an `RLock`, so the two checks are one
+        uninterrupted critical section, not two separate reads a race could
+        land between). `_sealed_assign`'s own terminal-stage guard fires on
+        that same call, verified across all ~15 call sites into this
+        function — direct and via `_require_an_unfenced_medium` — and
+        confirmed by racing an interruption against every D8 gate, not only
+        `MEDIUM_FENCED`. A guard that fixes one row of the input space is a
+        guard over one row; this was, by round 39, the fix at the place
+        every row passes through — and `_sealed_assign` is that place now.
         """
 
-        if self._stage in TERMINAL_STAGES:
-            self._refuse(
-                Refusal.WORKFLOW_ALREADY_FINISHED,
-                "this workflow has ended; a further attempt is a new workflow "
-                "that runs every gate again",
-            )
         self._sealed_assign("_stage", RecoveryStage.REFUSED)
         self._record(SnapshotAuditEvent.RECOVERY_REFUSED, gate=gate)
         _raise_gate_refused()

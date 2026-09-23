@@ -4351,6 +4351,43 @@ def test_an_interruption_belongs_to_its_sitting_like_every_other_stage(
         flow.interrupt(session_id=type("S", (str,), {})(SESSION))
 
 
+def test_a_foreign_sitting_meets_the_same_refusal_on_an_already_finished_workflow(
+    observations,
+) -> None:
+    """R40 (test-suite review): the scenario that tells `interrupt()`'s own
+    top-of-function terminal check apart from `_sealed_assign`'s — a
+    foreign sitting, on a workflow that has *already* ended.
+
+    `interrupt()` used to re-check the stage before ever asking
+    `_require_this_sitting`. A round-40 review found this redundant too:
+    a foreign-sitting caller reaches `_require_this_sitting`'s own
+    write-then-raise (`_sealed_assign("_stage", REFUSED)` before its
+    `NOT_THIS_SITTING` raise), and on an already-terminal workflow that
+    write meets `_sealed_assign`'s own terminal guard first —
+    `WORKFLOW_ALREADY_FINISHED`, not `NOT_THIS_SITTING`, the identical
+    outcome the removed check gave directly. This is the one case
+    `test_an_interruption_belongs_to_its_sitting_like_every_other_stage`
+    above does not drive: that test's foreign sitting is against a
+    workflow still mid-flight (`PREFLIGHT_PASSED`), not one already ended.
+    """
+
+    flow = workflow(observations)
+    snap = descriptor()
+    flow.start(
+        snap, observations, media_binding_holds=True, session_id=SESSION, started_by_operator=True
+    )
+    flow.interrupt(session_id=SESSION)
+    assert flow.stage is RecoveryStage.INTERRUPTED
+
+    with pytest.raises(RecoveryRefused) as refused:
+        flow.interrupt(session_id="another-sitting")
+    assert refused.value.refusal is Refusal.WORKFLOW_ALREADY_FINISHED
+    # Not recorded as a foreign-sitting attempt: the workflow's own ending
+    # is the more specific fact, and nothing about a stranger asking after
+    # it belongs in the audit of a workflow that already finished.
+    assert flow.audit()[-1].event is SnapshotAuditEvent.RECOVERY_INTERRUPTED
+
+
 def test_an_interruption_reaches_its_terminal_stage_from_not_started_too(observations) -> None:
     """R33 (test-suite review): `("not_started", "interrupted")` is a real edge
     in `_STAGE_EDGES`, and the design doc and `interrupt`'s own docstring both
@@ -10298,6 +10335,61 @@ def test_a_fence_and_an_interruption_together_still_classify_as_the_workflow_end
     assert flow.stage is RecoveryStage.INTERRUPTED
     rule.fence()
     assert rule.is_fenced is True
+
+    acquisition.release.set()
+    committer.join(timeout=30)
+    assert not committer.is_alive(), "commit() never woke up after attempt() returned"
+    assert commit_outcome["kind"] == "refused"
+    assert commit_outcome["refusal"] is Refusal.WORKFLOW_ALREADY_FINISHED
+
+
+def test_an_interruption_during_attempt_outranks_a_declined_confirmation_too(
+    observations,
+) -> None:
+    """R40 (test-suite review): `_refuse_gate`'s own terminal-stage check,
+    immediately above `_sealed_assign`'s identical one with nothing between
+    them, was removed as redundant. This drives it from a different gate
+    than the sibling test above (`MEDIUM_FENCED`, reached through
+    `_require_an_unfenced_medium`) — `OPERATOR_CONFIRMATION`, reached from
+    inside `_require_the_gates` itself once `attempt()` returns, with
+    `confirmed=False`. An interruption during the wait still wins:
+    `_refuse_gate(OPERATOR_CONFIRMATION)` meets an already-`INTERRUPTED`
+    workflow and reports `WORKFLOW_ALREADY_FINISHED`, not `GATE_REFUSED`,
+    confirming the redundancy generalises across gates rather than being
+    specific to the one gate the sibling test happened to drive.
+    """
+
+    flow = workflow(observations)
+    snap = descriptor()
+    flow.start(
+        snap, observations, media_binding_holds=True, session_id=SESSION, started_by_operator=True
+    )
+    flow.open_trial(snap, observations, media_binding_holds=True, session_id=SESSION)
+
+    acquisition = _BlocksOnAnEvent()
+    commit_outcome: dict[str, object] = {}
+
+    def do_commit() -> None:
+        try:
+            flow.commit(
+                snap,
+                observations,
+                media_binding_holds=True,
+                session_id=SESSION,
+                acquisition=acquisition,
+                confirmed=False,
+            )
+            commit_outcome["kind"] = "returned"
+        except RecoveryRefused as refused:
+            commit_outcome["kind"] = "refused"
+            commit_outcome["refusal"] = refused.refusal
+
+    committer = threading.Thread(target=do_commit)
+    committer.start()
+    assert acquisition.entered.wait(timeout=30)
+
+    flow.interrupt(session_id=SESSION)
+    assert flow.stage is RecoveryStage.INTERRUPTED
 
     acquisition.release.set()
     committer.join(timeout=30)
