@@ -2317,12 +2317,13 @@ def test_a_hand_built_verdict_does_not_authorise_a_migration() -> None:
     # drives exactly that split.
     assert "a value that merely has the right shape" in refused.value.detail
 
-    with pytest.raises(RecoveryRefused):
+    with pytest.raises(RecoveryRefused) as refused:
         ledger.note_snapshot_written(
             forged,
             descriptor(),
             quarantine=judged_medium,
         )
+    assert refused.value.refusal is Refusal.VERDICT_NOT_MINTED_BY_A_PREFLIGHT
     assert ledger.audit() == ()
 
     minted = preflight(
@@ -2483,6 +2484,48 @@ def test_a_candidate_from_elsewhere_is_not_this_workflows_answer(observations) -
     # Another workflow's candidate is not this one's.
     other = workflow(observations)
     assert not other.holds(candidate)
+
+
+def test_a_workflow_reached_at_committed_with_no_candidate_holds_nothing(observations) -> None:
+    """R12 (test-suite review): `holds()`'s own docstring names the reason
+    for `self._candidate is not None`, and no test ever drove the state it
+    names — `_stage is COMMITTED` with `_candidate` still `None`.
+
+    The prior "uncommitted" case above (`object.__setattr__`-planting a
+    candidate on a workflow whose stage never moved) drives the other half:
+    a candidate present without `COMMITTED`. It is not the same state, and
+    a mutant dropping `self._candidate is not None` survives it — nothing
+    in that case reaches `_stage is COMMITTED` at all, so the mutant and the
+    real code agree there too.
+
+    This reaches `COMMITTED` directly through `_sealed_assign`, the same
+    bound-method reach `commit()` itself uses, but stops one line short of
+    `commit()`'s own candidate mint — `_require_the_gates` issues a real
+    clearance (D8's full run, `acquisition` and `confirmed` both supplied),
+    so the stage-edge and clearance checks inside `_sealed_assign` pass
+    exactly as they would from inside `commit()`; only the mint is skipped.
+    """
+
+    snap = descriptor()
+    flow = workflow(observations)
+    flow.start(
+        snap, observations, media_binding_holds=True, session_id=SESSION, started_by_operator=True
+    )
+    flow.open_trial(snap, observations, media_binding_holds=True, session_id=SESSION)
+    flow._require_the_gates(
+        snap,
+        observations,
+        session_id=SESSION,
+        media_binding_holds=True,
+        acquisition=Opens(),
+        confirmed=True,
+    )
+    flow._sealed_assign("_stage", RecoveryStage.COMMITTED)
+
+    assert flow.stage is RecoveryStage.COMMITTED
+    assert flow._candidate is None
+    assert not flow.holds(None)
+    assert not flow.holds(RecoveryCandidate(1, FINGERPRINT))
 
 
 def test_a_workflow_refuses_a_stage_asked_for_another_sitting(observations) -> None:
@@ -2675,8 +2718,9 @@ def test_a_verdict_subclass_carrying_a_stolen_token_is_refused() -> None:
     assert stolen in module_registry
     assert stolen.may_migrate is True
     assert verdict_was_minted_here(stolen) is False
-    with pytest.raises(RecoveryRefused):
+    with pytest.raises(RecoveryRefused) as refused:
         MigrationLedger().may_migrate(stolen, quarantine=a_quarantine(quarantined=False))
+    assert refused.value.refusal is Refusal.VERDICT_NOT_MINTED_BY_A_PREFLIGHT
 
 
 def test_the_token_cannot_be_read_off_a_verdict_and_reused() -> None:
@@ -6040,6 +6084,52 @@ def test_a_refusal_names_the_check_the_run_actually_stopped_at() -> None:
     assert ledger.audit() == ()
 
 
+def test_a_forged_refusal_reason_alone_is_still_caught_with_evaluated_honest() -> None:
+    """R12 (test-suite review): the refusal half's own identity check —
+    `stopped_at is not verdict.refused_by`, alongside `not in_order` — was
+    never isolated from `in_order`.
+
+    `test_a_refusal_names_the_check_the_run_actually_stopped_at` above forges
+    `_evaluated` down to one check, which makes `in_order` false on its own
+    (a one-element prefix doesn't match `canonical[:1]` once `refused_by`
+    disagrees) — so `not in_order` alone already raises, and `stopped_at is
+    not verdict.refused_by` never gets to be the deciding clause. A mutant
+    dropping it (leaving only `if not in_order:`) survives the whole suite.
+
+    This isolates it: `_evaluated` stays a genuine, honestly in-order prefix
+    — the real one a real preflight produced, ending at `SNAPSHOT_INTEGRITY`
+    — and only `_refused_by` is forged, to a check the run never reached.
+    `in_order` is still true (the prefix is real and in order); only the
+    identity check tells the ledger the *reason* doesn't match where the run
+    actually stopped. Without it, `may_migrate` returns `False` silently and
+    the ledger's own permanent audit records the wrong check as the reason a
+    migration was refused — the exact misclassification this module's
+    completeness rule exists to prevent.
+    """
+
+    judged_medium, snapshot, _ = a_migration(
+        snapshot=descriptor(integrity=SnapshotIntegrity.FAILED)
+    )
+    honest = preflight(
+        judged_medium,
+        snapshot=snapshot,
+        capacity=capacity(),
+        current_schema=1,
+        target_schema=2,
+        binding_holds=True,
+        generation_holds=True,
+        image_digest_holds=True,
+    )
+    assert honest.refused_by is PreflightCheck.SNAPSHOT_INTEGRITY
+
+    object.__setattr__(honest, "_refused_by", PreflightCheck.GENERATION)
+    ledger = MigrationLedger()
+    with pytest.raises(RecoveryRefused) as refused:
+        ledger.may_migrate(honest, quarantine=judged_medium)
+    assert refused.value.refusal is Refusal.VERDICT_DID_NOT_ASK_EVERY_CHECK
+    assert ledger.audit() == ()
+
+
 def test_the_gates_cannot_be_reached_without_all_of_them(observations) -> None:
     """R7: the clearance's issuer sat at the reach it was built to blunt.
 
@@ -7379,9 +7469,14 @@ def _media_reachable_from(root: object, *, depth: int = 6) -> list[str]:
             found.append(path)
             return
         if isinstance(value, dict | _weakref.WeakKeyDictionary):
-            for key in list(value.keys()):
+            # `list(value.items())`, not `list(value.keys())` followed by a
+            # second `value[key]` lookup: a `WeakKeyDictionary`'s key can die
+            # between those two calls (R12 test-suite review — reproduced as
+            # a genuine, GC-timing-dependent `KeyError`, not a mutation-
+            # testing artefact), and `.items()` captures both atomically.
+            for key, held in list(value.items()):
                 walk(key, f"{path}.<key>", left - 1)
-                walk(value[key], f"{path}[{type(key).__name__}]", left - 1)
+                walk(held, f"{path}[{type(key).__name__}]", left - 1)
             return
         if isinstance(value, list | tuple | set | frozenset | _weakref.WeakSet):
             for index, item in enumerate(list(value)):

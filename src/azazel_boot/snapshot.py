@@ -1310,12 +1310,20 @@ _REACHED_WITHOUT_GATES = frozenset(
 
 
 class RecoveryGate(Enum):
-    """ADR-0010 D8's four, in D8's order, plus the two that precede them.
+    """ADR-0010 D8's four, in D8's order, plus the four that precede them.
 
-    The fence and the quarantine are asked before the four, not instead of
+    The fence and the quarantine are asked before D8's four, not instead of
     them: a recovery is *for* a quarantined volume, so the quarantine is not a
     refusal here — but a **fenced** medium is, and a volume nobody quarantined
-    has nothing to recover.
+    has nothing to recover. Then which medium is being recovered
+    (`MEDIUM_NOT_RECOGNISED`) and whose sitting it is bound to
+    (`HOST_BINDING`), asked before D8's own four begin at `TARGET_BINDING`.
+
+    (R12 doctrine review: this docstring said "the two that precede them"
+    from before a review split what was one combined gate into
+    `MEDIUM_NOT_RECOGNISED` and `HOST_BINDING`, and was never updated when
+    that made it four. `docs/snapshot-and-recovery.md` already had the
+    count right; this brings the two back into agreement.)
     """
 
     MEDIUM_FENCED = "medium_fenced"
