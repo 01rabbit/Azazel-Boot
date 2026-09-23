@@ -236,6 +236,23 @@ arbitrary neighbouring text), but the same "not really an opaque token"
 violation. `Sk` joined the category tuple for the same reason `Mn`/`Mc`/
 `Me` did.
 
+**A different mechanism from every prior fix: confusables.** Every earlier
+fix in this function closes a Unicode *equivalence* — a character that is
+itself a control/format/space/mark/modifier, or that normalises to a
+forbidden literal. A round-39 security review found a sixth mechanism with
+no equivalence relationship at all: ordinary `Sm`/`So` mathematical-symbol
+codepoints that render as a near-identical glyph to `/`, `\` or `=` in an
+ordinary font, but that `unicodedata.normalize` leaves untouched, because
+there is nothing to normalise — they are unrelated codepoints, not
+decomposed or compatibility forms of the ASCII original. U+2215 DIVISION
+SLASH in place of `/` passed every check and reconstructed exactly the "a
+path... is not one" disclosure this function's own history names as its
+founding case. No category-wide fix exists here — `Sm`/`So` are vast,
+ordinary-content categories, unlike `Cf`/`Mn`/`Sk` — so this is closed with
+a named, bounded denylist (`_CONFUSABLE_DELIMITERS`) instead, the same
+"narrows, does not guarantee" trade-off `KNOWN_CONTAINER_VERSIONS` already
+makes.
+
 ## Preflight (D7)
 
 Read-only **by construction**: it takes reports and returns a verdict. It has

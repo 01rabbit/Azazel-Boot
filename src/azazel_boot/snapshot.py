@@ -942,6 +942,40 @@ def _require_an_exact_str(name: str, value: object) -> None:
         raise TypeError(f"{name} must be a str exactly; a subclass may answer for itself")
 
 
+#: A round-39 security review found that `_require_an_opaque_value`'s two
+#: defences against "looks like a path" / "looks like `key=value`" —
+#: the literal-character tuple and NFKC/NFD normalisation-stability — only
+#: catch characters that are canonically or compatibility *equivalent* to
+#: `/`, `\`, `=` or space under Unicode normalisation. A **confusable** —
+#: an unrelated codepoint with no decomposition relationship to any of
+#: those four, but that renders as a near-identical glyph in an ordinary
+#: font — is invisible to both checks: `unicodedata.normalize` leaves it
+#: untouched because there is no equivalence to normalise away.
+#: `"usb-SN-AA11BB22∕dev∕nvme0n1p3"` (U+2215 DIVISION SLASH in
+#: place of `/`) passed every existing check and reconstructed exactly the
+#: "a path... is not one" disclosure this function exists to refuse.
+#: A general fix does not exist without pulling in Unicode confusables data
+#: (UTS #39) as a new dependency, which absolute constraint 7 forbids
+#: without a pyproject.toml change and an ADR. This is a named, bounded
+#: denylist instead — the same "checkable shape, not a guarantee" trade-off
+#: `KNOWN_CONTAINER_VERSIONS` and the `Sk` category fix both already make —
+#: covering the slash/backslash/equals look-alikes found during that
+#: review, drawn from the Mathematical Operators and Miscellaneous Symbols
+#: and Arrows blocks. It narrows; it does not guarantee.
+_CONFUSABLE_DELIMITERS = frozenset(
+    {
+        "∕",  # DIVISION SLASH — confusable with "/"
+        "⁄",  # FRACTION SLASH — confusable with "/"
+        "⧸",  # BIG SOLIDUS — confusable with "/"
+        "⟋",  # MATHEMATICAL RISING DIAGONAL — confusable with "/"
+        "∖",  # SET MINUS — confusable with "\"
+        "⧵",  # REVERSE SOLIDUS OPERATOR — confusable with "\"
+        "⟍",  # MATHEMATICAL FALLING DIAGONAL — confusable with "\"
+        "\U0001f7f0",  # HEAVY EQUALS SIGN — confusable with "="
+    }
+)
+
+
 def _require_an_opaque_value(name: str, value: str) -> None:
     """A fingerprint is opaque, and "opaque" was a word rather than a check.
 
@@ -1064,6 +1098,24 @@ def _require_an_opaque_value(name: str, value: str) -> None:
     neighbouring text), but the identical "not really an opaque token"
     violation. `Sk` joins the category tuple for the same reason `Mn`/
     `Mc`/`Me` did.
+
+    **A different mechanism from every check above: confusables.** Every
+    prior fix in this function closes a Unicode *equivalence* — a
+    character that is a control/format/space/mark/modifier, or that
+    normalises to a forbidden literal. A round-39 security review found a
+    sixth mechanism with no equivalence relationship at all:
+    `_CONFUSABLE_DELIMITERS` are ordinary `Sm`/`So` symbols — mathematical
+    operators, mostly — that render as a near-identical glyph to `/`, `\\`
+    or `=` in an ordinary font, but that `unicodedata.normalize` leaves
+    untouched, because there is nothing to normalise: they are unrelated
+    codepoints, not decomposed or compatibility forms of the ASCII
+    original. `"usb-SN-AA11BB22∕dev∕nvme0n1p3"` (U+2215 DIVISION
+    SLASH) passed every check above and reconstructed exactly the "a
+    path... is not one" disclosure this function's own docstring names as
+    its founding case. No category-wide fix exists — `Sm`/`So` are vast,
+    ordinary-content categories, unlike `Cf`/`Mn`/`Sk` — so this is a
+    named, bounded denylist rather than a category exclusion; see
+    `_CONFUSABLE_DELIMITERS`'s own comment for why.
     """
 
     if len(value) > 128:
@@ -1093,6 +1145,11 @@ def _require_an_opaque_value(name: str, value: str) -> None:
                 f"{name} must be an opaque token; a control, format, space, "
                 "surrogate, combining-mark or modifier-symbol character is "
                 "not one"
+            )
+        if character in _CONFUSABLE_DELIMITERS:
+            raise TypeError(
+                f"{name} must be an opaque token; a character that renders "
+                "like a path, a rendered field or a line of text is not one"
             )
     for form in ("NFKC", "NFD"):
         if unicodedata.normalize(form, value) != value:

@@ -9441,6 +9441,19 @@ def test_a_fingerprint_is_an_opaque_token_and_not_a_rendered_record() -> None:
         # every check above unchanged before `Sk` joined the category
         # tuple.
         "\U0001f44d\U0001f3ff",
+        # R39 (security review): a sixth mechanism, unrelated to any prior
+        # one -- a confusable. U+2215 DIVISION SLASH has no decomposition
+        # relationship to "/" (unicodedata.normalize leaves it unchanged
+        # under both NFKC and NFD), so neither the literal-character check
+        # nor the normalisation check sees it, but it renders as a slash
+        # indistinguishable from the real one in an ordinary font. This
+        # reconstructs the exact "a path... is not one" disclosure this
+        # function's own history names as its founding case.
+        "usb-SN-AA11BB22∕dev∕nvme0n1p3",
+        # R39: the "=" side of the same mechanism, isolated from the "/"
+        # case above -- U+1F7F0 HEAVY EQUALS SIGN, also NFKC/NFD-stable
+        # and unrelated to "=" by decomposition.
+        "capacity\U0001f7f017179869184",
     ):
         with pytest.raises(TypeError, match="opaque"):
             descriptor(fingerprint=rejected)
