@@ -551,6 +551,27 @@ own name, or by walking this module's `__dict__`, is the same disclosed
 "careless-caller defence, not a capability boundary" limit as `_MINTED_HERE`
 two paragraphs up — not a new one, and not what either review found.
 
+**A round-twelve review found the limit underneath that one, which no rename
+reaches.** `gc.get_objects()` is a full heap walk and needs no name at all:
+filtering it by `isinstance(x, weakref.WeakKeyDictionary)` finds
+`_INDEX_STORAGE` directly, with no `import azazel_boot.snapshot` anywhere in
+the attacking code. It is not even the shortest route — `weakref.ref`
+instances are themselves walked by `gc.get_objects()`, and a live
+`Quarantine` is a member of it in its *own* right: `[o for o in gc.
+get_objects() if type(o).__name__ == "Quarantine"]` finds one with no weak
+reference, no index, and nothing of this module in the chain at all. Moving
+where `_WeakIdentityIndex` keeps its store cannot close this, because what
+is found is never the store — it is any live object in the same OS process,
+which `gc` exists to enumerate regardless of what holds it. This is not a
+gap in `_WeakIdentityIndex`, and no further redesign of it would close
+anything: the class's claim is narrowed to what a call to *this module's
+own surface* — a method, a return value, an exception, a repr, a log line —
+can hand back to a caller who does not already hold the object, which
+remains true. It was never, and could not have been, a claim that a
+`Quarantine` is hidden from other code sharing the interpreter; nothing
+running inside one OS process can hide a live object's existence from `gc`
+in that same process.
+
 **"Once" counts judged snapshots, not write operations.** `may_migrate` is a
 question and answers it as often as it is asked; `note_snapshot_written`
 records once per `(medium, judged values)`. A caller that performs several

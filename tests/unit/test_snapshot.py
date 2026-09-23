@@ -8153,6 +8153,46 @@ def test_gc_get_referents_does_not_recover_a_live_medium_from_the_index() -> Non
     assert medium in index
 
 
+def test_a_live_medium_is_findable_by_gc_regardless_of_this_module() -> None:
+    """R12 (security review): the limit underneath `_WeakIdentityIndex`,
+    which no redesign of it reaches — asserted here, per this file's own
+    precedent (`test_refusals.py`'s `UnidentifiedHost` test), so the gap is
+    on record rather than merely known, and closing it by accident somewhere
+    else turns this red rather than leaving nothing to notice.
+
+    `gc.get_objects()` is a full heap walk and needs no name, no import of
+    this module and no weak reference at all: a live `Quarantine`, wherever
+    it is held, is a member of it in its own right. Filtering by
+    `isinstance(x, weakref.WeakKeyDictionary)` also finds `_INDEX_STORAGE`
+    directly, and `weakref.ref` instances are themselves walked by `gc.
+    get_objects()`, so the entries `_WeakIdentityIndex` stores are reachable
+    that way too — but neither of those is the shortest path, and moving
+    where the class keeps its store cannot change that, because what is
+    found is never the store. It is any live object in the same OS process,
+    which is what `gc` exists to enumerate.
+
+    This is why `_WeakIdentityIndex`'s claim is about this module's own
+    call surface — no method, return value, exception, repr or log line
+    hands a caller a medium it did not already hold — and not about hiding
+    a live object from other code sharing the interpreter, which no pure
+    -Python technique, in this module or any other, can do.
+    """
+
+    medium = a_quarantine(quarantined=True)
+
+    found = [obj for obj in gc.get_objects() if type(obj).__name__ == "Quarantine"]
+    assert medium in found
+
+    for obj in found:
+        if obj is medium:
+            assert obj.is_fenced is False
+            obj.fence()
+            assert medium.is_fenced is True, (
+                "the object gc.get_objects() found and the one this test built "
+                "are the same live object, not a copy"
+            )
+
+
 def test_the_index_answers_false_for_a_key_it_never_held() -> None:
     """R11 (test-suite review): `__contains__`'s "no entry at all" branch —
     as opposed to "an entry, but a dead or different object" — was unreached

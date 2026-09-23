@@ -512,9 +512,38 @@ class PreflightVerdict:
 #: other module-level name here: reaching it by that name, or by walking
 #: this module's own `__dict__`, is the disclosed "careless-caller defence,
 #: not a capability boundary" limit stated throughout this file, not a new
-#: one. What changed is narrower and real — the index no longer falls
-#: *short* of that limit, handing a live medium back through channels that
-#: need no name at all.
+#: one. What changed, and is real, is that the index no longer falls
+#: *short* of that limit — a caller who does not know `_INDEX_STORAGE`'s
+#: name and never imported this module could not previously reach a
+#: judged medium through this class's own logic at all; now they still
+#: cannot, through it.
+#:
+#: **A round-twelve review found a deeper limit no rename reaches: `gc.
+#: get_objects()` needs no name at all.** It is a full heap walk, and
+#: filtering its result by `isinstance(x, weakref.WeakKeyDictionary)` finds
+#: `_INDEX_STORAGE` directly — no `import azazel_boot.snapshot`, no private
+#: spelling, nothing this module controls. And that is not even the
+#: shortest path: `weakref.ref` objects are themselves walked by `gc.
+#: get_objects()`, so the entries this class stores are reachable that way
+#: too, without ever finding `_INDEX_STORAGE` first — and shorter still,
+#: **a live `Quarantine`, wherever it is held, is a member of `gc.
+#: get_objects()` in its own right**: `[o for o in gc.get_objects() if
+#: type(o).__name__ == "Quarantine"]` finds one with no weak reference, no
+#: index and no import of this module anywhere in the chain. No amount of
+#: moving where this class keeps its store changes that, because the thing
+#: being found is not the store — it is any live object in the same OS
+#: process, which `gc` exists to enumerate irrespective of what holds it.
+#:
+#: So this class's claims are narrowed to what they can actually deliver:
+#: no *call this module exposes* — no method, no return value, no
+#: exception, no repr, no log line — hands a caller a medium it did not
+#: already hold. That is a claim about this module's own surface. It was
+#: never, and could not be, a claim that a `Quarantine` is invisible to
+#: other code sharing the interpreter: nothing running inside one OS
+#: process can hide a live object's existence from `gc` in that same
+#: process, with or without this module, with or without Python. Treating
+#: that as a gap in `_WeakIdentityIndex` and continuing to hunt for a
+#: narrower store would be chasing a door that was never the one open.
 _INDEX_STORAGE: _WeakKeyDictionary = _WeakKeyDictionary()
 
 
