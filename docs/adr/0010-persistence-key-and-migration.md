@@ -1,13 +1,87 @@
 # ADR-0010: Persistence key handling, dirty-write detection, and migration
 
-Status: **accepted (2026-09-22). D1–D5 implemented in software and
-hardware-unverified; D6–D10 not implemented.** The owner decided D1–D10 below.
+Status: **accepted (2026-09-22). D1–D8 implemented in software and
+hardware-unverified; D9 and D10 unchanged.** The owner decided D1–D10 below.
 `azazel_boot.session_mode` implements D1, D2 and D3 — see
-[session mode](../session-mode.md) — and `azazel_boot.dirty_write` with
+[session mode](../session-mode.md); `azazel_boot.dirty_write` with
 `azazel_boot.persistence` implements D4 and D5, see
-[persistence](../persistence.md) §4.1. All of it on no hardware: no passphrase
-has been attempted, no volume opened, and no USB SSD pulled mid-write on any
+[persistence](../persistence.md) §4.1; and `azazel_boot.snapshot` implements
+D6, D7 and D8 — see [snapshot and recovery](../snapshot-and-recovery.md).
+
+All of it on no hardware: no passphrase has been attempted, no volume opened,
+no USB SSD pulled mid-write, no snapshot written and no restore run on any
 device.
+
+**A note on how D9 and D10 are checked, which changes neither.** The
+repository holds them with static scans over the modules above. *A static scan
+is not a proof of absence; it is a check that refuses the paths found so far.*
+These guards have been defeated by adversarial review four times: by
+assembling module names from fragments for `__import__`; by walking
+`().__class__.__base__.__subclasses__()` to `open`; by raising an exception and
+reading `__traceback__.tb_frame.f_builtins["open"]`; and by calling `locals()`
+at module level, which *is* the module dict and holds `__builtins__` — the last
+three with no import statement at all, and the last with no subscript, no
+`getattr` and no `except` either.
+
+**Each was closed in `azazel_boot.snapshot`'s guard only.** An earlier draft of
+this paragraph said all of them were "named in the guards", which was not true:
+the other modules' guards still name the `__import__` route and not the
+reflection routes, and the same chain inserted into `azazel_boot.session_mode`
+writes to the host filesystem with the suite green. Widening them is work this
+record does not do.
+
+**And a per-file scan is not a bound on the module it scans.** The fourth
+review put the same escape in `azazel_boot.quarantine`, whose `is_fenced`
+`azazel_boot.snapshot` reads on every gate, and the suite stayed green. So
+`azazel_boot.snapshot` now also carries a **runtime** check: the workflow is
+driven end to end under `sys.addaudithook` and the assertion is that no audited
+operation occurs at all — which covers what the module calls, and covers the
+paths that drive reaches and no others. The other modules do not have one.
+
+This is a statement of fact about the checks, not a revision of what D9 and D10
+decide.
+
+**Four further facts about this record, none of them a revision.** (1) D8
+gate 2 says "under D2's limit"; `azazel_boot.snapshot` imports neither
+`BootSession` nor `ATTEMPT_BUDGET`, so a recovery's key acquisition is **not**
+under that limit as shipped, and a review drove 26 prompts in one boot with 21
+of them after persistence had been sealed. (2) D8 gate 1 names ADR-0008
+D4.1.1's key-protected media binding; the workflow takes the caller's
+**report** of it as a `bool`, because a `BindingKey` inside a decision module
+is the secret arriving where `session_mode` decided it must not. (3) D4 says
+"leaving quarantine is possible **only** through the explicit recovery workflow
+in D8" — and D8 as implemented does not leave quarantine at all: it hands back
+a candidate, so as written that sentence names an empty set. (4) D7's own text
+above names four preflight checks, and those four collapse to **three**
+`PreflightCheck` members (`REQUIRED_SPACE` is one check for both "required"
+and "available"; `SNAPSHOT_INTEGRITY`; `SCHEMA_COMPATIBILITY`).
+`azazel_boot.snapshot.preflight()` asks ten, so **seven** are not in D7's own
+text. Four of the seven are load-bearing on other decisions this record
+already makes elsewhere (the fence, on D9; the volume quarantine, on D4; the
+snapshot's existence and container version, on D7's own "no migration without
+a snapshot" before the cheap answers) and are recorded as such next to their
+checks. Three are not: `binding_holds`, `generation_holds` and
+`image_digest_holds` re-ask, before a migration's large write, the same
+ADR-0008 D4.1.1 media-binding elements D8 gate 1 already re-asks before a
+recovery's write. A round-33 doctrine review found that nothing in this
+record or in `azazel_boot.snapshot` said so next to the check itself at the
+time; that same round's code comment on the `BINDING` check and the design
+doc's table now do, and this paragraph does too. **A round-34 doctrine
+review then questioned the "same elements" claim itself, rather than take it
+on faith:** D8 gate 1 is one opaque `bool` over all five bound elements
+together, by `media_binding_applies`'s own docstring, deliberately — because
+splitting the refusal by element would be "an oracle that tells an attacker
+which of the five inputs they got wrong". D7's three checks are independently
+settable booleans, each triggerable alone
+(`tests/unit/test_snapshot.py` drives `binding_holds`/`generation_holds`/
+`image_digest_holds` failing one at a time). No caller-side implementation of
+these three exists anywhere in this repository to say whether they are
+derived from one combined comparison — preserving `media_binding_applies`'s
+anti-oracle property — or three separate ones, which would not. "The same
+elements, in the same shape `preflight` takes its three" is this record's
+claim, not yet a verified one. Each of the four facts is recorded here as an
+observed difference between this record and the code; reconciling them is
+not this pull request's to do.
 [#7](https://github.com/01rabbit/Azazel-Boot/issues/7) stays open, and so do
 the three children this record names.
 
@@ -17,6 +91,7 @@ Related: [ADR-0008 D4.1 / D4.1.1](0008-debian-13-live-baseline.md) ·
 [Quarantine policy](../quarantine-policy.md) §4 ·
 [Persistence](../persistence.md) · [Recovery](../recovery.md) ·
 [Session mode](../session-mode.md) — D1–D3 as implemented ·
+[Snapshot and recovery](../snapshot-and-recovery.md) — D6–D8 as implemented ·
 [ADR-0011](0011-unlock-helper-boundary.md) — where the passphrase is typed
 
 ## Context
@@ -252,9 +327,10 @@ these values are not traceability.
 **No volume has been created, opened, sealed, torn, quarantined, snapshotted,
 migrated or restored on any device. No passphrase has been attempted, and no
 medium has been pulled mid-write.** D1–D3 exist as decision logic in
-`azazel_boot.session_mode`, and D4–D5 in `azazel_boot.dirty_write` and
-`azazel_boot.persistence`. Both open nothing and read nothing: they decide what
-an outcome reported by something else means. D6–D10 are decisions with no code
-behind them at all. #7 and its three
+`azazel_boot.session_mode`, D4–D5 in `azazel_boot.dirty_write` and
+`azazel_boot.persistence`, and D6–D8 in `azazel_boot.snapshot`. All three open
+nothing, write nothing and read nothing: they decide what an outcome reported
+by something else means. **D9 and D10 have no code of their own and are held by
+static scan only** — see the status line above for what that is worth. #7 and its three
 children stay open, and every one of them carries `hardware-unverified` until a
 real USB SSD and a real laptop say otherwise.

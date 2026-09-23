@@ -12,8 +12,7 @@ No codename is assigned to `AZ-03`. Use the formal name
 
 ## Status
 
-**This repository is target contract.** It contains documentation and
-repository governance. Nothing here is implemented or verified.
+**This repository is target contract, with decision logic implemented for several phase-1 modules and hardware-unverified throughout.** No image has been built, no medium written, no device quarantined and no volume created, opened or restored — the table below states each module's status precisely rather than as a single blanket claim.
 
 | Fact | State |
 | --- | --- |
@@ -21,10 +20,12 @@ repository governance. Nothing here is implemented or verified.
 | Product code, installer, image builder | **does not exist**. No build tool is selected either: `live-build` is the builder the baseline is written against, and [ADR-0002](docs/adr/0002-image-builder.md)'s selection conditions are untouched |
 | Image builder and media writer | **contract, plus decision logic** — [ADR-0009](docs/adr/0009-builder-and-writer-contract.md) and [the builder/writer contract](docs/builder-writer-contract.md) fix six verbs (`build` and `write` never merged), the artifact record, the isolated build host, and a writer that names a target by per-session code rather than by device path. `azazel_boot.artifact`, `azazel_boot.media` and `azazel_boot.writer` decide whether an artifact may be written and which devices may be offered — they **open no device** ([docs/media-writer.md](docs/media-writer.md)). No medium has been written, and no builder is selected |
 | Python package and CLI | a **non-operational status scaffold only** — `azazel-boot status` reports what this repository is and does nothing else |
-| Host-storage quarantine | **decision logic and a pinned policy** (`azazel_boot.quarantine`, `config/quarantine/policy-v1.json`): classifies devices on appearance by stable identity, refuses every action against anything that is not the medium, and checks a built image's initramfs manifest against the hook contract ([docs/quarantine-policy.md](docs/quarantine-policy.md), [ADR-0008 D4.1](docs/adr/0008-debian-13-live-baseline.md)). **Nothing has run**: no initramfs has been built, no device has been quarantined, and the no-host-write property is **not verified**. See [#28](https://github.com/01rabbit/Azazel-Boot/issues/28) |
+| Host-storage quarantine | **decision logic and a pinned policy** (`azazel_boot.quarantine`, `config/quarantine/policy-v1.json`): classifies devices on appearance by stable identity, refuses every ordinary read, write and mount against anything that is not the medium (an operator-approved export is the one exception, and it never targets host storage), and checks a built image's initramfs manifest against the hook contract ([docs/quarantine-policy.md](docs/quarantine-policy.md), [ADR-0008 D4.1](docs/adr/0008-debian-13-live-baseline.md)). **Nothing has run**: no initramfs has been built, no device has been quarantined, and the no-host-write property is **not verified**. See [#28](https://github.com/01rabbit/Azazel-Boot/issues/28) |
 | Reproducibility evaluation | **tooling, no measurement** (`tools/builder/`, `config/builder/`): resolves a symbolic profile into a closed set of pinned inputs, runs a candidate builder as **non-releasable evidence**, and compares two records without ever selecting anything ([docs/build-environment.md](docs/build-environment.md)). The shipped configuration pins nothing, so every profile refuses; no build has been run and no digest has been measured. See [#26](https://github.com/01rabbit/Azazel-Boot/issues/26) |
 | Knowledge Lite admission | **decision logic only** (`azazel_boot.lite_cache`): decides whether an artifact may be read and what happens when it may not. It reads no artifact and writes no cache; verification is injected and **the default admits nothing**, because Knowledge signs with Ed25519 and this bootstrap is standard-library only. See [#16](https://github.com/01rabbit/Azazel-Boot/issues/16) |
 | Interface inventory and commissioning | **parsing and refusal logic only** (`azazel_boot.inventory`, `azazel_boot.commissioning`): reads a sysfs tree, builds composite identities, and reports what an operator would have to settle. It reads no real NIC — the permanent MAC needs an ioctl, which the bootstrap may not perform — assigns no role, and confirms nothing. See [#9](https://github.com/01rabbit/Azazel-Boot/issues/9) |
+| Persistence, session mode and dirty-write | **decision logic only** (`azazel_boot.persistence`, `azazel_boot.session_mode`, `azazel_boot.dirty_write`): decides whether persistence may open, fixes the session mode once at commissioning under a five-attempt budget, and stops the **whole volume** on a suspected torn write ([ADR-0010](docs/adr/0010-persistence-key-and-migration.md) D1–D5, [persistence](docs/persistence.md), [session mode](docs/session-mode.md)). No volume has been created, opened, sealed, torn or quarantined; no passphrase has been attempted. See [#40](https://github.com/01rabbit/Azazel-Boot/issues/40), [#41](https://github.com/01rabbit/Azazel-Boot/issues/41) |
+| Snapshot, preflight and recovery | **decision logic only** (`azazel_boot.snapshot`): judges whether a migration may run and whether a recovery may commit, and hands back a **candidate** — a recovery does not lift the quarantine ([ADR-0010](docs/adr/0010-persistence-key-and-migration.md) D6–D8, [snapshot and recovery](docs/snapshot-and-recovery.md)). No snapshot has been written, no migration run, no trial interrupted and no restore attempted on any device; a recovery **cannot complete outside a test**, because the real key acquisition and the real unlock do not exist. See [#42](https://github.com/01rabbit/Azazel-Boot/issues/42) |
 | Azazel-Fabric pin | exact tag `v0.9.0rc1` (a release candidate), consumed in one boundary module; its absence degrades the reported status and grants nothing |
 | Architecture decision records | see [docs/adr/](docs/adr/) |
 | CI | documentation links, plus static checks, unit tests and a dependency-lock check on the declared Python matrix |
@@ -106,6 +107,9 @@ that is the correct outcome.
 - [Recovery](docs/recovery.md) — surprise removal, failed updates and power loss,
   what leaving the host as found does and does not cover, and what survives a
   failed session.
+- [Snapshot and recovery](docs/snapshot-and-recovery.md) — why a recovery ends
+  in a **candidate** rather than a usable volume, and why the quarantine does
+  not lift when one succeeds.
 - [Session mode](docs/session-mode.md) — persistent or ephemeral, decided once
   per boot; why no key means ephemeral with no exception, why five attempts is
   not brute-force resistance, and why the passphrase never reaches the module

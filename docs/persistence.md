@@ -12,6 +12,7 @@ quarantined on any hardware.
 Related: [ADR-0008 D4.1](adr/0008-debian-13-live-baseline.md) ·
 [ADR-0010](adr/0010-persistence-key-and-migration.md) ·
 [Session mode](session-mode.md) ·
+[Snapshot and recovery](snapshot-and-recovery.md) ·
 [Threat model](threat-model.md) §4–§5 · [Quarantine policy](quarantine-policy.md) ·
 [Recovery](recovery.md) · [Architecture](architecture.md)
 
@@ -62,7 +63,7 @@ supplying a USB dongle supplied the host identity — three laptops sharing one
 dongle shared one fingerprint. At the owner's decision
 ([ADR-0008 D4.1.1](adr/0008-debian-13-live-baseline.md)), opening persistence
 now requires a **hardware-provided stable media identity** as well, bound under
-a **key-protected HMAC** together with three other things:
+a **key-protected HMAC** together with four other things:
 
 ```
 stable media hardware identity   (USB serial descriptor, SCSI VPD WWN,
@@ -82,7 +83,7 @@ stable media hardware identity   (USB serial descriptor, SCSI VPD WWN,
 | `media_binding_mismatch` | a different medium, a different device, a re-created volume, a different image, a mismatched generation, or a forged binding |
 
 The last row is **one refusal for six causes, deliberately**. A refusal that
-says which of the four inputs was wrong is an oracle: it tells an attacker
+says which of the five inputs was wrong is an oracle: it tells an attacker
 holding three of them which one to keep working on.
 
 *Topology is never identity.* `MediaIdentitySource` has no value for a bus
@@ -296,11 +297,13 @@ reasoning about a device that is not there.
 
 The quarantine is **one-way within the boot**. There is no clearing call — not
 `clear`, not `reopen`, not `reset` — and a test asserts the absence over the
-public surface rather than trying the obvious spellings one at a time. Leaving
-quarantine is D8's explicit recovery workflow, which is
-[#42](https://github.com/01rabbit/Azazel-Boot/issues/42) and does not exist; a
-method here that ended the state would be that workflow with its four gates
-removed.
+public surface rather than trying the obvious spellings one at a time. There is no
+clearing call here and none in
+[#42](https://github.com/01rabbit/Azazel-Boot/issues/42) either: D8's recovery
+workflow (`azazel_boot.snapshot`) hands back a **candidate** and leaves the
+quarantine exactly as it found it — see
+[snapshot and recovery](snapshot-and-recovery.md). A method here that ended
+the state would be that workflow with all of its gates removed.
 
 ### Nothing is called erased
 
@@ -408,7 +411,7 @@ medium was pulled, and "may this happen now" did.
 
 Every option offered from every state acts on the medium or on the session:
 continue at `CORE`, examine a medium nothing has looked at, attempt an unlock
-with the documented portable passphrase or recovery path, export a quarantined
+with an operator-carried passphrase or recovery procedure, where the site has established one, export a quarantined
 volume **unmodified** for offline examination, rewrite the medium from a
 verified image on another machine, or reboot.
 
@@ -441,12 +444,13 @@ and the whole partition table into every such traceback.
 
 ## 8. What this does not model
 
-[The threat model](threat-model.md) §5 has seven rows; this module decides three
-of them (offline modification, rollback, dirty-volume repair). Audit-chain
-truncation, the `LOCAL_CONTINUITY_ONLY` anchor state, persistence migration and
-passphrase loss are **not** represented here, and `unlock` grants `LITE` on
-success without consulting an anchor. That is a scope statement, not a claim
-that those rows are handled elsewhere.
+[The threat model](threat-model.md) §5 has nine rows; this module decides four
+of them (offline modification, rollback, persistence carried to a second medium
+or re-created under the same name, dirty-volume repair). Audit-chain truncation,
+the `LOCAL_CONTINUITY_ONLY` anchor state, a live substitution while a volume is
+already open, persistence migration and passphrase loss are **not** represented
+here, and `unlock` grants `LITE` on success without consulting an anchor. That is
+a scope statement, not a claim that those rows are handled elsewhere.
 
 ## 9. What this does not establish
 

@@ -321,9 +321,10 @@ def test_a_clean_write_changes_nothing_and_records_nothing(observations) -> None
 def test_the_quarantine_is_one_way_and_there_is_no_call_that_clears_it(observations) -> None:
     """Asserted over the public surface, not by trying the obvious spellings.
 
-    Leaving quarantine is ADR-0010 D8's explicit recovery workflow, which is
-    #42 and does not exist. A method here that ended the state would be that
-    workflow with its four gates removed.
+    ADR-0010 D8's recovery workflow is `azazel_boot.snapshot` (#42), and it
+    does not end the state either: it hands back a **candidate** and leaves the
+    quarantine as it found it. A method here that ended the state would be that
+    workflow with all of its gates removed.
     """
 
     live = session(observations)

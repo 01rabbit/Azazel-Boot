@@ -57,6 +57,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
+from .refusals import Refused
+
 #: The version an artifact record carries as `quarantine_policy_version`.
 #: `config/quarantine/policy-v1.json` is the pinned artifact a build consumes;
 #: `tests/unit/test_quarantine_policy.py` asserts every field of it against the
@@ -201,7 +203,7 @@ IMAGE_REFUSAL_SEVERITY = (
 )
 
 
-class ImageRefused(Exception):
+class ImageRefused(Refused):
     """A built initramfs does not satisfy the contract, so it is not a Boot image.
 
     It carries every fault found, not just the first: the refusal is the record,
@@ -227,7 +229,7 @@ class ImageRefused(Exception):
         super().__init__("; ".join(f"{name.value}: {detail}" for name, detail in ordered))
 
 
-class ExportRefused(Exception):
+class ExportRefused(Refused):
     """An export was not approved in a way that authorises this write.
 
     The detail never names a device. The refusal is the same whichever disk it
@@ -359,6 +361,12 @@ class Quarantine:
         "_fenced",
         "_volume_quarantined",
         "_sealed",
+        # So that another module can remember something **about** a medium
+        # without holding it. `azazel_boot.snapshot` keeps two indexes keyed by
+        # this object; keyed weakly, nothing it remembers keeps a quarantine
+        # alive and nothing it remembers hands one back. A weak reference is
+        # not a capability: making one needs the object already.
+        "__weakref__",
     )
 
     def __init__(self, session_id: str, boot_medium_identity: str) -> None:
@@ -418,6 +426,24 @@ class Quarantine:
             )
         object.__setattr__(self, name, value)
 
+    def __delattr__(self, name: str) -> None:
+        """The seal's other door. `__setattr__` alone left it open.
+
+        Every seal in this package gates on `getattr(self, "_sealed", False)`,
+        and `_sealed` is an ordinary slot: `del x._sealed` removes it with
+        plain syntax, no dunder call and nothing for a static scan to see, and
+        every later assignment is then an ordinary one. A review deleted it and
+        wrote a stage, a candidate, a quarantine and a sitting onto a workflow
+        by assignment — reaching `COMMITTED` with a forged candidate and an
+        **empty audit**, past the moving-fields allowlist, the stage graph and
+        the clearance interlock at once. A defence is not deeper than its floor.
+
+        `azazel_boot.media.DeviceIdentity` already refused this; the idiom was
+        in the codebase and in one class of twelve.
+        """
+
+        raise AttributeError("a Quarantine is sealed after construction")
+
     def __reduce__(self):
         """Refuse to pickle or copy, rather than handing over the session.
 
@@ -438,6 +464,18 @@ class Quarantine:
             "a Quarantine is not serialisable; it holds the session's observed "
             "identities and its fence"
         )
+
+    def __getstate__(self):
+        """The other door `__reduce__` closes, which was left open.
+
+        `object.__getstate__` is a public method on every object since 3.11:
+        it hands back the instance state — `__dict__`, or the slots by name —
+        with no pickling involved, so `value.__getstate__()` read every field
+        the redacting `__repr__` above exists to keep out of a log. Refusing
+        one serialisation door and not the other is refusing neither.
+        """
+
+        raise TypeError("a Quarantine does not hand back its fields")
 
     @property
     def session_id(self) -> str:

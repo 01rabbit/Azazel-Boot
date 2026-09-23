@@ -78,6 +78,7 @@ from .commissioning import SessionBinding, binding_applies
 from .dirty_write import DirtySignal, WriteObservation, classify
 from .inventory import InterfaceObservation
 from .quarantine import Device, Disposition, Quarantine
+from .refusals import Refused
 
 
 class Capability(Enum):
@@ -266,7 +267,7 @@ class VolumeAuditEntry:
     act: OrdinaryAct | None = None
 
 
-class PersistenceRefused(Exception):
+class PersistenceRefused(Refused):
     """The act did not happen.
 
     The detail names the **rule**, never the value: a partition table is
@@ -612,11 +613,41 @@ class MediaIdentity:
             )
         object.__setattr__(self, name, value)
 
+    def __delattr__(self, name: str) -> None:
+        """The seal's other door. `__setattr__` alone left it open.
+
+        Every seal in this package gates on `getattr(self, "_sealed", False)`,
+        and `_sealed` is an ordinary slot: `del x._sealed` removes it with
+        plain syntax, no dunder call and nothing for a static scan to see, and
+        every later assignment is then an ordinary one. A review deleted it and
+        wrote a stage, a candidate, a quarantine and a sitting onto a workflow
+        by assignment — reaching `COMMITTED` with a forged candidate and an
+        **empty audit**, past the moving-fields allowlist, the stage graph and
+        the clearance interlock at once. A defence is not deeper than its floor.
+
+        `azazel_boot.media.DeviceIdentity` already refused this; the idiom was
+        in the codebase and in one class of twelve.
+        """
+
+        raise AttributeError("a MediaIdentity is sealed after construction")
+
     def __reduce__(self):
         raise TypeError(
             "a MediaIdentity is not serialisable; the raw value belongs in the "
             "encrypted commissioning record and nowhere else"
         )
+
+    def __getstate__(self):
+        """The other door `__reduce__` closes, which was left open.
+
+        `object.__getstate__` is a public method on every object since 3.11:
+        it hands back the instance state — `__dict__`, or the slots by name —
+        with no pickling involved, so `value.__getstate__()` read every field
+        the redacting `__repr__` above exists to keep out of a log. Refusing
+        one serialisation door and not the other is refusing neither.
+        """
+
+        raise TypeError("a MediaIdentity does not hand back its fields")
 
     def __repr__(self) -> str:
         return f"MediaIdentity(source={self._source.value}, value=<redacted>)"
@@ -638,7 +669,7 @@ class MediaIdentity:
 class BindingKey:
     """The HMAC key, derived by the caller from the TPM or the commissioning secret.
 
-    A plain hash would let anyone who learns the four inputs recompute the
+    A plain hash would let anyone who learns the five inputs recompute the
     binding, which is why the standing rule is a **key-protected** HMAC rather
     than a digest. The key material is never written to the audit, a journal, a
     terminal, an issue, a pull request or an external report, so this type
@@ -664,8 +695,38 @@ class BindingKey:
     def __setattr__(self, name: str, value: object) -> None:
         raise AttributeError("a BindingKey is fixed at construction")
 
+    def __delattr__(self, name: str) -> None:
+        """`__setattr__` here is unconditional, not gated on a seal.
+
+        This class has no `_sealed` slot to delete — its `__setattr__`
+        refuses **every** assignment from the moment the object exists, so
+        there was never a flag to remove. What `__delattr__` closes is
+        `del x.<field>`, which reaches the same slots by a different dunder:
+        the sibling classes that gate on `_sealed` needed this because
+        deleting the gate reopened assignment; this class needed it because
+        the field would otherwise simply be gone, and a caller reading it
+        afterward would meet `AttributeError` for the wrong reason.
+
+        `azazel_boot.media.DeviceIdentity` already refused this shape; the
+        idiom was in the codebase and in one class of twelve.
+        """
+
+        raise AttributeError("a BindingKey is fixed at construction")
+
     def __reduce__(self):
         raise TypeError("a BindingKey is not serialisable")
+
+    def __getstate__(self):
+        """The other door `__reduce__` closes, which was left open.
+
+        `object.__getstate__` is a public method on every object since 3.11:
+        it hands back the instance state — `__dict__`, or the slots by name —
+        with no pickling involved, so `value.__getstate__()` read every field
+        the redacting `__repr__` above exists to keep out of a log. Refusing
+        one serialisation door and not the other is refusing neither.
+        """
+
+        raise TypeError("a BindingKey does not hand back its fields")
 
     def __repr__(self) -> str:
         return "BindingKey(<redacted>)"
@@ -693,7 +754,7 @@ class MediaBinding:
     """The HMAC, and nothing else.
 
     There is no `media_identity`, `serial`, `wwn`, `key` or `key_material`
-    field. The four inputs are not recoverable from it, which is what lets the
+    field. The five inputs are not recoverable from it, which is what lets the
     caller store it beside the volume.
     """
 
@@ -827,7 +888,7 @@ def media_binding_applies(
     volume, another image or an earlier generation does not match. A changed
     identity and a forged binding are **the same refusal** — distinguishing
     them would make the refusal an oracle that tells an attacker which of the
-    four inputs they got wrong.
+    five inputs they got wrong.
     """
 
     try:
@@ -988,10 +1049,40 @@ class PersistenceSession:
             )
         object.__setattr__(self, name, value)
 
+    def __delattr__(self, name: str) -> None:
+        """The seal's other door. `__setattr__` alone left it open.
+
+        Every seal in this package gates on `getattr(self, "_sealed", False)`,
+        and `_sealed` is an ordinary slot: `del x._sealed` removes it with
+        plain syntax, no dunder call and nothing for a static scan to see, and
+        every later assignment is then an ordinary one. A review deleted it and
+        wrote a stage, a candidate, a quarantine and a sitting onto a workflow
+        by assignment — reaching `COMMITTED` with a forged candidate and an
+        **empty audit**, past the moving-fields allowlist, the stage graph and
+        the clearance interlock at once. A defence is not deeper than its floor.
+
+        `azazel_boot.media.DeviceIdentity` already refused this; the idiom was
+        in the codebase and in one class of twelve.
+        """
+
+        raise AttributeError("a PersistenceSession is sealed after construction")
+
     def __reduce__(self):
         """Refuse to pickle rather than writing the binding into a file or queue."""
 
         raise TypeError("a PersistenceSession is not serialisable")
+
+    def __getstate__(self):
+        """The other door `__reduce__` closes, which was left open.
+
+        `object.__getstate__` is a public method on every object since 3.11:
+        it hands back the instance state — `__dict__`, or the slots by name —
+        with no pickling involved, so `value.__getstate__()` read every field
+        the redacting `__repr__` above exists to keep out of a log. Refusing
+        one serialisation door and not the other is refusing neither.
+        """
+
+        raise TypeError("a PersistenceSession does not hand back its fields")
 
     def __repr__(self) -> str:
         """Redacted: a generated repr would print the binding into any traceback."""
@@ -1154,12 +1245,13 @@ class PersistenceSession:
         beside it. The fact belongs to the medium, so it lives on the medium's
         rule.
 
-        There is no call that clears it — not here and not on the quarantine.
-        ADR-0010 D4 puts leaving quarantine behind D8's explicit recovery
-        workflow, which is
-        [#42](https://github.com/01rabbit/Azazel-Boot/issues/42) and does not
-        exist. A method that ended the state would be that workflow, minus its
-        four gates.
+        There is no call that clears it — not here, not on the quarantine, and
+        not in D8's recovery workflow either. `azazel_boot.snapshot`
+        ([#42](https://github.com/01rabbit/Azazel-Boot/issues/42)) hands back a
+        **candidate** and leaves the quarantine exactly as it found it: getting
+        back to ordinary use is a different session, starting over. A method
+        that ended the state here would be that workflow with all of its gates
+        removed.
         """
 
         return self._quarantine.volume_is_quarantined
@@ -1411,7 +1503,8 @@ RECOVERY_OPTIONS = MappingProxyType({
     ),
     PersistenceState.LOCKED: (
         "continue without persistence, at CORE",
-        "attempt an unlock with the documented portable passphrase or recovery path",
+        "attempt an unlock with an operator-carried passphrase or recovery "
+        "procedure, where the site has established one",
     ),
     PersistenceState.OPEN: (),
     PersistenceState.QUARANTINED: (

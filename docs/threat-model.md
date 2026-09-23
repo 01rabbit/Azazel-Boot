@@ -62,9 +62,10 @@ Rules:
 
 Where platform ownership is unavailable and firmware verification cannot be
 used, the design must still provide a documented portable passphrase and
-recovery path. Falling back to "no verification and no recovery" is not
-acceptable; falling back to `UNVERIFIED_PLATFORM` **with the claim reduced
-accordingly** is.
+recovery path — **required, and not yet written**: no such document exists
+in this repository today. Falling back to "no verification and no recovery"
+is not acceptable; falling back to `UNVERIFIED_PLATFORM` **with the claim
+reduced accordingly** is.
 
 ### 2.1 Media-level threats
 
@@ -73,8 +74,8 @@ accordingly** is.
 | Substituted or cloned USB SSD presented to the operator as theirs | Signed immutable image with redundant signed boot metadata; media identity displayed at startup; cloning produces a new node and session identity and carries no active or one-shot lease. |
 | Tampered update installed to the media | Updates are written to the **inactive** slot; the full digest is verified before selection; promotion happens only after a health-confirmed trial boot; failure falls back automatically. |
 | Correctly signed but obsolete or wrong-role artifact | Admission requires an exact tested compatibility tuple, the correct signer role, and a minimum security epoch, in addition to a valid signature. Anti-rollback by version number alone is insufficient. |
-| Media physically stolen | Persistence is encrypted; evidence export is encrypted; the passphrase/recovery path is documented and portable. Theft of the media must not yield plaintext evidence. |
-| Persistence opened on a medium that is not the one it was created on | Opening requires a **hardware-provided stable media identity** — a USB serial descriptor, a SCSI VPD WWN, an NVMe EUI-64 or NGUID, an ATA serial — bound under a **key-protected HMAC** together with the LUKS persistence UUID, the signed Boot image digest and the commissioning generation. Any of the four changing refuses. Topology is never identity: a bus path, a device node, a port or an enumeration order is not an accepted source. |
+| Media physically stolen | Persistence is encrypted; evidence export is encrypted; a portable passphrase/recovery path is **required** (§2 above — no such document exists in this repository today). Theft of the media must not yield plaintext evidence. |
+| Persistence opened on a medium that is not the one it was created on | Opening requires a **hardware-provided stable media identity** — a USB serial descriptor, a SCSI VPD WWN, an NVMe EUI-64 or NGUID, an ATA serial — bound under a **key-protected HMAC** together with the quarantine's own device identity, the LUKS persistence UUID, the signed Boot image digest and the commissioning generation. Any of the five changing refuses. Topology is never identity: a bus path, a device node, a port or an enumeration order is not an accepted source. |
 
 **What the media binding does not defend against, stated here rather than
 discovered later.** It does not defeat a full byte-for-byte clone of the medium
@@ -178,9 +179,9 @@ of the system an attacker with transient physical access will reach for.
 | The medium's identity changes **while a volume is already open** | Not detected. The binding is checked at each act — creating, unlocking — and an open volume stays open until the next one. Surprise removal is what §4 covers; a live substitution without a removal event is not modelled, and is stated here rather than implied by "a medium whose identity changed is refused". |
 | Audit chain truncation or splice | Two-copy signed checkpoints binding product/node/boot identity, log and security epoch, monotonic sequence, previous checkpoint, current head, active versions, and generation; an operator-carried or remote anchor when available. |
 | No anchor is available (common on borrowed hardware) | Audit assurance is reported as `LOCAL_CONTINUITY_ONLY`. That state forbids live Deception, forbids disruptive actions, and forbids claiming rollback-verified finalized evidence unless a named emergency policy records explicit operator acceptance. Exports are labeled locally consistent and **not** rollback verified. This is a reduced claim, not a disabled product. |
-| Dirty volume from an unclean shutdown is repaired into a state an attacker chose | Boot-time repair is bounded and conservative; a volume that cannot be repaired to a verified state is quarantined, and the failure is visible rather than silent. |
-| Persistence migration loses data or cannot be rolled back | Migrations are backward compatible, or require a verified pre-trial snapshot and a restore path. A failed trial restores the snapshot. |
-| Passphrase loss makes evidence unrecoverable | A documented portable passphrase and recovery path exists, especially for the `UNVERIFIED_PLATFORM` case where platform-sealed key material is unavailable. Recovery authority cannot sign ordinary field checkpoints or hide a discontinuity. |
+| Dirty volume from an unclean shutdown is repaired into a state an attacker chose | **Boot does not repair.** [ADR-0010](adr/0010-persistence-key-and-migration.md) D4 removed the bounded-repair path that used to stand here: a suspected torn write stops the **whole volume** in a fail-closed quarantine, and the failure is visible rather than silent. D5 adds that nothing is described as erased. |
+| Persistence migration loses data or cannot be rolled back | Migrations are backward compatible, or require a verified pre-trial snapshot ([ADR-0010](adr/0010-persistence-key-and-migration.md) D6, D7 — no snapshot, no migration, under any acceptance). **A failed trial restores nothing**: D8 makes restoring an explicit, operator-started workflow, and what it hands back is a *candidate* — the quarantine does not lift. See [snapshot and recovery](snapshot-and-recovery.md). |
+| Passphrase loss makes evidence unrecoverable | A documented portable passphrase and recovery path is **required**, especially for the `UNVERIFIED_PLATFORM` case where platform-sealed key material is unavailable — **no such document exists in this repository today**. Recovery authority cannot sign ordinary field checkpoints or hide a discontinuity. |
 
 ## 6. Per-host commissioning
 

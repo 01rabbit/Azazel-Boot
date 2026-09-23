@@ -58,6 +58,7 @@ from azazel_boot.commissioning import (
     describe_for_operator,
 )
 from azazel_boot.inventory import InterfaceObservation
+from azazel_boot.refusals import Refused
 
 
 class PlatformTrust(Enum):
@@ -148,7 +149,7 @@ class ScreenRefusal(Enum):
     NOT_THIS_SESSION = "not_this_session"
 
 
-class ConfirmationRefused(Exception):
+class ConfirmationRefused(Refused):
     """The confirmation did not happen.
 
     The detail names the rule. It never echoes a code, a label, an identity or
@@ -308,8 +309,38 @@ class ConfirmationScreen:
             )
         object.__setattr__(self, name, value)
 
+    def __delattr__(self, name: str) -> None:
+        """The seal's other door. `__setattr__` alone left it open.
+
+        Every seal in this package gates on `getattr(self, "_sealed", False)`,
+        and `_sealed` is an ordinary slot: `del x._sealed` removes it with
+        plain syntax, no dunder call and nothing for a static scan to see, and
+        every later assignment is then an ordinary one. A review deleted it and
+        wrote a stage, a candidate, a quarantine and a sitting onto a workflow
+        by assignment — reaching `COMMITTED` with a forged candidate and an
+        **empty audit**, past the moving-fields allowlist, the stage graph and
+        the clearance interlock at once. A defence is not deeper than its floor.
+
+        `azazel_boot.media.DeviceIdentity` already refused this; the idiom was
+        in the codebase and in one class of twelve.
+        """
+
+        raise AttributeError("a ConfirmationScreen is sealed after construction")
+
     def __reduce__(self):
         raise TypeError("a ConfirmationScreen is not serialisable")
+
+    def __getstate__(self):
+        """The other door `__reduce__` closes, which was left open.
+
+        `object.__getstate__` is a public method on every object since 3.11:
+        it hands back the instance state — `__dict__`, or the slots by name —
+        with no pickling involved, so `value.__getstate__()` read every field
+        the redacting `__repr__` above exists to keep out of a log. Refusing
+        one serialisation door and not the other is refusing neither.
+        """
+
+        raise TypeError("a ConfirmationScreen does not hand back its fields")
 
     def __repr__(self) -> str:
         return (

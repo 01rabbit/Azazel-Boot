@@ -1,9 +1,16 @@
 # Recovery
 
-Status: **target contract**. Nothing here is implemented, and nothing here has
-ever been exercised. **No hardware, boot, or no-host-write evidence exists** —
-the [README](../README.md) status table says exactly that, and this document
-does not say more. Every procedure below is an intended design.
+Status: **target contract**, with two exceptions stated precisely rather than
+implied. [ADR-0010](adr/0010-persistence-key-and-migration.md) D6–D8 (snapshot,
+preflight and an operator-started recovery workflow that yields a candidate
+rather than lifting a quarantine) are implemented in software — see
+[snapshot and recovery](snapshot-and-recovery.md). Nothing else here is
+implemented, and **nothing here has ever been exercised on hardware**: no
+snapshot has been written, no migration run, no trial interrupted and no
+restore attempted, on any device. The [README](../README.md) status table
+states each module this way; this document does not say more for the parts
+that remain a design. Every procedure below not covered by D6–D8 is an
+intended design.
 
 Recovery on borrowed hardware is a different problem from recovery on a machine
 you own. The first thing to recover is not the session, the data, or the
@@ -116,9 +123,9 @@ in-flight item; it is not supposed to produce an unrecoverable volume.
 | --- | --- | --- |
 | A trial boot of a newly installed generation does not confirm healthy | automatic fallback to the prior verified generation, without an operator diagnosing anything. The trial is **one-shot**, so a machine that never completes it does not loop into it | [ADR-0003](adr/0003-immutable-ab-update.md) D1 |
 | An update fails outright | return to the prior verified generation "without losing the last valid audit checkpoint" | program plan §5 R7 exit gate |
-| Power is interrupted after any inactive-slot, boot-metadata, checkpoint, or persistence-migration write | **one verified bootable generation and the last valid audit checkpoint remain recoverable**, at every one of those write points; a failed trial restores any required persistence snapshot | program plan §5 R7 exit gate; [ADR-0003](adr/0003-immutable-ab-update.md) D2 |
+| Power is interrupted after any inactive-slot, boot-metadata, checkpoint, or persistence-migration write | **one verified bootable generation and the last valid audit checkpoint remain recoverable**, at every one of those write points; a failed trial restores **nothing** — see [ADR-0010](adr/0010-persistence-key-and-migration.md) D8 and [snapshot and recovery](snapshot-and-recovery.md) | program plan §5 R7 exit gate; [ADR-0003](adr/0003-immutable-ab-update.md) D2 |
 | Boot metadata is torn by an interrupted write | metadata is signed and **redundant** — at least two copies, so a torn write to one does not lose the ability to boot | [ADR-0003](adr/0003-immutable-ab-update.md) D1 |
-| A persistence migration fails | migrations are backward compatible, or require a verified pre-trial snapshot and a restore path; a failed trial restores the snapshot | [threat model](threat-model.md) §5; program plan §6.7 item 2 |
+| A persistence migration fails | migrations are backward compatible, or require a verified pre-trial snapshot; **a failed trial restores nothing** — [ADR-0010](adr/0010-persistence-key-and-migration.md) D8 makes restoring an explicit operator-started workflow that yields a *candidate*, and the quarantine does not lift | [threat model](threat-model.md) §5; [snapshot and recovery](snapshot-and-recovery.md); program plan §6.7 item 2 |
 
 Two things this list does **not** recover, and must not be read as recovering:
 
@@ -199,7 +206,7 @@ recoverable thing that is not the image.
 | Offline modification of persistence contents | detected at boot through integrity-protected encryption; the volume is quarantined, not repaired into use |
 | An older persistence generation is presented | generation counters bound into the signed checkpoint chain detect it; it is not silently accepted |
 | The audit chain is truncated or spliced | two-copy signed checkpoints, with an operator-carried or remote anchor when one is available |
-| The passphrase is lost | a **documented portable passphrase and recovery path** exists, and is specifically required for the `UNVERIFIED_PLATFORM` case where platform-sealed key material is unavailable (program plan §6.7 item 2; §10 SR-08). Recovery authority cannot sign ordinary field checkpoints or hide a discontinuity |
+| The passphrase is lost | a documented portable passphrase and recovery path is **required**, specifically for the `UNVERIFIED_PLATFORM` case where platform-sealed key material is unavailable (program plan §6.7 item 2; §10 SR-08). **No such document exists in this repository today** — this is an open requirement, not a shipped one. Recovery authority cannot sign ordinary field checkpoints or hide a discontinuity |
 
 Quarantine is the recurring answer, and it is chosen over repair for a reason
 worth stating: a volume repaired into use is a volume an attacker may have

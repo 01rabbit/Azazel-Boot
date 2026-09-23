@@ -74,6 +74,7 @@ from typing import Protocol
 from azazel_boot.commissioning import SessionBinding, binding_applies
 from azazel_boot.inventory import InterfaceObservation
 from azazel_boot.quarantine import Quarantine
+from azazel_boot.refusals import Refused
 
 #: D2's budget: five verification attempts in one boot.
 #:
@@ -188,7 +189,7 @@ class Refusal(Enum):
     CHANNEL_NOT_A_LOCAL_HIDDEN_PROMPT = "channel_not_a_local_hidden_prompt"
 
 
-class ModeRefused(Exception):
+class ModeRefused(Refused):
     """No mode was decided, and nothing changed.
 
     The detail names the rule. It never carries a passphrase, a key, a device
@@ -266,11 +267,44 @@ class CommissionedMode:
             "started ephemeral stays ephemeral until the machine reboots"
         )
 
+    def __delattr__(self, name: str) -> None:
+        """`__setattr__` here is unconditional, not gated on a seal.
+
+        This class has no `_sealed` slot to delete — its `__setattr__`
+        refuses **every** assignment from the moment the object exists, so
+        there was never a flag to remove. What `__delattr__` closes is
+        `del x.<field>`, which reaches the same slots by a different dunder:
+        the sibling classes that gate on `_sealed` needed this because
+        deleting the gate reopened assignment; this class needed it because
+        the field would otherwise simply be gone, and a caller reading it
+        afterward would meet `AttributeError` for the wrong reason.
+
+        `azazel_boot.media.DeviceIdentity` already refused this shape; the
+        idiom was in the codebase and in one class of twelve.
+        """
+
+        raise AttributeError(
+            "a CommissionedMode is fixed when it is decided; a session that "
+            "started ephemeral stays ephemeral until the machine reboots"
+        )
+
     def __reduce__(self):
         raise TypeError(
             "a CommissionedMode is not serialisable; it belongs to one boot, "
             "not to a file that outlives it"
         )
+
+    def __getstate__(self):
+        """The other door `__reduce__` closes, which was left open.
+
+        `object.__getstate__` is a public method on every object since 3.11:
+        it hands back the instance state — `__dict__`, or the slots by name —
+        with no pickling involved, so `value.__getstate__()` read every field
+        the redacting `__repr__` above exists to keep out of a log. Refusing
+        one serialisation door and not the other is refusing neither.
+        """
+
+        raise TypeError("a CommissionedMode does not hand back its fields")
 
     def __repr__(self) -> str:
         return f"CommissionedMode(mode={self._mode.value}, boot=<redacted>)"
@@ -339,8 +373,38 @@ class BootSession:
             )
         object.__setattr__(self, name, value)
 
+    def __delattr__(self, name: str) -> None:
+        """The seal's other door. `__setattr__` alone left it open.
+
+        Every seal in this package gates on `getattr(self, "_sealed", False)`,
+        and `_sealed` is an ordinary slot: `del x._sealed` removes it with
+        plain syntax, no dunder call and nothing for a static scan to see, and
+        every later assignment is then an ordinary one. A review deleted it and
+        wrote a stage, a candidate, a quarantine and a sitting onto a workflow
+        by assignment — reaching `COMMITTED` with a forged candidate and an
+        **empty audit**, past the moving-fields allowlist, the stage graph and
+        the clearance interlock at once. A defence is not deeper than its floor.
+
+        `azazel_boot.media.DeviceIdentity` already refused this; the idiom was
+        in the codebase and in one class of twelve.
+        """
+
+        raise AttributeError("a BootSession is sealed after construction")
+
     def __reduce__(self):
         raise TypeError("a BootSession is not serialisable")
+
+    def __getstate__(self):
+        """The other door `__reduce__` closes, which was left open.
+
+        `object.__getstate__` is a public method on every object since 3.11:
+        it hands back the instance state — `__dict__`, or the slots by name —
+        with no pickling involved, so `value.__getstate__()` read every field
+        the redacting `__repr__` above exists to keep out of a log. Refusing
+        one serialisation door and not the other is refusing neither.
+        """
+
+        raise TypeError("a BootSession does not hand back its fields")
 
     def __repr__(self) -> str:
         """Redacted, including the budget.
