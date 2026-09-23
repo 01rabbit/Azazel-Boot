@@ -2399,7 +2399,7 @@ class RecoveryWorkflow:
                 "this workflow has ended; a terminal stage is terminal, and a "
                 "further attempt is a new workflow that runs every gate again"
             )
-        # **The same gap, an eighth time, and the sharpest yet.** Every other
+        # **The same gap, a sixth time, and the sharpest yet.** Every other
         # write this method accepts pins the value's exact type before
         # trusting it in a comparison; a `_stage` write never did, and every
         # check below it — the edge table, `_REACHED_WITHOUT_GATES`, the

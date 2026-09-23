@@ -2693,6 +2693,90 @@ def test_the_no_payload_events_carry_no_payload_field_either(observations) -> No
     assert entry.fingerprint is None
 
 
+def test_the_payload_carrying_events_carry_only_their_own_payload(observations) -> None:
+    """R17 (test-suite review): round 16 pinned the *no*-payload events'
+    fields to `None`; nothing pinned the *payload*-carrying events' own
+    field to be the whole of what they carry.
+
+    `RECOVERY_STARTED`, `RECOVERY_COMPLETED` and `SNAPSHOT_WRITTEN` are
+    supposed to carry `schema_version`/`fingerprint` and nothing else —
+    `check`/`gate` are `_refuse_gate`'s and D7's own vocabulary, not
+    theirs. A mutation adding `gate=RecoveryGate.MEDIUM_FENCED` (or
+    `check=...`) to any of the three `_record`/`SnapshotAuditEntry(...)`
+    call sites survived the whole suite undetected, and the same shape
+    survived a fourth site: `_require_the_medium_now`'s `MIGRATION_REFUSED`
+    entry (the "medium moved since the preflight" path) carries `check=`
+    by design, but nothing pinned `gate`/`schema_version`/`fingerprint`
+    there to stay `None`. `may_migrate`'s own `MIGRATION_REFUSED` entry
+    already had this coverage (`test_a_refused_migration_records_the_
+    check_and_no_figure`'s exact-tuple equality); these four did not.
+    """
+
+    # RECOVERY_STARTED
+    started_flow = workflow(observations)
+    snap = descriptor()
+    started_flow.start(
+        snap, observations, media_binding_holds=True, session_id=SESSION, started_by_operator=True
+    )
+    entry = started_flow.audit()[-1]
+    assert entry.event is SnapshotAuditEvent.RECOVERY_STARTED
+    assert entry.check is None
+    assert entry.gate is None
+
+    # RECOVERY_COMPLETED
+    committed_flow = workflow(observations)
+    committed_flow.start(
+        snap, observations, media_binding_holds=True, session_id=SESSION, started_by_operator=True
+    )
+    committed_flow.open_trial(snap, observations, media_binding_holds=True, session_id=SESSION)
+    committed_flow.commit(
+        snap,
+        observations,
+        media_binding_holds=True,
+        session_id=SESSION,
+        acquisition=Opens(),
+        confirmed=True,
+    )
+    entry = committed_flow.audit()[-1]
+    assert entry.event is SnapshotAuditEvent.RECOVERY_COMPLETED
+    assert entry.check is None
+    assert entry.gate is None
+
+    # SNAPSHOT_WRITTEN
+    judged_medium, written_snapshot, verdict = a_migration()
+    ledger = MigrationLedger()
+    assert ledger.may_migrate(verdict, quarantine=judged_medium) is True
+    ledger.note_snapshot_written(verdict, written_snapshot, quarantine=judged_medium)
+    entry = ledger.audit()[-1]
+    assert entry.event is SnapshotAuditEvent.SNAPSHOT_WRITTEN
+    assert entry.check is None
+    assert entry.gate is None
+
+    # MIGRATION_REFUSED, via `_require_the_medium_now`'s medium-moved path
+    moved_medium = a_quarantine(quarantined=False)
+    moved_snapshot = descriptor()
+    moved_verdict = preflight(
+        moved_medium,
+        snapshot=moved_snapshot,
+        capacity=capacity(),
+        current_schema=1,
+        target_schema=2,
+        binding_holds=True,
+        generation_holds=True,
+        image_digest_holds=True,
+    )
+    moved_ledger = MigrationLedger()
+    moved_medium.quarantine_volume()
+    with pytest.raises(RecoveryRefused):
+        moved_ledger.may_migrate(moved_verdict, quarantine=moved_medium)
+    entry = moved_ledger.audit()[-1]
+    assert entry.event is SnapshotAuditEvent.MIGRATION_REFUSED
+    assert entry.check is PreflightCheck.VOLUME_QUARANTINED
+    assert entry.gate is None
+    assert entry.schema_version is None
+    assert entry.fingerprint is None
+
+
 def test_the_audit_repr_does_not_render_the_fingerprint(observations) -> None:
     """M9: the descriptor redacted it and the audit entry rendered it.
 
@@ -6547,7 +6631,7 @@ def test_the_pin_is_typed_when_it_is_written_not_only_when(observations) -> None
 def test_a_stage_written_through_the_seal_is_typed_before_it_is_compared(
     observations,
 ) -> None:
-    """R16 (security review): the same gap, an eighth time, and the
+    """R16 (security review): the same gap, a sixth time, and the
     sharpest yet — a `_stage` write was never typed before the edge table,
     `_REACHED_WITHOUT_GATES` and the `is RecoveryStage.COMMITTED` clearance
     check all read it.
