@@ -5208,10 +5208,32 @@ def test_two_real_threads_recording_the_same_write_record_it_once() -> None:
     same verdict, the same medium and the same judged snapshot both reached
     the check before either reached the write, both saw "not yet recorded",
     and both recorded — two `SNAPSHOT_WRITTEN` entries for one preflight
-    authorization, contradicting this method's own "once". `threading.
-    Barrier` forces both threads to reach the call at the same instant
-    rather than leaving the interleaving to chance.
+    authorization, contradicting this method's own "once".
+
+    R20 (test-suite review): a `threading.Barrier` synchronizing only the
+    top of `do_record` — before `MigrationLedger()` construction and before
+    `note_snapshot_written`'s several preceding checks
+    (`verdict_was_minted_here`, `_require_the_medium_now`,
+    `_require_every_gate_was_asked`, `_JUDGED_FIELDS.get`) — does not
+    reliably synchronize the two threads at the actual check-then-record
+    line inside `_remember_a_write_if_new`: by the time either thread gets
+    there, ordinary scheduling has desynchronized them enough that the
+    protective lock's absence is never observed. Measured: 0/50 failures
+    against `_WRITE_LOCK` fully removed. Redesigned the same way
+    `test_two_real_threads_preflighting_the_same_medium_both_stay_judged`
+    already forces its own rendezvous: `_WeakIdentityIndex.get` (a class
+    method — instances hold no writable slot to monkeypatch,
+    `__slots__ = ("__weakref__",)`) is patched to pause **each** thread's
+    first call through it *for `_SNAPSHOTS_RECORDED` specifically* — gated
+    on `self is module._SNAPSHOTS_RECORDED`, not the bare fact of being
+    called, because `note_snapshot_written` reaches `_JUDGED_BY.get(...)`
+    first, via `_require_the_medium_now`, and pausing on that unrelated
+    lookup instead misses the actual vulnerable line just as reliably as
+    the `Barrier` did. Both threads pause at the right call and are
+    released together, deterministically.
     """
+
+    import azazel_boot.snapshot as module
 
     judged_medium = a_quarantine(quarantined=False)
     snapshot = descriptor(fingerprint="snapshot-fingerprint-race")
@@ -5226,13 +5248,26 @@ def test_two_real_threads_recording_the_same_write_record_it_once() -> None:
         image_digest_holds=True,
     )
 
-    barrier = threading.Barrier(2)
+    arrived = {"a": threading.Event(), "b": threading.Event()}
+    release = threading.Event()
+    label_of = threading.local()
+    original_get = module._WeakIdentityIndex.get
+
+    def racy_get(self, obj: object) -> object | None:
+        result = original_get(self, obj)
+        label = getattr(label_of, "label", None)
+        if label is not None and self is module._SNAPSHOTS_RECORDED and not arrived[label].is_set():
+            arrived[label].set()
+            release.wait(timeout=5)
+        return result
+
+    module._WeakIdentityIndex.get = racy_get
     outcomes: dict[str, dict[str, object]] = {}
 
     def do_record(label: str) -> None:
+        label_of.label = label
         outcomes[label] = {}
         ledger = MigrationLedger()
-        barrier.wait(timeout=5)
         try:
             ledger.note_snapshot_written(verdict, snapshot, quarantine=judged_medium)
             outcomes[label]["kind"] = "recorded"
@@ -5241,11 +5276,20 @@ def test_two_real_threads_recording_the_same_write_record_it_once() -> None:
             outcomes[label]["kind"] = "refused"
             outcomes[label]["refusal"] = refused.refusal
 
-    threads = [threading.Thread(target=do_record, args=(label,)) for label in ("a", "b")]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join(timeout=5)
+    # A generous timeout, not a tight one — see the identical note in
+    # `test_two_real_threads_preflighting_the_same_medium_both_stay_judged`.
+    try:
+        a_thread = threading.Thread(target=do_record, args=("a",))
+        a_thread.start()
+        assert arrived["a"].wait(timeout=30)
+        b_thread = threading.Thread(target=do_record, args=("b",))
+        b_thread.start()
+        assert arrived["b"].wait(timeout=30)
+        release.set()
+        a_thread.join(timeout=30)
+        b_thread.join(timeout=30)
+    finally:
+        module._WeakIdentityIndex.get = original_get
 
     kinds = sorted(outcome["kind"] for outcome in outcomes.values())
     assert kinds == ["recorded", "refused"], outcomes
@@ -8838,12 +8882,26 @@ def test_two_real_threads_committing_the_same_workflow_produce_one_candidate(
     `Event.wait()` can still occasionally run that whole branch before the
     GIL offers the other a turn, which — without the lock — sometimes still
     leaves a single clean winner rather than corruption, purely by luck.
-    `sys.setswitchinterval` narrows that window, and a handful of attempts
-    (a fresh workflow each time) makes the residual chance of every one of
-    them landing on that lucky, corruption-free interleaving negligible —
-    while every attempt against the real fix takes the same deterministic,
+    `sys.setswitchinterval` narrows that window, and repeated attempts (a
+    fresh workflow each time) drive the residual chance of every one of
+    them landing on that lucky, corruption-free interleaving down — while
+    every attempt against the real fix takes the same deterministic,
     lock-blocked path every time, so no number of attempts changes its
     outcome.
+
+    R20 (test-suite review): measured directly against the lock removed —
+    `self._lock` replaced with `contextlib.nullcontext()` — a whole *run*
+    of this test (5 attempts) missed the corruption 3 times in 40 runs
+    (~7.5% of runs), not the "negligible" this docstring used to claim
+    outright. Solving `p ** 5 ≈ 0.075` for the per-*attempt* miss rate
+    gives `p ≈ 0.6`, matching independent measurements elsewhere of this
+    same final stretch. Raised from five attempts to twenty: at that
+    per-attempt rate the chance every one of twenty still lands on the
+    lucky, corruption-free interleaving is `0.6 ** 20`, on the order of
+    `4e-5` — small enough that no measured run has hit it, and every
+    attempt against the real fix still takes the same deterministic,
+    lock-blocked path regardless, so this only costs wall-clock time, not
+    correctness on the passing side.
     """
 
     def attempt() -> None:
@@ -8959,7 +9017,7 @@ def test_two_real_threads_committing_the_same_workflow_produce_one_candidate(
         assert len(flow.audit()) == 3
         assert flow.audit()[-1].event is SnapshotAuditEvent.RECOVERY_COMPLETED
 
-    for _attempt in range(5):
+    for _attempt in range(20):
         attempt()
 
 
@@ -9078,6 +9136,122 @@ def test_interrupt_does_not_deadlock_against_a_commit_blocked_in_attempt(
         SnapshotAuditEvent.RECOVERY_TRIAL_OPENED,
         SnapshotAuditEvent.RECOVERY_INTERRUPTED,
     ]
+
+
+def test_the_workflow_lock_is_reentrant_not_a_plain_lock(observations) -> None:
+    """R20 (test-suite review): the reentrant property, proved directly.
+
+    Downgrading `self._lock` from `threading.RLock` to `threading.Lock`
+    is caught by the existing suite — but only as an indefinite hang: an
+    ordinary single-threaded gate refusal reenters `_sealed_assign` via
+    `_refuse_gate` while `start`/`open_trial`/`commit` already hold the
+    lock, and a plain `Lock` deadlocks the thread against itself. That is
+    real coverage, but it surfaces as the whole test run hanging past
+    whatever external timeout stops it, not a fast, clearly diagnosed
+    failure naming what broke. This proves the property directly and
+    quickly instead: the same thread can acquire a fresh workflow's
+    `_lock` a second time, nested, without blocking — the literal
+    definition of reentrant, checked on its own rather than inferred from
+    a hang elsewhere.
+    """
+
+    flow = workflow(observations)
+    acquired_twice = threading.Event()
+
+    def reenter() -> None:
+        with flow._lock:
+            with flow._lock:
+                acquired_twice.set()
+
+    # `daemon=True`: a plain `Lock` mutant deadlocks this thread on its own
+    # second `acquire()` call, permanently — with no timeout on a bare
+    # `with lock:`. A non-daemon thread stuck like that keeps the whole
+    # interpreter alive at process exit regardless of what this test
+    # asserts, turning a clean, fast failure back into the indefinite hang
+    # this test exists to replace. Daemon means the mutant's failure is
+    # this test's own `assert`, not the test runner hanging.
+    thread = threading.Thread(target=reenter, daemon=True)
+    thread.start()
+    thread.join(timeout=5)
+    assert not thread.is_alive(), (
+        "flow._lock deadlocked on same-thread reentry; it must stay an RLock"
+    )
+    assert acquired_twice.is_set()
+
+
+def test_holds_during_an_in_flight_commit_answers_false_until_committed(
+    observations,
+) -> None:
+    """R20 (test-suite review): coverage for `holds()`'s own stated reason
+    it asks the stage as well as the object.
+
+    `holds()` reads `_stage`/`_candidate` without taking `self._lock` —
+    correct, since the values it reads are ordinary attribute loads,
+    atomic under the GIL, and `commit()` always writes the candidate
+    strictly before the stage. No existing test drives a concurrent
+    `holds()` call in the window `commit()` itself calls out for a
+    reason: the docstring's own "and the stage, not only the object" is
+    exactly a claim about *this* window, between the candidate write and
+    the stage write, and nothing exercised a call landing inside it before
+    this test.
+    """
+
+    flow = workflow(observations)
+    snap = descriptor()
+    flow.start(
+        snap, observations, media_binding_holds=True, session_id=SESSION, started_by_operator=True
+    )
+    flow.open_trial(snap, observations, media_binding_holds=True, session_id=SESSION)
+
+    candidate_written = threading.Event()
+    let_commit_continue = threading.Event()
+    original_sealed_assign = RecoveryWorkflow._sealed_assign
+
+    def racy_sealed_assign(self: RecoveryWorkflow, name: str, value: object) -> None:
+        original_sealed_assign(self, name, value)
+        if name == "_candidate":
+            candidate_written.set()
+            let_commit_continue.wait(timeout=5)
+
+    RecoveryWorkflow._sealed_assign = racy_sealed_assign
+    commit_outcome: dict[str, object] = {}
+    holds_result: dict[str, object] = {}
+    try:
+
+        def do_commit() -> None:
+            candidate = flow.commit(
+                snap,
+                observations,
+                media_binding_holds=True,
+                session_id=SESSION,
+                acquisition=Opens(),
+                confirmed=True,
+            )
+            commit_outcome["candidate"] = candidate
+
+        committer = threading.Thread(target=do_commit)
+        committer.start()
+        assert candidate_written.wait(timeout=5)
+        # The candidate is written; the stage is still `TRIAL_OPEN`. A
+        # third thread's `holds()` call in this exact window is what the
+        # docstring's "and the stage, not only the object" is about.
+        assert flow._candidate is not None
+        assert flow.stage is RecoveryStage.TRIAL_OPEN
+
+        def do_holds() -> None:
+            holds_result["value"] = flow.holds(flow._candidate)
+
+        reader = threading.Thread(target=do_holds)
+        reader.start()
+        reader.join(timeout=5)
+        let_commit_continue.set()
+        committer.join(timeout=5)
+    finally:
+        RecoveryWorkflow._sealed_assign = original_sealed_assign
+
+    assert holds_result["value"] is False
+    assert flow.stage is RecoveryStage.COMMITTED
+    assert flow.holds(commit_outcome["candidate"]) is True
 
 
 def test_a_real_second_thread_interrupting_before_commits_candidate_is_written_stays_in_vocabulary(
