@@ -1004,6 +1004,29 @@ def _require_an_opaque_value(name: str, value: str) -> None:
     NFKC-normalized form differs from itself is refused outright, which is
     the conservative bound an "opaque token" (akin to a hex digest) can
     afford that free text could not.
+
+    **NFKC-stability is not NFD-stability.** A round-36 security review
+    found one character — `≠`, NOT EQUAL TO (U+2260) — that is `Sm`, not
+    `Cc`/`Cf`/`Zs`, is neither a forbidden literal nor NFKC-unstable, but
+    whose canonical decomposition (what NFD and NFKD use, not NFC/NFKC) is
+    the literal `=` plus a combining overlay. `"generation≠17"` passed every
+    check above unchanged, yet `unicodedata.normalize("NFD", ...)` — an
+    equally ordinary normalization step, no more exotic than the NFKC this
+    function already performs — reconstructs the literal `=` and a plain
+    `str.split("=")` on the result cuts it into two fields, the same shape
+    round-11's `"generation=17"` test case exists to refuse. Brute-forcing
+    every codepoint found `≠` to be the only one with this exact shape (no
+    equivalent decomposes to a forbidden `/`, `\\`, space or tab), and found
+    no codepoint that is NFKC-stable but NFC-unstable, so checking NFD in
+    addition to NFKC — rather than all four normal forms — closes the whole
+    family: NFC-stability follows from NFKC-stability, and an NFKD-only
+    decomposition is still caught because NFD is a strict subset of what
+    NFKD decomposes. The same review found lone surrogates (category `Cs`)
+    pass every check unchanged — not a tokenization bypass, but ill-formed
+    text a strict-UTF-8 downstream consumer cannot serialize, breaking the
+    "opaque token" contract a different way. `Cs` joins the category tuple
+    for the same reason `Zs` did: the general case a specific instance was
+    never asked to cover.
     """
 
     if len(value) > 128:
@@ -1019,16 +1042,17 @@ def _require_an_opaque_value(name: str, value: str) -> None:
                 "a line of text is not one"
             )
     for character in value:
-        if unicodedata.category(character) in ("Cc", "Cf", "Zs"):
+        if unicodedata.category(character) in ("Cc", "Cf", "Zs", "Cs"):
             raise TypeError(
-                f"{name} must be an opaque token; a control, format or "
-                "space character is not one"
+                f"{name} must be an opaque token; a control, format, space "
+                "or surrogate character is not one"
             )
-    if unicodedata.normalize("NFKC", value) != value:
-        raise TypeError(
-            f"{name} must be an opaque token; a value that normalises to a "
-            "different one is not opaque"
-        )
+    for form in ("NFKC", "NFD"):
+        if unicodedata.normalize(form, value) != value:
+            raise TypeError(
+                f"{name} must be an opaque token; a value that normalises to "
+                "a different one is not opaque"
+            )
 
 
 def _require_real_observations(observations: object) -> None:

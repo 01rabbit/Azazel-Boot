@@ -9343,6 +9343,22 @@ def test_a_fingerprint_is_an_opaque_token_and_not_a_rendered_record() -> None:
         # the category tuple would pass this specific case even though the
         # ideographic-space cases above still catch it via NFKC.
         "medium_usb-SN-AA11BB22 host_quarantined-laptop-01",
+        # R36 (security review): NFKC-stability is not NFD-stability. "≠"
+        # (U+2260, NOT EQUAL TO) is category `Sm`, not a forbidden literal,
+        # and NFKC-stable -- but its canonical decomposition (what NFD uses,
+        # not NFC/NFKC) is a literal "=" plus a combining overlay. This value
+        # passed every check above unchanged; normalising it with NFD
+        # reconstructs the literal "=" and a plain `str.split("=")` on the
+        # result cuts it into two fields, the same shape R11's
+        # "generation=17" case above exists to refuse.
+        "generation≠17",
+        # R36 (security review): a lone surrogate (category `Cs`) is not a
+        # tokenization bypass, but ill-formed text a strict-UTF-8 downstream
+        # consumer cannot serialise -- breaking the "opaque token" contract a
+        # different way. Passed every check above unchanged before `Cs`
+        # joined the category tuple. Written as a Python escape, not a raw
+        # surrogate byte, since this source file is itself valid UTF-8.
+        "token\ud800",
     ):
         with pytest.raises(TypeError, match="opaque"):
             descriptor(fingerprint=rejected)

@@ -186,6 +186,24 @@ MARK (one of the only two `Zs` characters NFKC itself leaves unchanged)
 isolates the category check, and a fullwidth-digit value isolates the NFKC
 check, the same way earlier rounds isolated `"="` from space/slash.
 
+**NFKC-stability is not NFD-stability.** A round-36 security review found
+one character — `≠`, NOT EQUAL TO (U+2260) — that is `Sm`, not a forbidden
+literal, and NFKC-stable, but whose canonical decomposition (what NFD and
+NFKD use, not NFC/NFKC) is a literal `=` plus a combining overlay. It
+passed every check above unchanged; normalising it with NFD reconstructs
+the literal `=`, the same shape the round-11 `"generation=17"` case exists
+to refuse. A brute-force sweep of every codepoint found `≠` to be the only
+one with this exact shape, and found no codepoint that is NFKC-stable but
+NFC-unstable — so checking NFD in addition to NFKC closes the whole
+family without needing all four normal forms: NFC-stability already
+follows from NFKC-stability, and an NFKD-only decomposition is still
+caught because NFD is a strict subset of what NFKD decomposes. The same
+review found lone surrogates (`Cs`) pass every check unchanged — not a
+tokenization bypass, but ill-formed text a strict-UTF-8 downstream
+consumer cannot serialise, breaking the "opaque token" contract a
+different way. `Cs` joined the category tuple for the same reason `Zs`
+did: the general case a specific instance was never asked to cover.
+
 ## Preflight (D7)
 
 Read-only **by construction**: it takes reports and returns a verdict. It has
