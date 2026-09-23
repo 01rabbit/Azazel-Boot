@@ -976,6 +976,29 @@ def _require_an_actual_bool(name: str, value: object) -> None:
         raise TypeError(f"{name} must be a bool; a truthy object is not a check")
 
 
+#: Guards `_remember_the_medium`'s check-then-record over `_JUDGED_BY` and
+#: `_JUDGED_SOMETHING` — the sibling of `_WRITE_LOCK`, added at round
+#: nineteen. `preflight()` is documented elsewhere in this module as "free,
+#: read-only and unlimited," an explicit invitation to call it as often and
+#: as concurrently as a caller likes; two real threads doing exactly that
+#: over the *same* `Quarantine`, the first time it is judged, could each see
+#: `_JUDGED_BY.get(quarantine) is None`, each build their own fresh
+#: `_WeakSet`, and each write it — the second write silently discarding the
+#: first thread's set, and the verdict it held, from `_JUDGED_BY`.
+#: `_MINTED_HERE` still answers for the dropped verdict (a different index,
+#: written earlier in `_mint`, unaffected by this race), so
+#: `verdict_was_minted_here` stays `True` for it — but `_medium_was_judged`
+#: then answers `False` for a verdict that genuinely did judge exactly this
+#: medium, and `may_migrate`/`note_snapshot_written` refuse it with
+#: `MEDIUM_MOVED_SINCE_THE_PREFLIGHT`, a classification that is simply false.
+#: Fails closed — a legitimate migration is wrongly refused, never wrongly
+#: permitted — but it is still a real misclassification of exactly the kind
+#: D7's checks exist to get right, so it is fixed the same way
+#: `_SNAPSHOTS_RECORDED`'s check-then-record was: one critical section, one
+#: lock.
+_JUDGED_LOCK: threading.Lock = threading.Lock()
+
+
 def _remember_the_medium(verdict: PreflightVerdict, quarantine: Quarantine) -> None:
     """The index's one write, named so that the travel is visible.
 
@@ -989,12 +1012,13 @@ def _remember_the_medium(verdict: PreflightVerdict, quarantine: Quarantine) -> N
     not look at.
     """
 
-    judged = _JUDGED_BY.get(quarantine)
-    if judged is None:
-        judged = _WeakSet()
-        _JUDGED_BY[quarantine] = judged
-    judged.add(verdict)
-    _JUDGED_SOMETHING.add(verdict)
+    with _JUDGED_LOCK:
+        judged = _JUDGED_BY.get(quarantine)
+        if judged is None:
+            judged = _WeakSet()
+            _JUDGED_BY[quarantine] = judged
+        judged.add(verdict)
+        _JUDGED_SOMETHING.add(verdict)
 
 
 def _a_medium_was_judged(verdict: PreflightVerdict) -> bool:
@@ -1028,11 +1052,11 @@ def _medium_was_judged(verdict: PreflightVerdict, quarantine: Quarantine) -> boo
     return judged is not None and verdict in judged
 
 
-#: Guards the one critical section this module has: check-then-record over
-#: `_SNAPSHOTS_RECORDED`. It was two separate module functions —
-#: `_a_write_is_recorded` then `_remember_a_write` — called one after the
-#: other from `note_snapshot_written`, with nothing between the check and the
-#: record but ordinary Python statements a second thread can land between. A
+#: Guards one check-then-record critical section: `_SNAPSHOTS_RECORDED`. It
+#: was two separate module functions — `_a_write_is_recorded` then
+#: `_remember_a_write` — called one after the other from
+#: `note_snapshot_written`, with nothing between the check and the record but
+#: ordinary Python statements a second thread can land between. A
 #: round-eighteen review drove two real threads through `note_snapshot_written`
 #: for the same verdict, the same medium and the same judged values, and both
 #: observed "not yet recorded" before either wrote — two `SNAPSHOT_WRITTEN`
@@ -1043,6 +1067,17 @@ def _medium_was_judged(verdict: PreflightVerdict, quarantine: Quarantine) -> boo
 #: really was recorded — so a re-check that only changes which exception type
 #: escapes cannot fix it. It needs the check and the record to be one
 #: uninterruptible act, which is what a lock is for.
+#:
+#: **Not "the one critical section this module has" — a round-nineteen
+#: doctrine review caught an earlier draft of this comment overclaiming
+#: that.** `_remember_the_medium`, below, has the identical shape over the
+#: *other* module-side index and needed the same fix; see `_JUDGED_LOCK`.
+#: The two are separate locks rather than one shared lock because they guard
+#: independent state (`_SNAPSHOTS_RECORDED` here, `_JUDGED_BY`/
+#: `_JUDGED_SOMETHING` there) reached from independent call paths
+#: (`note_snapshot_written` here, every `preflight()` call there) — sharing
+#: one lock would serialise those two unrelated operations against each
+#: other for no reason this module's own state needs.
 _WRITE_LOCK: threading.Lock = threading.Lock()
 
 
@@ -1721,6 +1756,7 @@ class RecoveryWorkflow:
         "_candidate",
         "_cleared",
         "_sealed",
+        "_lock",
     )
 
     def __init__(
@@ -1777,6 +1813,35 @@ class RecoveryWorkflow:
         self._cleared: object | None = None
         self._candidate: RecoveryCandidate | None = None
         self._audit: list[SnapshotAuditEntry] = []
+        # **One workflow, one operation at a time — a round-nineteen fix.**
+        # Round eighteen made a *losing* thread's write meet `RecoveryRefused`
+        # instead of a bare `AttributeError`, but it never serialised the
+        # winners: two threads racing `commit()` (or any pair of `start`/
+        # `open_trial`/`commit`/`interrupt`) could both pass every check
+        # before either wrote anything, because nothing stopped both from
+        # reading the same pre-write state at once. A round-nineteen review
+        # drove this directly — two concurrent, entirely legitimate
+        # `commit()` calls on one `TRIAL_OPEN` workflow — and got a genuine
+        # double commit: two honestly-minted candidates, two
+        # `RECOVERY_COMPLETED` audit entries for a workflow whose whole
+        # design is one-way and audited once, and one of the two candidates
+        # returned from a `commit()` call that did **not** raise failing
+        # `holds()` anyway, because the losing write clobbered `_candidate`
+        # after the winner had already read it back. A second, unrelated bare
+        # `AttributeError` leak was found the same way, through `_cleared`
+        # being read in one statement and reset in a later one, both inside
+        # `_sealed_assign`'s own `_stage` branch. Reentrant, an `_RLock`
+        # around each of `start`/`open_trial`/`commit`/`interrupt`'s whole
+        # body (and, for a caller who reaches it directly, `_sealed_assign`'s
+        # own body) makes each of them a single atomic operation per
+        # workflow, so no second call — same method or a different one, same
+        # thread or a different one — ever observes state a first call has
+        # not finished changing. The same thread reentering through
+        # `_refuse_gate` (which calls back into `_sealed_assign`) or through
+        # `attempt()` calling back into `interrupt()` still succeeds, the
+        # same as before this lock existed: an `RLock` only blocks a
+        # *different* thread.
+        object.__setattr__(self, "_lock", threading.RLock())
         object.__setattr__(self, "_sealed", True)
 
     def __setattr__(self, name: str, value: object) -> None:
@@ -1855,68 +1920,69 @@ class RecoveryWorkflow:
         reads a screen.
         """
 
-        _require_a_real_snapshot(snapshot)
-        _require_real_observations(observations)
-        _require_an_actual_bool("started_by_operator", started_by_operator)
-        self._require_stage(RecoveryStage.NOT_STARTED)
-        self._require_this_sitting(session_id)
-        if not started_by_operator:
-            # Audited, and terminal. It used to take the silent `_refuse`, so
-            # three refused automatic starts left `stage=NOT_STARTED, audit=()`
-            # and a real start then succeeded with no record that D8's central
-            # prohibition had been exercised — the same reasoning that made a
-            # snapshot substitution terminal and audited. A start nothing
-            # started is an event, not a typo.
-            self._sealed_assign("_stage", RecoveryStage.REFUSED)
-            self._record(SnapshotAuditEvent.RECOVERY_REFUSED)
-            self._refuse(
-                Refusal.RECOVERY_NOT_STARTED_BY_AN_OPERATOR,
-                "a restore is something an operator begins deliberately; "
-                "nothing here starts one on its own, retries one, or resumes "
-                "one in the background",
+        with self._lock:
+            _require_a_real_snapshot(snapshot)
+            _require_real_observations(observations)
+            _require_an_actual_bool("started_by_operator", started_by_operator)
+            self._require_stage(RecoveryStage.NOT_STARTED)
+            self._require_this_sitting(session_id)
+            if not started_by_operator:
+                # Audited, and terminal. It used to take the silent `_refuse`, so
+                # three refused automatic starts left `stage=NOT_STARTED, audit=()`
+                # and a real start then succeeded with no record that D8's central
+                # prohibition had been exercised — the same reasoning that made a
+                # snapshot substitution terminal and audited. A start nothing
+                # started is an event, not a typo.
+                self._sealed_assign("_stage", RecoveryStage.REFUSED)
+                self._record(SnapshotAuditEvent.RECOVERY_REFUSED)
+                self._refuse(
+                    Refusal.RECOVERY_NOT_STARTED_BY_AN_OPERATOR,
+                    "a restore is something an operator begins deliberately; "
+                    "nothing here starts one on its own, retries one, or resumes "
+                    "one in the background",
+                )
+            self._require_the_gates(
+                snapshot,
+                observations,
+                session_id=session_id,
+                media_binding_holds=media_binding_holds,
+                acquisition=None,
+                confirmed=None,
             )
-        self._require_the_gates(
-            snapshot,
-            observations,
-            session_id=session_id,
-            media_binding_holds=media_binding_holds,
-            acquisition=None,
-            confirmed=None,
-        )
 
-        # **The values, and only the values.** There was a `_snapshot` slot
-        # here as well, holding the caller's own descriptor. It was written in
-        # `__init__` and in `start` and **read nowhere** — a field whose
-        # presence implies a check that does not exist, which is the sin this
-        # module names in `_require_this_sitting`. A review changed the
-        # commit's one line from `self._pinned` to `self._snapshot` and the
-        # suite stayed green: the workflow committed on a descriptor mutated
-        # from inside the passphrase prompt, minted a candidate for schema 99,
-        # and recorded a `recovery_completed` naming it, with no
-        # `RECOVERY_SNAPSHOT_SUBSTITUTED` anywhere — because the substitution
-        # check compares the argument against `_pinned` and never looked at
-        # `_snapshot` at all. The slot is gone rather than compared: there is
-        # nothing left to swap the mint over to.
-        #
-        # The **values**, not the object. `held = self._snapshot` was the same
-        # object the caller passed in and passed again, so the four field
-        # comparisons compared an object with itself: a review mutated the
-        # frozen descriptor in place between the stages, committed on a
-        # different schema version and fingerprint, and the audit recorded two
-        # fingerprints across one workflow with no substitution between them.
-        # A **copy**, built here from the values read at this moment. Holding
-        # the caller's object made the comparison a self-comparison; holding a
-        # tuple of its fields fixed that, and this goes one further so that
-        # what the commit mints comes from an object the caller never had a
-        # reference to.
-        self._sealed_assign("_pinned", SnapshotDescriptor(*_fields_of(snapshot)))
-        self._require_an_unfenced_medium()
-        self._sealed_assign("_stage", RecoveryStage.PREFLIGHT_PASSED)
-        self._record(
-            SnapshotAuditEvent.RECOVERY_STARTED,
-            schema_version=snapshot.schema_version,
-            fingerprint=snapshot.fingerprint,
-        )
+            # **The values, and only the values.** There was a `_snapshot` slot
+            # here as well, holding the caller's own descriptor. It was written in
+            # `__init__` and in `start` and **read nowhere** — a field whose
+            # presence implies a check that does not exist, which is the sin this
+            # module names in `_require_this_sitting`. A review changed the
+            # commit's one line from `self._pinned` to `self._snapshot` and the
+            # suite stayed green: the workflow committed on a descriptor mutated
+            # from inside the passphrase prompt, minted a candidate for schema 99,
+            # and recorded a `recovery_completed` naming it, with no
+            # `RECOVERY_SNAPSHOT_SUBSTITUTED` anywhere — because the substitution
+            # check compares the argument against `_pinned` and never looked at
+            # `_snapshot` at all. The slot is gone rather than compared: there is
+            # nothing left to swap the mint over to.
+            #
+            # The **values**, not the object. `held = self._snapshot` was the same
+            # object the caller passed in and passed again, so the four field
+            # comparisons compared an object with itself: a review mutated the
+            # frozen descriptor in place between the stages, committed on a
+            # different schema version and fingerprint, and the audit recorded two
+            # fingerprints across one workflow with no substitution between them.
+            # A **copy**, built here from the values read at this moment. Holding
+            # the caller's object made the comparison a self-comparison; holding a
+            # tuple of its fields fixed that, and this goes one further so that
+            # what the commit mints comes from an object the caller never had a
+            # reference to.
+            self._sealed_assign("_pinned", SnapshotDescriptor(*_fields_of(snapshot)))
+            self._require_an_unfenced_medium()
+            self._sealed_assign("_stage", RecoveryStage.PREFLIGHT_PASSED)
+            self._record(
+                SnapshotAuditEvent.RECOVERY_STARTED,
+                schema_version=snapshot.schema_version,
+                fingerprint=snapshot.fingerprint,
+            )
 
     def open_trial(
         self,
@@ -1934,23 +2000,24 @@ class RecoveryWorkflow:
         the trial is the substitution this whole design exists to notice.
         """
 
-        _require_a_real_snapshot(snapshot)
-        _require_real_observations(observations)
-        self._require_stage(RecoveryStage.PREFLIGHT_PASSED)
-        self._require_this_sitting(session_id)
-        self._require_the_same_snapshot(snapshot)
-        self._require_the_gates(
-            snapshot,
-            observations,
-            session_id=session_id,
-            media_binding_holds=media_binding_holds,
-            acquisition=None,
-            confirmed=None,
-        )
+        with self._lock:
+            _require_a_real_snapshot(snapshot)
+            _require_real_observations(observations)
+            self._require_stage(RecoveryStage.PREFLIGHT_PASSED)
+            self._require_this_sitting(session_id)
+            self._require_the_same_snapshot(snapshot)
+            self._require_the_gates(
+                snapshot,
+                observations,
+                session_id=session_id,
+                media_binding_holds=media_binding_holds,
+                acquisition=None,
+                confirmed=None,
+            )
 
-        self._require_an_unfenced_medium()
-        self._sealed_assign("_stage", RecoveryStage.TRIAL_OPEN)
-        self._record(SnapshotAuditEvent.RECOVERY_TRIAL_OPENED)
+            self._require_an_unfenced_medium()
+            self._sealed_assign("_stage", RecoveryStage.TRIAL_OPEN)
+            self._record(SnapshotAuditEvent.RECOVERY_TRIAL_OPENED)
 
     def commit(
         self,
@@ -1975,81 +2042,95 @@ class RecoveryWorkflow:
         confirmation.
         """
 
-        _require_a_real_snapshot(snapshot)
-        _require_real_observations(observations)
-        _require_an_acquisition(acquisition)
-        _require_an_actual_bool("confirmed", confirmed)
-        self._require_stage(RecoveryStage.TRIAL_OPEN)
-        self._require_this_sitting(session_id)
-        self._require_the_same_snapshot(snapshot)
-        self._require_the_gates(
-            snapshot,
-            observations,
-            session_id=session_id,
-            media_binding_holds=media_binding_holds,
-            acquisition=acquisition,
-            confirmed=confirmed,
-        )
-        # **Again, after the prompt.** The two quarantine flags were re-read
-        # after `attempt()` and the pin was not, so a review mutated the frozen
-        # descriptor from inside the acquisition and committed on a different
-        # schema version and fingerprint — reaching `COMMITTED`, minting a
-        # candidate `candidate_applies_to` accepted, and recording a
-        # `recovery_completed` naming a snapshot no gate had judged, with no
-        # `RECOVERY_SNAPSHOT_SUBSTITUTED` anywhere. The substitution this whole
-        # design exists to notice, through the one wait in the function.
-        self._require_the_same_snapshot(snapshot)
-        # `attempt()` is caller code called mid-gate, and a review interrupted
-        # the workflow from inside it. The stage move then raised
-        # `AttributeError` from the seal — outside this module's refusal
-        # vocabulary, so a caller writing `except RecoveryRefused` crashed.
-        # `WORKFLOW_ALREADY_FINISHED` exists for exactly this.
-        self._require_stage(RecoveryStage.TRIAL_OPEN)
+        with self._lock:
+            _require_a_real_snapshot(snapshot)
+            _require_real_observations(observations)
+            _require_an_acquisition(acquisition)
+            _require_an_actual_bool("confirmed", confirmed)
+            self._require_stage(RecoveryStage.TRIAL_OPEN)
+            self._require_this_sitting(session_id)
+            self._require_the_same_snapshot(snapshot)
+            self._require_the_gates(
+                snapshot,
+                observations,
+                session_id=session_id,
+                media_binding_holds=media_binding_holds,
+                acquisition=acquisition,
+                confirmed=confirmed,
+            )
+            # **Again, after the prompt.** The two quarantine flags were re-read
+            # after `attempt()` and the pin was not, so a review mutated the frozen
+            # descriptor from inside the acquisition and committed on a different
+            # schema version and fingerprint — reaching `COMMITTED`, minting a
+            # candidate `candidate_applies_to` accepted, and recording a
+            # `recovery_completed` naming a snapshot no gate had judged, with no
+            # `RECOVERY_SNAPSHOT_SUBSTITUTED` anywhere. The substitution this whole
+            # design exists to notice, through the one wait in the function.
+            self._require_the_same_snapshot(snapshot)
+            # `attempt()` is caller code called mid-gate, and a review interrupted
+            # the workflow from inside it. The stage move then raised
+            # `AttributeError` from the seal — outside this module's refusal
+            # vocabulary, so a caller writing `except RecoveryRefused` crashed.
+            # `WORKFLOW_ALREADY_FINISHED` exists for exactly this.
+            self._require_stage(RecoveryStage.TRIAL_OPEN)
 
-        # The candidate is minted and held **before** the stage becomes
-        # terminal, because `_sealed_assign` refuses to move anything once it
-        # is. The order is the rule's, not a preference: a terminal workflow
-        # moves nothing, including the field that would record its own answer.
-        # From `_pinned`, not from the argument: the values judged at the
-        # start, held in an object the caller never had. Re-reading the
-        # argument here is what let a mutation during the prompt into both the
-        # candidate and the audit.
-        # **Before the candidate is minted**, not between the two writes. A
-        # refusal after the candidate is held would leave a workflow that is
-        # not `COMMITTED` holding one, which is why `holds` asks the stage as
-        # well as the object.
-        self._require_an_unfenced_medium()
-        judged = self._pinned
-        minted = RecoveryCandidate(judged.schema_version, judged.fingerprint)
-        self._sealed_assign("_candidate", minted)
-        # **A real second thread, not only reentrant caller code.** Every
-        # re-check above this line is for a single-threaded reentrancy
-        # window — `attempt()` calling back into caller code while this
-        # method waits. A round-seventeen review found a genuine two-thread
-        # race in the different, narrower window that opens right here:
-        # nothing stops an `interrupt()` running on another thread between
-        # the candidate write above and the stage write below. It closed
-        # that window with a `_require_stage(TRIAL_OPEN)` re-check
-        # immediately above this comment — and a round-eighteen review
-        # proved a re-check can never fully close it: the re-check and the
-        # write it guards are still two separate statements, so the same
-        # race just re-opens one call-frame narrower, forever. There is no
-        # finite number of re-checks that closes a gap of this shape.
-        #
-        # The close moved to `_sealed_assign` itself instead: its own
-        # terminal-stage guard now answers `RecoveryRefused` rather than a
-        # bare `AttributeError`, so the write below is safe whether or not
-        # a race lands in front of it, without needing a re-check here at
-        # all. The round-seventeen re-check is gone rather than kept
-        # alongside it — a guard that cannot fail is not a guard, and this
-        # module says so about `_require_this_sitting`.
-        self._sealed_assign("_stage", RecoveryStage.COMMITTED)
-        self._record(
-            SnapshotAuditEvent.RECOVERY_COMPLETED,
-            schema_version=judged.schema_version,
-            fingerprint=judged.fingerprint,
-        )
-        return minted
+            # The candidate is minted and held **before** the stage becomes
+            # terminal, because `_sealed_assign` refuses to move anything once it
+            # is. The order is the rule's, not a preference: a terminal workflow
+            # moves nothing, including the field that would record its own answer.
+            # From `_pinned`, not from the argument: the values judged at the
+            # start, held in an object the caller never had. Re-reading the
+            # argument here is what let a mutation during the prompt into both the
+            # candidate and the audit.
+            # **Before the candidate is minted**, not between the two writes. A
+            # refusal after the candidate is held would leave a workflow that is
+            # not `COMMITTED` holding one, which is why `holds` asks the stage as
+            # well as the object.
+            self._require_an_unfenced_medium()
+            judged = self._pinned
+            minted = RecoveryCandidate(judged.schema_version, judged.fingerprint)
+            self._sealed_assign("_candidate", minted)
+            # **A real second thread, not only reentrant caller code.** Every
+            # re-check above this line is for a single-threaded reentrancy
+            # window — `attempt()` calling back into caller code while this
+            # method waits. A round-seventeen review found a genuine two-thread
+            # race in the different, narrower window that opens right here:
+            # nothing stops an `interrupt()` running on another thread between
+            # the candidate write above and the stage write below. It closed
+            # that window with a `_require_stage(TRIAL_OPEN)` re-check
+            # immediately above this comment — and a round-eighteen review
+            # proved a re-check can never fully close it: the re-check and the
+            # write it guards are still two separate statements, so the same
+            # race just re-opens one call-frame narrower, forever. There is no
+            # finite number of re-checks that closes a gap of this shape.
+            #
+            # Round eighteen moved the close to `_sealed_assign` itself: its
+            # own terminal-stage guard answers `RecoveryRefused` rather than
+            # a bare `AttributeError`, so a *losing* thread's write is safe
+            # whether or not a race lands in front of it, without needing a
+            # re-check here at all. The round-seventeen re-check is gone
+            # rather than kept alongside it — a guard that cannot fail is
+            # not a guard, and this module says so about
+            # `_require_this_sitting`.
+            #
+            # **That was still not the actual close.** A round-nineteen
+            # review found it answers "which exception a loser meets", not
+            # "can two winners both write" — two genuinely concurrent
+            # `commit()` calls, both passing every check before either
+            # reached this line, both write here, and round eighteen's own
+            # guard has nothing to say about that, because neither call is
+            # racing a workflow that has *already* gone terminal; both are
+            # racing to be the one that does. `self._lock` (`__init__`,
+            # above), held for this whole method's body, is what actually
+            # makes this line safe: a second call, on any thread, cannot
+            # even be inside `commit` while this one is.
+            self._sealed_assign("_stage", RecoveryStage.COMMITTED)
+            self._record(
+                SnapshotAuditEvent.RECOVERY_COMPLETED,
+                schema_version=judged.schema_version,
+                fingerprint=judged.fingerprint,
+            )
+            return minted
 
     def holds(self, candidate: RecoveryCandidate) -> bool:
         """Whether this workflow minted that candidate. Checked by identity.
@@ -2086,16 +2167,17 @@ class RecoveryWorkflow:
         chose.
         """
 
-        _require_an_exact_str("session_id", session_id)
-        if self._stage in TERMINAL_STAGES:
-            self._refuse(
-                Refusal.WORKFLOW_ALREADY_FINISHED,
-                "this workflow has ended; a further attempt is a new workflow "
-                "that runs every gate again",
-            )
-        self._require_this_sitting(session_id)
-        self._sealed_assign("_stage", RecoveryStage.INTERRUPTED)
-        self._record(SnapshotAuditEvent.RECOVERY_INTERRUPTED)
+        with self._lock:
+            _require_an_exact_str("session_id", session_id)
+            if self._stage in TERMINAL_STAGES:
+                self._refuse(
+                    Refusal.WORKFLOW_ALREADY_FINISHED,
+                    "this workflow has ended; a further attempt is a new workflow "
+                    "that runs every gate again",
+                )
+            self._require_this_sitting(session_id)
+            self._sealed_assign("_stage", RecoveryStage.INTERRUPTED)
+            self._record(SnapshotAuditEvent.RECOVERY_INTERRUPTED)
 
     # -- internals ---------------------------------------------------------
 
@@ -2415,203 +2497,220 @@ class RecoveryWorkflow:
         of them.
         """
 
-        if name not in _MOVES_DURING_A_RECOVERY:
-            raise AttributeError(
-                "only the stage, the snapshot's pinned fields and the "
-                "candidate move; the quarantine, the binding and the sitting "
-                "cannot be replaced"
-            )
-        # **`_refuse`, not a raised `AttributeError` — round eighteen, the
-        # same move round ten made for the fence check below.** Round
-        # seventeen closed a genuine two-thread race here (`commit`'s
-        # candidate-write racing an `interrupt()`) by re-asking the stage
-        # immediately before the final write, and a round-eighteen review
-        # proved that shape can never fully close: `_require_stage` and the
-        # write it guards are two separate statements, so the race just
-        # narrows one call-frame at a time and a second thread can always
-        # land in whatever gap is left, for `commit`'s candidate write, for
-        # `start`'s and `open_trial`'s stage writes, and for `interrupt`
-        # racing a second call to itself. Every one of those writes passes
-        # through here, and this is the last statement before any of them
-        # lands — so the fix is not another re-check upstream, it is this
-        # check answering in this module's own vocabulary. A caller who
-        # correctly wrote `except RecoveryRefused:` used to crash on
-        # whichever of those four races it lost; now it is refused, the
-        # same `WORKFLOW_ALREADY_FINISHED` `interrupt` and `_require_stage`
-        # already answer for the identical fact reached without a race.
-        # Nothing here grants anything either way: the write this call
-        # would have made still never happens, `holds()` still asks the
-        # stage as well as the object, and which thread's write lands
-        # first is still nondeterministic — only which vocabulary the
-        # loser meets has changed.
-        if self._stage in TERMINAL_STAGES:
-            self._refuse(
-                Refusal.WORKFLOW_ALREADY_FINISHED,
-                "this workflow has ended; a further attempt is a new workflow "
-                "that runs every gate again",
-            )
-        # **The same gap, a sixth time, and the sharpest yet.** Every other
-        # write this method accepts pins the value's exact type before
-        # trusting it in a comparison; a `_stage` write never did, and every
-        # check below it — the edge table, `_REACHED_WITHOUT_GATES`, the
-        # `is RecoveryStage.COMMITTED` branch that decides which clearance is
-        # demanded — reads `value` before its type is known. A round-sixteen
-        # review built a stand-in answering `==`/`in`/`.value` like
-        # `RecoveryStage.COMMITTED` but failing `is` it, and slid through the
-        # *permissive* clearance branch below (the one `open_trial`'s own
-        # transition already satisfies) without ever asking D8's gates. The
-        # `Quarantine` was never touched and no candidate was minted — `holds`
-        # and `candidate_applies_to` still ask `is`, which this could not
-        # spoof — but `flow.stage` then answered `== COMMITTED` for any
-        # caller who wrote the ordinary comparison instead of this module's
-        # own insisted-on `is`, while the audit stayed at
-        # `RECOVERY_TRIAL_OPENED` forever and the workflow was permanently
-        # stuck. Pinned here, the same as every other value this method
-        # accepts.
-        if name == "_stage" and type(value) is not RecoveryStage:
-            raise AttributeError("a stage must be a RecoveryStage exactly")
-        if name == "_stage" and (self._stage.value, value.value) not in _STAGE_EDGES:
-            raise AttributeError(
-                "the stage travels its own graph; a jump between stages is not "
-                "a stage this workflow reached"
-            )
-        # A stage the gates lead to is reached by passing them. `REFUSED` and
-        # `INTERRUPTED` are the two a refusal and an interruption reach, and
-        # they are the only ones a workflow moves to without a clearance.
-        if name == "_stage" and value not in _REACHED_WITHOUT_GATES:
-            # `COMMITTED` spends the clearance only a full D8 run issues; the
-            # earlier stages accept either, because they legitimately ask no
-            # acquisition and no confirmation.
-            wanted = (
-                (_GATES_JUST_PASSED,)
-                if value is RecoveryStage.COMMITTED
-                else (_GATES_JUST_PASSED, _PRE_TRIAL_GATES_PASSED)
-            )
-            if self._cleared not in wanted:
+        with self._lock:
+            if name not in _MOVES_DURING_A_RECOVERY:
                 raise AttributeError(
-                    "this stage is reached by passing the gates; a workflow "
-                    "does not arrive at one it did not pass"
+                    "only the stage, the snapshot's pinned fields and the "
+                    "candidate move; the quarantine, the binding and the sitting "
+                    "cannot be replaced"
                 )
-            # **And the fence, once more, at the moment the clearance is
-            # spent.** A clearance is issued when the gates pass and says
-            # nothing about *when*: a review took one, fenced the medium, and
-            # then moved the stage, arriving at `TRIAL_OPEN` and at
-            # `COMMITTED` over a medium that was fenced at every instant after
-            # the read. This is the last instant before the stage moves.
+            # **`_refuse`, not a raised `AttributeError` — round eighteen, the
+            # same move round ten made for the fence check below.** Round
+            # seventeen closed a genuine two-thread race here (`commit`'s
+            # candidate-write racing an `interrupt()`) by re-asking the stage
+            # immediately before the final write, and a round-eighteen review
+            # proved that shape can never fully close: `_require_stage` and the
+            # write it guards are two separate statements, so the race just
+            # narrows one call-frame at a time and a second thread can always
+            # land in whatever gap is left, for `commit`'s candidate write, for
+            # `start`'s and `open_trial`'s stage writes, and for `interrupt`
+            # racing a second call to itself. Every one of those writes passes
+            # through here, and this is the last statement before any of them
+            # lands — so the fix is not another re-check upstream, it is this
+            # check answering in this module's own vocabulary.
             #
-            # The fence and not the volume quarantine, because only one of
-            # them can change here. `quarantine_volume()` is one-way and the
-            # gates refuse unless it is already on, so it cannot be off by the
-            # time a clearance is spent, and the quarantine itself cannot be
-            # swapped — this method refuses that two rules above. A branch
-            # nothing can drive is not a check, and this module says so about
-            # `_require_this_sitting`.
-            if self._quarantine.is_fenced:
-                # **`_refuse_gate`, not a raised `AttributeError`.** A
-                # round-ten review found the gap this closes: `commit` asks
-                # `_require_an_unfenced_medium()`, mints the candidate, and
-                # only then moves the stage — and the fence can still be
-                # raised in that window, by a device this method does not
-                # control. This branch used to answer with a bare
-                # `AttributeError`, the seal's usual vocabulary for a
-                # *structural* violation; reached from the legitimate path
-                # through `start`/`open_trial`/`commit` rather than from a
-                # direct malicious call, that is the wrong vocabulary — a
-                # caller who correctly wrote `except RecoveryRefused:`
-                # crashed. "The medium is fenced" is the same *business*
-                # fact every other gate expresses through `RecoveryRefused`,
-                # so it is expressed that way here too, from any caller.
-                # `_refuse_gate` calls back into this method for `_stage` →
-                # `REFUSED`, a value in `_REACHED_WITHOUT_GATES`, which does
-                # not re-enter this branch — no `try`/`except` needed, and
-                # none is added: this module raises exceptions, it does not
-                # catch them.
-                self._refuse_gate(RecoveryGate.MEDIUM_FENCED)
-            object.__setattr__(self, "_cleared", None)
-        if name == "_candidate" and self._cleared is not _GATES_JUST_PASSED:
-            raise AttributeError(
-                "a candidate is minted by a commit whose gates passed"
-            )
-        if name in _PINNED_AT_THE_START and self._stage is not RecoveryStage.NOT_STARTED:
-            raise AttributeError(
-                "the snapshot a workflow judges is pinned when it starts and "
-                "not afterwards"
-            )
-        # **The pin's own type, not only when it may be written.** The
-        # `_candidate` branch below checks both *when* a write is legal and
-        # *what* the value says; this branch, above, only ever checked the
-        # former. A round-fifteen review wrote a `_pinned` that was not a
-        # `SnapshotDescriptor` at all through this same bound-method reach,
-        # and the workflow accepted it silently — the crash then landed
-        # several calls later, inside `_fields_of`, as a bare
-        # `AttributeError` from ordinary attribute lookup rather than a
-        # refusal at the point of the bad write. `_require_a_real_snapshot`
-        # is the same check every legitimate entrance (`start`, `open_
-        # trial`, `commit`) already runs on its own `snapshot` argument
-        # before this method is ever reached; reused here rather than
-        # reimplemented, so the pin cannot be written as anything that
-        # check would have refused at the door.
-        if name in _PINNED_AT_THE_START:
-            _require_a_real_snapshot(value)
-        if name == "_candidate" and self._stage is not RecoveryStage.TRIAL_OPEN:
-            raise AttributeError(
-                "a candidate is minted by a commit and by nothing else"
-            )
-        # **A candidate is answerable to the pin, not just to the clearance
-        # and the stage.** The three checks above establish *when* a
-        # candidate may be written; none of them establish *what* it may
-        # say. A round-fourteen review reached `_require_the_gates` and
-        # `_sealed_assign` directly — the same bound-method reach `commit`
-        # itself has, and the reach this module has never claimed a
-        # capability boundary against, only "the accidental reach" — and
-        # used it to write a `RecoveryCandidate` naming a schema version
-        # `_pinned` never judged, in one case with `_pinned` never even set
-        # (`start` skipped entirely): a workflow reached `COMMITTED`,
-        # `holds()` true, `candidate_applies_to` true, over a candidate
-        # `commit`'s own honest mint — reading `_pinned`, never the argument
-        # — would never have produced. Checked here, on the one write this
-        # class actually performs, rather than trusted to `commit`'s own
-        # good behaviour: a candidate's `schema_version` must be the pin's.
-        #
-        # Not the fingerprint: `RecoveryCandidate._fingerprint` is set once,
-        # in `__init__`, and read by nothing anywhere in this module or
-        # this package — not even here. Comparing it would be this class's
-        # first read of a field the whole design keeps deliberately
-        # write-only, and nothing downstream of a candidate ever asks for
-        # it back to decide anything; `schema_version` is the field a
-        # caller can act on, and it is the field pinned.
-        if name == "_candidate":
-            if self._pinned is None:
-                raise AttributeError(
-                    "a candidate is minted from the snapshot a workflow "
-                    "pinned at start; there is no pin to mint one from"
+            # **This alone still was not enough — a round-nineteen review
+            # found two genuinely concurrent, legitimate `commit()` calls
+            # (no `interrupt()` needed) both passing every check before
+            # either wrote anything, because nothing serialised the *whole*
+            # read-then-write sequence, only each individual write.** That
+            # produced a real double commit — two `RECOVERY_COMPLETED`
+            # entries, and a legitimately returned candidate `holds()`
+            # denied — not merely the wrong exception type. `self._lock`
+            # (`__init__`, above) is the actual close: every one of
+            # `start`/`open_trial`/`commit`/`interrupt`/`_sealed_assign`
+            # holds it for its whole body now, so two calls on the same
+            # workflow can never run at once regardless of which of them
+            # they are. This check stays as the backstop for a caller who
+            # reaches `_sealed_assign` directly, bypassing the lock the
+            # public methods take — the same reach this method has never
+            # claimed a capability boundary against, only "the accidental
+            # reach". A caller who correctly wrote `except RecoveryRefused:`
+            # used to crash on whichever race it lost, through either
+            # route; now it is refused, the same `WORKFLOW_ALREADY_FINISHED`
+            # `interrupt` and `_require_stage` already answer for the
+            # identical fact reached without a race. Nothing here grants
+            # anything either way: the write this call would have made
+            # still never happens, and `holds()` still asks the stage as
+            # well as the object.
+            if self._stage in TERMINAL_STAGES:
+                self._refuse(
+                    Refusal.WORKFLOW_ALREADY_FINISHED,
+                    "this workflow has ended; a further attempt is a new workflow "
+                    "that runs every gate again",
                 )
-            # **The same gap, a fourth time.** `RecoveryCandidate` is the
-            # one class in this module whose constructor validates nothing
-            # — deliberately, since its *published* surface is checked by
-            # identity (`holds`/`candidate_applies_to`), never by reading a
-            # field, and its own docstring says so: "Anyone can build a
-            # `RecoveryCandidate(99, …)` and it will answer `99`." This
-            # check, added at round fourteen, is a second reader that does
-            # trust the field — and a round-fifteen review built a genuine
-            # `RecoveryCandidate`, through its own public constructor, with
-            # an `int` subclass `schema_version` whose `__ne__` always
-            # answered `False`, and this `!=` accepted it. Pinned here, the
-            # same as `binding`'s and `quarantine`'s fields two rounds
-            # running: the operand this check is about to compare is typed
-            # before it is compared, not after. `_require_an_exact_int`
-            # raises `TypeError`, not this method's own `AttributeError` —
-            # deliberately reused as-is rather than reimplemented, so a
-            # value's *type* is refused in the one vocabulary every other
-            # type pin in this file uses, and only the *state* checks below
-            # stay in `_sealed_assign`'s own.
-            _require_an_exact_int("candidate.schema_version", value.schema_version)
-            if value.schema_version != self._pinned.schema_version:
+            # **The same gap, a sixth time, and the sharpest yet.** Every other
+            # write this method accepts pins the value's exact type before
+            # trusting it in a comparison; a `_stage` write never did, and every
+            # check below it — the edge table, `_REACHED_WITHOUT_GATES`, the
+            # `is RecoveryStage.COMMITTED` branch that decides which clearance is
+            # demanded — reads `value` before its type is known. A round-sixteen
+            # review built a stand-in answering `==`/`in`/`.value` like
+            # `RecoveryStage.COMMITTED` but failing `is` it, and slid through the
+            # *permissive* clearance branch below (the one `open_trial`'s own
+            # transition already satisfies) without ever asking D8's gates. The
+            # `Quarantine` was never touched and no candidate was minted — `holds`
+            # and `candidate_applies_to` still ask `is`, which this could not
+            # spoof — but `flow.stage` then answered `== COMMITTED` for any
+            # caller who wrote the ordinary comparison instead of this module's
+            # own insisted-on `is`, while the audit stayed at
+            # `RECOVERY_TRIAL_OPENED` forever and the workflow was permanently
+            # stuck. Pinned here, the same as every other value this method
+            # accepts.
+            if name == "_stage" and type(value) is not RecoveryStage:
+                raise AttributeError("a stage must be a RecoveryStage exactly")
+            if name == "_stage" and (self._stage.value, value.value) not in _STAGE_EDGES:
                 raise AttributeError(
-                    "a candidate names the schema version the pin was "
-                    "judged at, not one supplied separately"
+                    "the stage travels its own graph; a jump between stages is not "
+                    "a stage this workflow reached"
                 )
-        object.__setattr__(self, name, value)
+            # A stage the gates lead to is reached by passing them. `REFUSED` and
+            # `INTERRUPTED` are the two a refusal and an interruption reach, and
+            # they are the only ones a workflow moves to without a clearance.
+            if name == "_stage" and value not in _REACHED_WITHOUT_GATES:
+                # `COMMITTED` spends the clearance only a full D8 run issues; the
+                # earlier stages accept either, because they legitimately ask no
+                # acquisition and no confirmation.
+                wanted = (
+                    (_GATES_JUST_PASSED,)
+                    if value is RecoveryStage.COMMITTED
+                    else (_GATES_JUST_PASSED, _PRE_TRIAL_GATES_PASSED)
+                )
+                if self._cleared not in wanted:
+                    raise AttributeError(
+                        "this stage is reached by passing the gates; a workflow "
+                        "does not arrive at one it did not pass"
+                    )
+                # **And the fence, once more, at the moment the clearance is
+                # spent.** A clearance is issued when the gates pass and says
+                # nothing about *when*: a review took one, fenced the medium, and
+                # then moved the stage, arriving at `TRIAL_OPEN` and at
+                # `COMMITTED` over a medium that was fenced at every instant after
+                # the read. This is the last instant before the stage moves.
+                #
+                # The fence and not the volume quarantine, because only one of
+                # them can change here. `quarantine_volume()` is one-way and the
+                # gates refuse unless it is already on, so it cannot be off by the
+                # time a clearance is spent, and the quarantine itself cannot be
+                # swapped — this method refuses that two rules above. A branch
+                # nothing can drive is not a check, and this module says so about
+                # `_require_this_sitting`.
+                if self._quarantine.is_fenced:
+                    # **`_refuse_gate`, not a raised `AttributeError`.** A
+                    # round-ten review found the gap this closes: `commit` asks
+                    # `_require_an_unfenced_medium()`, mints the candidate, and
+                    # only then moves the stage — and the fence can still be
+                    # raised in that window, by a device this method does not
+                    # control. This branch used to answer with a bare
+                    # `AttributeError`, the seal's usual vocabulary for a
+                    # *structural* violation; reached from the legitimate path
+                    # through `start`/`open_trial`/`commit` rather than from a
+                    # direct malicious call, that is the wrong vocabulary — a
+                    # caller who correctly wrote `except RecoveryRefused:`
+                    # crashed. "The medium is fenced" is the same *business*
+                    # fact every other gate expresses through `RecoveryRefused`,
+                    # so it is expressed that way here too, from any caller.
+                    # `_refuse_gate` calls back into this method for `_stage` →
+                    # `REFUSED`, a value in `_REACHED_WITHOUT_GATES`, which does
+                    # not re-enter this branch — no `try`/`except` needed, and
+                    # none is added: this module raises exceptions, it does not
+                    # catch them.
+                    self._refuse_gate(RecoveryGate.MEDIUM_FENCED)
+                object.__setattr__(self, "_cleared", None)
+            if name == "_candidate" and self._cleared is not _GATES_JUST_PASSED:
+                raise AttributeError(
+                    "a candidate is minted by a commit whose gates passed"
+                )
+            if name in _PINNED_AT_THE_START and self._stage is not RecoveryStage.NOT_STARTED:
+                raise AttributeError(
+                    "the snapshot a workflow judges is pinned when it starts and "
+                    "not afterwards"
+                )
+            # **The pin's own type, not only when it may be written.** The
+            # `_candidate` branch below checks both *when* a write is legal and
+            # *what* the value says; this branch, above, only ever checked the
+            # former. A round-fifteen review wrote a `_pinned` that was not a
+            # `SnapshotDescriptor` at all through this same bound-method reach,
+            # and the workflow accepted it silently — the crash then landed
+            # several calls later, inside `_fields_of`, as a bare
+            # `AttributeError` from ordinary attribute lookup rather than a
+            # refusal at the point of the bad write. `_require_a_real_snapshot`
+            # is the same check every legitimate entrance (`start`, `open_
+            # trial`, `commit`) already runs on its own `snapshot` argument
+            # before this method is ever reached; reused here rather than
+            # reimplemented, so the pin cannot be written as anything that
+            # check would have refused at the door.
+            if name in _PINNED_AT_THE_START:
+                _require_a_real_snapshot(value)
+            if name == "_candidate" and self._stage is not RecoveryStage.TRIAL_OPEN:
+                raise AttributeError(
+                    "a candidate is minted by a commit and by nothing else"
+                )
+            # **A candidate is answerable to the pin, not just to the clearance
+            # and the stage.** The three checks above establish *when* a
+            # candidate may be written; none of them establish *what* it may
+            # say. A round-fourteen review reached `_require_the_gates` and
+            # `_sealed_assign` directly — the same bound-method reach `commit`
+            # itself has, and the reach this module has never claimed a
+            # capability boundary against, only "the accidental reach" — and
+            # used it to write a `RecoveryCandidate` naming a schema version
+            # `_pinned` never judged, in one case with `_pinned` never even set
+            # (`start` skipped entirely): a workflow reached `COMMITTED`,
+            # `holds()` true, `candidate_applies_to` true, over a candidate
+            # `commit`'s own honest mint — reading `_pinned`, never the argument
+            # — would never have produced. Checked here, on the one write this
+            # class actually performs, rather than trusted to `commit`'s own
+            # good behaviour: a candidate's `schema_version` must be the pin's.
+            #
+            # Not the fingerprint: `RecoveryCandidate._fingerprint` is set once,
+            # in `__init__`, and read by nothing anywhere in this module or
+            # this package — not even here. Comparing it would be this class's
+            # first read of a field the whole design keeps deliberately
+            # write-only, and nothing downstream of a candidate ever asks for
+            # it back to decide anything; `schema_version` is the field a
+            # caller can act on, and it is the field pinned.
+            if name == "_candidate":
+                if self._pinned is None:
+                    raise AttributeError(
+                        "a candidate is minted from the snapshot a workflow "
+                        "pinned at start; there is no pin to mint one from"
+                    )
+                # **The same gap, a fourth time.** `RecoveryCandidate` is the
+                # one class in this module whose constructor validates nothing
+                # — deliberately, since its *published* surface is checked by
+                # identity (`holds`/`candidate_applies_to`), never by reading a
+                # field, and its own docstring says so: "Anyone can build a
+                # `RecoveryCandidate(99, …)` and it will answer `99`." This
+                # check, added at round fourteen, is a second reader that does
+                # trust the field — and a round-fifteen review built a genuine
+                # `RecoveryCandidate`, through its own public constructor, with
+                # an `int` subclass `schema_version` whose `__ne__` always
+                # answered `False`, and this `!=` accepted it. Pinned here, the
+                # same as `binding`'s and `quarantine`'s fields two rounds
+                # running: the operand this check is about to compare is typed
+                # before it is compared, not after. `_require_an_exact_int`
+                # raises `TypeError`, not this method's own `AttributeError` —
+                # deliberately reused as-is rather than reimplemented, so a
+                # value's *type* is refused in the one vocabulary every other
+                # type pin in this file uses, and only the *state* checks below
+                # stay in `_sealed_assign`'s own.
+                _require_an_exact_int("candidate.schema_version", value.schema_version)
+                if value.schema_version != self._pinned.schema_version:
+                    raise AttributeError(
+                        "a candidate names the schema version the pin was "
+                        "judged at, not one supplied separately"
+                    )
+            object.__setattr__(self, name, value)
 
 
 def candidate_applies_to(flow: RecoveryWorkflow, candidate: RecoveryCandidate) -> bool:

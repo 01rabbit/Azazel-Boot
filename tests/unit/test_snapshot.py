@@ -5058,6 +5058,99 @@ def test_the_write_record_asks_whether_the_verdict_was_minted() -> None:
     assert ledger.audit() == ()
 
 
+def test_two_real_threads_preflighting_the_same_medium_both_stay_judged() -> None:
+    """R19 (security/doctrine review, finding 2): `_remember_the_medium`'s
+    own unlocked check-then-record, the sibling of `note_snapshot_written`'s.
+
+    `preflight()` is documented as "free, read-only and unlimited" — an
+    explicit invitation to call it as often and as concurrently as a caller
+    likes. Two real threads doing exactly that over the *same* `Quarantine`,
+    the first time it is judged, could each see `_JUDGED_BY.get(quarantine)
+    is None`, each build their own fresh `_WeakSet`, and each write it — the
+    second write silently discarding the first thread's set, and the
+    verdict it held, from `_JUDGED_BY`. `_MINTED_HERE` still answers for the
+    dropped verdict (a different index, unaffected), so
+    `verdict_was_minted_here` stays `True` for it, but `_medium_was_judged`
+    then answers `False` for a verdict that genuinely did judge exactly this
+    medium — and `may_migrate`/`note_snapshot_written` refuse it with
+    `MEDIUM_MOVED_SINCE_THE_PREFLIGHT`, a classification that is simply
+    false. Fails closed (a legitimate migration is wrongly refused, never
+    wrongly permitted), but still a real misclassification, fixed the same
+    way `_SNAPSHOTS_RECORDED`'s check-then-record was: one lock,
+    `_JUDGED_LOCK`.
+
+    `_WeakIdentityIndex.get` (a class method — instances hold no writable
+    slot of their own to monkeypatch, `__slots__ = ("__weakref__",)`) is
+    patched to pause **each** thread's first call through it until both
+    have arrived, then release together — so both observe `None` and both
+    proceed to write, deterministically, rather than leaving it to chance
+    whether the GIL ever switches between two threads inside a lookup this
+    short.
+    """
+
+    import azazel_boot.snapshot as module
+
+    quarantine = a_quarantine(quarantined=False)
+    snap = descriptor()
+
+    arrived = {"a": threading.Event(), "b": threading.Event()}
+    release = threading.Event()
+    label_of = threading.local()
+    original_get = module._WeakIdentityIndex.get
+
+    def racy_get(self, obj: object) -> object | None:
+        result = original_get(self, obj)
+        label = getattr(label_of, "label", None)
+        if label is not None and not arrived[label].is_set():
+            arrived[label].set()
+            release.wait(timeout=5)
+        return result
+
+    module._WeakIdentityIndex.get = racy_get
+    outcomes: dict[str, dict[str, object]] = {}
+
+    def do_preflight(label: str) -> None:
+        label_of.label = label
+        outcomes[label] = {}
+        verdict = preflight(
+            quarantine,
+            snapshot=snap,
+            capacity=capacity(),
+            current_schema=1,
+            target_schema=2,
+            binding_holds=True,
+            generation_holds=True,
+            image_digest_holds=True,
+        )
+        outcomes[label]["verdict"] = verdict
+
+    try:
+        a_thread = threading.Thread(target=do_preflight, args=("a",))
+        a_thread.start()
+        assert arrived["a"].wait(timeout=5)
+        b_thread = threading.Thread(target=do_preflight, args=("b",))
+        b_thread.start()
+        assert arrived["b"].wait(timeout=5)
+        release.set()
+        a_thread.join(timeout=5)
+        b_thread.join(timeout=5)
+    finally:
+        module._WeakIdentityIndex.get = original_get
+
+    verdict_a = outcomes["a"]["verdict"]
+    verdict_b = outcomes["b"]["verdict"]
+    assert verdict_was_minted_here(verdict_a)
+    assert verdict_was_minted_here(verdict_b)
+    # The actual claim: **both** verdicts judged this medium, not just
+    # whichever one's write survived the race.
+    assert module._medium_was_judged(verdict_a, quarantine)
+    assert module._medium_was_judged(verdict_b, quarantine)
+
+    for verdict in (verdict_a, verdict_b):
+        ledger = MigrationLedger()
+        assert ledger.may_migrate(verdict, quarantine=quarantine) is True
+
+
 def test_one_preflight_records_one_write_in_any_ledger() -> None:
     """R4: nothing marked a verdict spent.
 
@@ -8577,12 +8670,23 @@ def test_a_real_second_thread_interrupting_between_the_two_final_writes_stays_in
     race re-opens in the gap between *them* — reproduced directly against
     round seventeen's own fix. There is no re-check that closes a gap of
     this shape; round seventeen's re-check is gone, and `_sealed_assign`'s
-    terminal-stage guard now answers `RecoveryRefused` itself, closing the
-    window at the one place every one of these writes passes through
-    regardless of how many statements precede it. This test still drives
-    the same real race in the same real gap; the mutation this test now
-    detects is round eighteen's fix at `_sealed_assign`, not round
-    seventeen's re-check, which no longer exists to mutate.
+    terminal-stage guard answered `RecoveryRefused` itself instead — but a
+    round-nineteen review then drove two genuinely concurrent, entirely
+    legitimate `commit()` calls (no `interrupt()` needed at all) and got a
+    real double commit: both passed every check before either wrote,
+    because nothing serialised the *whole* read-then-write sequence, only
+    each individual `_sealed_assign` call. **`commit`/`start`/`open_trial`/
+    `interrupt` and `_sealed_assign` itself now each acquire
+    `self._lock` (a per-instance `threading.RLock`) around their entire
+    body**, so no second call on the same workflow — this method or a
+    different one, `interrupt` racing in included — can run at all until
+    the first one currently running has completely finished. This test
+    still drives the same real race in the same real gap; what it now
+    proves is that `interrupt()`, started while `commit()` is paused
+    mid-body holding the lock, simply cannot proceed until `commit()`
+    releases it — so the interleaving this test injects can no longer land
+    inside `commit()` at all, only after it, which is exactly the
+    deterministic outcome asserted below.
 
     The `RecoveryCandidate` `commit` had already minted before the race
     lands is never returned either way (the exception fires before
@@ -8608,12 +8712,13 @@ def test_a_real_second_thread_interrupting_between_the_two_final_writes_stays_in
             let_commit_continue.wait(timeout=5)
 
     RecoveryWorkflow._sealed_assign = racy_sealed_assign
-    outcome: dict[str, object] = {}
+    commit_outcome: dict[str, object] = {}
+    interrupt_outcome: dict[str, object] = {}
     try:
 
         def do_commit() -> None:
             try:
-                flow.commit(
+                candidate = flow.commit(
                     snap,
                     observations,
                     media_binding_holds=True,
@@ -8621,29 +8726,226 @@ def test_a_real_second_thread_interrupting_between_the_two_final_writes_stays_in
                     acquisition=Opens(),
                     confirmed=True,
                 )
-                outcome["kind"] = "returned"
+                commit_outcome["kind"] = "returned"
+                commit_outcome["candidate"] = candidate
             except RecoveryRefused as refused:
-                outcome["kind"] = "refused"
-                outcome["refusal"] = refused.refusal
+                commit_outcome["kind"] = "refused"
+                commit_outcome["refusal"] = refused.refusal
+
+        def do_interrupt() -> None:
+            try:
+                flow.interrupt(session_id=SESSION)
+                interrupt_outcome["kind"] = "returned"
+            except RecoveryRefused as refused:
+                interrupt_outcome["kind"] = "refused"
+                interrupt_outcome["refusal"] = refused.refusal
 
         committer = threading.Thread(target=do_commit)
         committer.start()
         assert candidate_written.wait(timeout=5)
-        interrupter = threading.Thread(target=lambda: flow.interrupt(session_id=SESSION))
+        # `interrupt()` now blocks on `self._lock`, held by the paused
+        # `commit()` — it cannot run at all until `commit()` releases the
+        # pause and finishes. Joined only after the release, below.
+        interrupter = threading.Thread(target=do_interrupt)
         interrupter.start()
-        interrupter.join(timeout=5)
         let_commit_continue.set()
         committer.join(timeout=5)
+        interrupter.join(timeout=5)
     finally:
         RecoveryWorkflow._sealed_assign = original_sealed_assign
 
-    assert outcome["kind"] == "refused"
-    assert outcome["refusal"] is Refusal.WORKFLOW_ALREADY_FINISHED
-    assert flow.stage is RecoveryStage.INTERRUPTED
-    # The minted-but-never-returned candidate holds no authority regardless.
-    assert flow._candidate is not None
-    assert flow.holds(flow._candidate) is False
+    # The lock makes this deterministic: `commit()` had already paused past
+    # its point of no return before `interrupt()` could even try to run, so
+    # `commit()` always wins now, cleanly, and `interrupt()` always meets an
+    # already-`COMMITTED`, terminal workflow.
+    assert commit_outcome["kind"] == "returned"
+    assert flow.stage is RecoveryStage.COMMITTED
+    assert flow.holds(commit_outcome["candidate"])
+    assert interrupt_outcome["kind"] == "refused"
+    assert interrupt_outcome["refusal"] is Refusal.WORKFLOW_ALREADY_FINISHED
 
+
+def test_two_real_threads_committing_the_same_workflow_produce_one_candidate(
+    observations,
+) -> None:
+    """R19 (security review): the headline finding — a genuine double commit.
+
+    Round 18 fixed `_sealed_assign`'s terminal-stage guard so a *losing*
+    thread's write meets `RecoveryRefused` instead of a bare
+    `AttributeError` — but it never serialised the *winners*. A round-19
+    review drove two genuinely concurrent, entirely legitimate `commit()`
+    calls on one `TRIAL_OPEN` workflow (no hostile input, no `interrupt()`
+    involved) using `sys.setswitchinterval` to widen the ordinary
+    GIL-scheduling window, and got a real double commit in 322 of 4000
+    trials: **both** calls returned successfully, each with its own honestly
+    minted `RecoveryCandidate`, and `flow.audit()` ended up holding two
+    `RECOVERY_COMPLETED` entries for a workflow whose whole design is
+    one-way and audited exactly once. Worse, one of the two legitimately
+    *returned* candidates then failed `flow.holds()`, because the loser's
+    write clobbered `_candidate` after the winner had already read it back
+    — contradicting round 18's own claim that "no write these races contest
+    is ever returned to a caller."
+
+    `self._lock`, a per-instance `RLock` each of `commit`/`start`/
+    `open_trial`/`interrupt`/`_sealed_assign` now holds for its entire body,
+    closes this: only one call can be inside any of them, on one workflow,
+    at a time — a second concurrent `commit()` cannot even begin reading
+    state until the first has completely finished (and moved the stage to
+    the terminal `COMMITTED`), so it meets `_require_stage`'s ordinary
+    refusal at the very top, before touching anything.
+
+    Forced deterministically at **two** checkpoints, not left to
+    GIL-scheduling luck at either: `_sealed_assign` is patched to pause
+    **before** performing each thread's first `"_candidate"` write, and
+    again before its first `"_stage"` write, each time until *both* threads
+    have arrived at that checkpoint and are released together. Pausing
+    *before* the real write (not after, as an earlier version of this test
+    did — which missed the bug more often than it caught it, because by the
+    time both threads had *already written* `_candidate`, whichever one's
+    `_stage` write happened to run first after release usually still ended
+    up matching `self._candidate`, silently hiding the corruption in that
+    specific interleaving) is what makes both effects of the race land
+    together: with no lock, both threads perform their `_candidate` writes
+    back to back with no reader in between, then both are released to
+    perform their `_stage` writes essentially simultaneously — usually
+    producing either two `RECOVERY_COMPLETED` entries for one one-way,
+    once-audited workflow, or a returned candidate `holds()` denies. With
+    `self._lock` in place, "b" blocks at `with self._lock:` before it can
+    reach either patched checkpoint at all, so neither of its "arrived"
+    signals ever fires and "a" runs both checkpoints, and the whole method,
+    alone — the correct, deterministic outcome this test asserts on every
+    attempt, every time, against the real fix.
+
+    Even with both checkpoints released together, the final stretch — the
+    `object.__setattr__` calls inside `_sealed_assign`'s `"_stage"` branch —
+    is only a handful of bytecodes, well under the default scheduler's
+    switch granularity; whichever thread the OS wakes first from
+    `Event.wait()` can still occasionally run that whole branch before the
+    GIL offers the other a turn, which — without the lock — sometimes still
+    leaves a single clean winner rather than corruption, purely by luck.
+    `sys.setswitchinterval` narrows that window, and a handful of attempts
+    (a fresh workflow each time) makes the residual chance of every one of
+    them landing on that lucky, corruption-free interleaving negligible —
+    while every attempt against the real fix takes the same deterministic,
+    lock-blocked path every time, so no number of attempts changes its
+    outcome.
+    """
+
+    def attempt() -> None:
+        flow = workflow(observations)
+        snap = descriptor()
+        flow.start(
+            snap,
+            observations,
+            media_binding_holds=True,
+            session_id=SESSION,
+            started_by_operator=True,
+        )
+        flow.open_trial(snap, observations, media_binding_holds=True, session_id=SESSION)
+
+        checkpoints = ("_candidate", "_stage")
+        arrived = {name: {"a": threading.Event(), "b": threading.Event()} for name in checkpoints}
+        release = {name: threading.Event() for name in checkpoints}
+        label_of = threading.local()
+        original_sealed_assign = RecoveryWorkflow._sealed_assign
+
+        def racy_sealed_assign(self: RecoveryWorkflow, name: str, value: object) -> None:
+            label = getattr(label_of, "label", None)
+            if label is not None and name in checkpoints and not arrived[name][label].is_set():
+                arrived[name][label].set()
+                release[name].wait(timeout=5)
+            original_sealed_assign(self, name, value)
+
+        RecoveryWorkflow._sealed_assign = racy_sealed_assign
+        outcomes: dict[str, dict[str, object]] = {}
+
+        def do_commit(label: str) -> None:
+            label_of.label = label
+            outcomes[label] = {}
+            try:
+                candidate = flow.commit(
+                    snap,
+                    observations,
+                    media_binding_holds=True,
+                    session_id=SESSION,
+                    acquisition=Opens(),
+                    confirmed=True,
+                )
+                outcomes[label]["kind"] = "returned"
+                outcomes[label]["candidate"] = candidate
+            except RecoveryRefused as refused:
+                outcomes[label]["kind"] = "refused"
+                outcomes[label]["refusal"] = refused.refusal
+
+        original_switch_interval = sys.getswitchinterval()
+        try:
+            sys.setswitchinterval(1e-6)
+            a_thread = threading.Thread(target=do_commit, args=("a",))
+            a_thread.start()
+            # First checkpoint: "a" pauses before writing "_candidate". "b"
+            # has not started yet, so it cannot possibly arrive here —
+            # releasing unblocks "a" alone, which performs its write and
+            # moves on towards the second checkpoint.
+            assert arrived["_candidate"]["a"].wait(timeout=5)
+            release["_candidate"].set()
+
+            b_thread = threading.Thread(target=do_commit, args=("b",))
+            b_thread.start()
+            # Whether "b" reaches this same checkpoint at all is exactly
+            # what `self._lock` decides: present, "b" is still blocked at
+            # `with self._lock:` and never arrives; absent, "b" reaches it
+            # and sails straight through (`release["_candidate"]` is
+            # already set), performing its own "_candidate" write
+            # concurrently with "a" already past the first checkpoint and
+            # heading for the second.
+            arrived["_candidate"]["b"].wait(timeout=0.4)
+
+            # Second checkpoint: both threads pause before writing
+            # "_stage", released together — the point where, without the
+            # lock, both threads' writes land essentially simultaneously.
+            assert arrived["_stage"]["a"].wait(timeout=5)
+            stage_b_arrived = arrived["_stage"]["b"].wait(timeout=0.4)
+            release["_stage"].set()
+
+            a_thread.join(timeout=5)
+            b_thread.join(timeout=5)
+        finally:
+            sys.setswitchinterval(original_switch_interval)
+            RecoveryWorkflow._sealed_assign = original_sealed_assign
+
+        if not stage_b_arrived:
+            # The lock worked at every checkpoint "b" could have reached:
+            # "a" ran the whole method alone, and "b" only started (and was
+            # cleanly refused) once "a" had already finished.
+            assert outcomes["a"]["kind"] == "returned"
+            assert outcomes["b"]["kind"] == "refused"
+            assert outcomes["b"]["refusal"] is Refusal.WORKFLOW_ALREADY_FINISHED
+            assert flow.holds(outcomes["a"]["candidate"])
+            assert [entry.event for entry in flow.audit()] == [
+                SnapshotAuditEvent.RECOVERY_STARTED,
+                SnapshotAuditEvent.RECOVERY_TRIAL_OPENED,
+                SnapshotAuditEvent.RECOVERY_COMPLETED,
+            ]
+            return
+
+        # "b" reached both patched checkpoints alongside "a" — the race
+        # manifested at the exact place the corruption happens. Without
+        # `self._lock` this is *usually* real corruption (either both
+        # calls returned — two `RECOVERY_COMPLETED` entries for one
+        # one-way, once-audited workflow — or one call returned a
+        # candidate that `holds()` denies), asserted here; on the rare
+        # attempt where the interleaving still lands cleanly despite the
+        # race, these assertions simply pass and the loop below tries
+        # again.
+        kinds = sorted(outcome["kind"] for outcome in outcomes.values())
+        assert kinds == ["refused", "returned"], outcomes
+        winner = next(outcome for outcome in outcomes.values() if outcome["kind"] == "returned")
+        assert flow.holds(winner["candidate"])
+        assert len(flow.audit()) == 3
+        assert flow.audit()[-1].event is SnapshotAuditEvent.RECOVERY_COMPLETED
+
+    for _attempt in range(5):
+        attempt()
 
 def test_a_real_second_thread_interrupting_before_commits_candidate_is_written_stays_in_vocabulary(
     observations,
@@ -8658,6 +8960,16 @@ def test_a_real_second_thread_interrupting_before_commits_candidate_is_written_s
     `_sealed_assign`'s terminal-stage guard and raised a bare
     `AttributeError`, the same vocabulary break, one statement earlier than
     round 17's own test drove it.
+
+    R19 (security review): round 18's per-call vocabulary fix still left a
+    genuine double-commit reachable through a *different* pairing (two
+    concurrent `commit()` calls, no `interrupt()` involved — see
+    `test_two_real_threads_committing_the_same_workflow_produce_one_candidate`
+    below). The real close is `self._lock`, a per-instance `RLock` each of
+    `commit`/`start`/`open_trial`/`interrupt`/`_sealed_assign` now holds for
+    its whole body, so `interrupt()` paused here cannot run at all — not
+    just cannot land badly — until `commit()` finishes. The outcome is
+    therefore fully deterministic now, not merely "stays in vocabulary."
     """
 
     flow = workflow(observations)
@@ -8677,12 +8989,13 @@ def test_a_real_second_thread_interrupting_before_commits_candidate_is_written_s
         let_commit_continue.wait(timeout=5)
 
     RecoveryWorkflow._require_an_unfenced_medium = racy_require_an_unfenced_medium
-    outcome: dict[str, object] = {}
+    commit_outcome: dict[str, object] = {}
+    interrupt_outcome: dict[str, object] = {}
     try:
 
         def do_commit() -> None:
             try:
-                flow.commit(
+                candidate = flow.commit(
                     snap,
                     observations,
                     media_binding_holds=True,
@@ -8690,40 +9003,57 @@ def test_a_real_second_thread_interrupting_before_commits_candidate_is_written_s
                     acquisition=Opens(),
                     confirmed=True,
                 )
-                outcome["kind"] = "returned"
+                commit_outcome["kind"] = "returned"
+                commit_outcome["candidate"] = candidate
             except RecoveryRefused as refused:
-                outcome["kind"] = "refused"
-                outcome["refusal"] = refused.refusal
+                commit_outcome["kind"] = "refused"
+                commit_outcome["refusal"] = refused.refusal
+
+        def do_interrupt() -> None:
+            try:
+                flow.interrupt(session_id=SESSION)
+                interrupt_outcome["kind"] = "returned"
+            except RecoveryRefused as refused:
+                interrupt_outcome["kind"] = "refused"
+                interrupt_outcome["refusal"] = refused.refusal
 
         committer = threading.Thread(target=do_commit)
         committer.start()
         assert fence_checked.wait(timeout=5)
-        interrupter = threading.Thread(target=lambda: flow.interrupt(session_id=SESSION))
+        interrupter = threading.Thread(target=do_interrupt)
         interrupter.start()
-        interrupter.join(timeout=5)
         let_commit_continue.set()
         committer.join(timeout=5)
+        interrupter.join(timeout=5)
     finally:
         RecoveryWorkflow._require_an_unfenced_medium = original_require_an_unfenced_medium
 
-    assert outcome["kind"] == "refused"
-    assert outcome["refusal"] is Refusal.WORKFLOW_ALREADY_FINISHED
-    assert flow.stage is RecoveryStage.INTERRUPTED
-    # No candidate was ever minted this time: the race landed before the
-    # write that would have held one.
-    assert flow._candidate is None
+    assert commit_outcome["kind"] == "returned"
+    assert flow.stage is RecoveryStage.COMMITTED
+    assert flow.holds(commit_outcome["candidate"])
+    assert interrupt_outcome["kind"] == "refused"
+    assert interrupt_outcome["refusal"] is Refusal.WORKFLOW_ALREADY_FINISHED
 
 
-def test_a_real_second_thread_interrupting_during_starts_stage_write_stays_in_vocabulary(
+def test_a_real_second_thread_interrupting_during_starts_stage_write_completes_cleanly_after(
     observations,
 ) -> None:
     """R18 (security review, finding 3): the same shape in `start`.
 
     `start` reads `_require_an_unfenced_medium()` and then writes
-    `_stage` to `PREFLIGHT_PASSED`. Nothing stops a real second thread's
-    `interrupt()` landing in that gap; before round 18's fix the stage write
-    then met `_sealed_assign`'s terminal-stage guard and raised a bare
-    `AttributeError`.
+    `_stage` to `PREFLIGHT_PASSED`. Round 18 closed the vocabulary break a
+    racing `interrupt()` could hit there.
+
+    R19 (security review): `start`'s own body is now held under
+    `self._lock` for its whole duration, so `interrupt()`, started while
+    `start()` is paused mid-body, cannot run at all until `start()`
+    finishes — it can no longer land *inside* `start()`. Unlike `commit()`
+    (which leaves the workflow terminal), `start()` leaves it at
+    `PREFLIGHT_PASSED`, non-terminal — so the properly-serialised
+    `interrupt()` that runs immediately afterwards is not a race outcome to
+    refuse at all, it is the *ordinary*, legitimate sequence D8 describes:
+    an operator starts a recovery, then stops it. Both calls succeed, in
+    that order, with nothing corrupted in between.
     """
 
     flow = workflow(observations)
@@ -8739,7 +9069,8 @@ def test_a_real_second_thread_interrupting_during_starts_stage_write_stays_in_vo
         let_start_continue.wait(timeout=5)
 
     RecoveryWorkflow._require_an_unfenced_medium = racy_require_an_unfenced_medium
-    outcome: dict[str, object] = {}
+    start_outcome: dict[str, object] = {}
+    interrupt_outcome: dict[str, object] = {}
     try:
 
         def do_start() -> None:
@@ -8751,37 +9082,54 @@ def test_a_real_second_thread_interrupting_during_starts_stage_write_stays_in_vo
                     session_id=SESSION,
                     started_by_operator=True,
                 )
-                outcome["kind"] = "returned"
+                start_outcome["kind"] = "returned"
             except RecoveryRefused as refused:
-                outcome["kind"] = "refused"
-                outcome["refusal"] = refused.refusal
+                start_outcome["kind"] = "refused"
+                start_outcome["refusal"] = refused.refusal
+
+        def do_interrupt() -> None:
+            try:
+                flow.interrupt(session_id=SESSION)
+                interrupt_outcome["kind"] = "returned"
+            except RecoveryRefused as refused:
+                interrupt_outcome["kind"] = "refused"
+                interrupt_outcome["refusal"] = refused.refusal
 
         starter = threading.Thread(target=do_start)
         starter.start()
         assert fence_checked.wait(timeout=5)
-        interrupter = threading.Thread(target=lambda: flow.interrupt(session_id=SESSION))
+        # Blocks on `self._lock`, held by the paused `start()`; joined only
+        # after the release below.
+        interrupter = threading.Thread(target=do_interrupt)
         interrupter.start()
-        interrupter.join(timeout=5)
         let_start_continue.set()
         starter.join(timeout=5)
+        interrupter.join(timeout=5)
     finally:
         RecoveryWorkflow._require_an_unfenced_medium = original_require_an_unfenced_medium
 
-    assert outcome["kind"] == "refused"
-    assert outcome["refusal"] is Refusal.WORKFLOW_ALREADY_FINISHED
+    assert start_outcome["kind"] == "returned"
+    assert interrupt_outcome["kind"] == "returned"
     assert flow.stage is RecoveryStage.INTERRUPTED
+    assert [entry.event for entry in flow.audit()] == [
+        SnapshotAuditEvent.RECOVERY_STARTED,
+        SnapshotAuditEvent.RECOVERY_INTERRUPTED,
+    ]
 
 
-def test_a_real_second_thread_interrupting_during_open_trials_stage_write_stays_in_vocabulary(
+def test_a_real_second_thread_interrupting_during_open_trials_stage_write_completes_cleanly_after(
     observations,
 ) -> None:
     """R18 (security review, finding 4): the same shape in `open_trial`.
 
     `open_trial` reads `_require_an_unfenced_medium()` and then writes
-    `_stage` to `TRIAL_OPEN`. The same real second-thread `interrupt()` race
-    lands in that gap; before round 18's fix the stage write then met
-    `_sealed_assign`'s terminal-stage guard and raised a bare
-    `AttributeError`.
+    `_stage` to `TRIAL_OPEN`. Round 18 closed the vocabulary break a racing
+    `interrupt()` could hit there.
+
+    R19 (security review): the same lock-based close as `start`'s sibling
+    test above. `open_trial()` leaves the workflow at `TRIAL_OPEN`,
+    non-terminal, so a properly-serialised `interrupt()` immediately after
+    is the ordinary legitimate sequence, not a refusal.
     """
 
     flow = workflow(observations)
@@ -8800,7 +9148,8 @@ def test_a_real_second_thread_interrupting_during_open_trials_stage_write_stays_
         let_open_trial_continue.wait(timeout=5)
 
     RecoveryWorkflow._require_an_unfenced_medium = racy_require_an_unfenced_medium
-    outcome: dict[str, object] = {}
+    open_trial_outcome: dict[str, object] = {}
+    interrupt_outcome: dict[str, object] = {}
     try:
 
         def do_open_trial() -> None:
@@ -8808,25 +9157,38 @@ def test_a_real_second_thread_interrupting_during_open_trials_stage_write_stays_
                 flow.open_trial(
                     snap, observations, media_binding_holds=True, session_id=SESSION
                 )
-                outcome["kind"] = "returned"
+                open_trial_outcome["kind"] = "returned"
             except RecoveryRefused as refused:
-                outcome["kind"] = "refused"
-                outcome["refusal"] = refused.refusal
+                open_trial_outcome["kind"] = "refused"
+                open_trial_outcome["refusal"] = refused.refusal
+
+        def do_interrupt() -> None:
+            try:
+                flow.interrupt(session_id=SESSION)
+                interrupt_outcome["kind"] = "returned"
+            except RecoveryRefused as refused:
+                interrupt_outcome["kind"] = "refused"
+                interrupt_outcome["refusal"] = refused.refusal
 
         opener = threading.Thread(target=do_open_trial)
         opener.start()
         assert fence_checked.wait(timeout=5)
-        interrupter = threading.Thread(target=lambda: flow.interrupt(session_id=SESSION))
+        interrupter = threading.Thread(target=do_interrupt)
         interrupter.start()
-        interrupter.join(timeout=5)
         let_open_trial_continue.set()
         opener.join(timeout=5)
+        interrupter.join(timeout=5)
     finally:
         RecoveryWorkflow._require_an_unfenced_medium = original_require_an_unfenced_medium
 
-    assert outcome["kind"] == "refused"
-    assert outcome["refusal"] is Refusal.WORKFLOW_ALREADY_FINISHED
+    assert open_trial_outcome["kind"] == "returned"
+    assert interrupt_outcome["kind"] == "returned"
     assert flow.stage is RecoveryStage.INTERRUPTED
+    assert [entry.event for entry in flow.audit()] == [
+        SnapshotAuditEvent.RECOVERY_STARTED,
+        SnapshotAuditEvent.RECOVERY_TRIAL_OPENED,
+        SnapshotAuditEvent.RECOVERY_INTERRUPTED,
+    ]
 
 
 def test_two_real_threads_interrupting_the_same_workflow_stay_in_vocabulary(
@@ -8842,6 +9204,19 @@ def test_two_real_threads_interrupting_the_same_workflow_stay_in_vocabulary(
     fix its own stage write met `_sealed_assign`'s terminal-stage guard and
     raised a bare `AttributeError` rather than the `RecoveryRefused` every
     other terminal encounter in this module answers with.
+
+    R19 (security review): `interrupt`'s whole body is now held under
+    `self._lock`, so the second call can no longer run concurrently with the
+    first at all — it blocks at the lock the moment it is reached, however
+    long the first call pauses. **The winner is therefore whichever thread's
+    `interrupt()` call is entered — and so acquires the lock — first, not
+    whichever one is left unblocked by an injected pause**: here that is the
+    "first" thread (paused *after* it already holds the lock), so it is
+    "first" that finishes and returns, and "second" that blocks on the lock
+    for the whole pause and then meets an already-terminal workflow once
+    unblocked. The outcome inverts from round 18's version of this test for
+    exactly that reason — the pause used to leave a genuine gap for another
+    thread to race into; now it cannot, because the lock is held across it.
     """
 
     flow = workflow(observations)
@@ -8857,9 +9232,9 @@ def test_two_real_threads_interrupting_the_same_workflow_stay_in_vocabulary(
 
     def racy_require_this_sitting(self: RecoveryWorkflow, session_id: str) -> None:
         original_require_this_sitting(self, session_id)
-        # Only the first call through pauses here — the second call is the
-        # one this test needs to run to completion, unblocked, while the
-        # first waits.
+        # Only the first call through pauses here, while it already holds
+        # `self._lock` — the second call cannot enter `interrupt()`'s body
+        # at all until this pause ends and the first call finishes.
         if not paused_once.is_set():
             paused_once.set()
             sitting_checked.set()
@@ -8881,20 +9256,22 @@ def test_two_real_threads_interrupting_the_same_workflow_stay_in_vocabulary(
         first = threading.Thread(target=do_interrupt, args=("first",))
         first.start()
         assert sitting_checked.wait(timeout=5)
+        # Blocks on `self._lock`, held by the paused "first" call; joined
+        # only after the release below.
         second = threading.Thread(target=do_interrupt, args=("second",))
         second.start()
-        second.join(timeout=5)
         let_first_interrupt_continue.set()
         first.join(timeout=5)
+        second.join(timeout=5)
     finally:
         RecoveryWorkflow._require_this_sitting = original_require_this_sitting
 
-    # The second call, unblocked, moved the stage to `INTERRUPTED` first and
-    # returned normally. The first call's own write then met an already
-    # terminal workflow — refused, in vocabulary, not a crash.
-    assert outcomes["second"]["kind"] == "returned"
-    assert outcomes["first"]["kind"] == "refused"
-    assert outcomes["first"]["refusal"] is Refusal.WORKFLOW_ALREADY_FINISHED
+    # The lock makes this deterministic: "first" already held it when it
+    # paused, so "first" always finishes and returns, and "second" — blocked
+    # the whole time — always meets the now-terminal workflow afterwards.
+    assert outcomes["first"]["kind"] == "returned"
+    assert outcomes["second"]["kind"] == "refused"
+    assert outcomes["second"]["refusal"] is Refusal.WORKFLOW_ALREADY_FINISHED
     assert flow.stage is RecoveryStage.INTERRUPTED
 
 

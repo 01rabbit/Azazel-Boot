@@ -470,10 +470,57 @@ answers `RecoveryRefused(WORKFLOW_ALREADY_FINISHED)` rather than a bare
 `AttributeError`, at the one place every one of these writes passes through
 regardless of how many statements precede it. Round seventeen's re-check is
 removed rather than kept alongside the general fix — a guard that cannot fail
-is not a guard. The race itself is still not eliminated — which thread's
-write lands first is still nondeterministic — and still does not need to be:
-no write these races contest is ever returned to a caller, and `holds()` asks
-the stage as well as the object.
+is not a guard.
+
+**And that claim — "no write these races contest is ever returned to a
+caller" — was itself wrong, for the one pairing round eighteen never
+considered: two calls to the *same* method, both legitimate.** Round
+eighteen's fix answers a *losing* thread's write correctly; it says nothing
+about whether two winners can exist. A round-nineteen review drove two
+genuinely concurrent, entirely legitimate `commit()` calls on one
+`TRIAL_OPEN` workflow — no `interrupt()`, no hostile input — and got a real
+double commit: both calls returned, each with its own honestly minted
+`RecoveryCandidate`, and the audit held two `RECOVERY_COMPLETED` entries for
+a workflow whose whole design is one-way and audited exactly once. Worse,
+one of the two legitimately *returned* candidates then failed `holds()`,
+because the other thread's write landed on top of it after the first had
+already read its own value back to return. This is not the "wrong
+exception type" class round eighteen closes; the race itself, not merely
+which vocabulary a loser meets, needed closing. Every `RecoveryWorkflow`
+now holds a per-instance `_lock` (a `threading.RLock`, reentrant because
+`_refuse_gate` calls back into `_sealed_assign` on the same thread, and
+`attempt()` can call back into `interrupt()` the same way) for the whole
+body of `start`, `open_trial`, `commit`, `interrupt` and `_sealed_assign`
+itself. No second call on the same workflow — this method or a different
+one, `interrupt` racing in included — can begin at all until whichever one
+is currently running has completely finished. The race is not narrowed
+this time; it is closed: two calls into any of these five now serialise
+completely, so there is no window left for either to observe state the
+other is mid-write on. Round eighteen's `_sealed_assign` fix stays in
+place as the backstop for a caller who reaches it directly, bypassing the
+lock the public methods take — the same reach this module has never
+claimed a capability boundary against, only "the accidental reach".
+
+**A sibling of the same shape existed one step upstream, in
+`_remember_the_medium`** (called from every `preflight()`, which this
+document calls "free, read-only and unlimited" — an explicit invitation to
+call it as often and as concurrently as a caller likes). Its own
+check-then-record over `_JUDGED_BY` — "has this medium been judged before;
+if not, start a fresh record" — had the identical unlocked shape
+`_SNAPSHOTS_RECORDED`'s did before round eighteen. Two real threads
+preflighting the *same* medium concurrently, the first time it is judged,
+could each see no prior record, each build their own, and the second write
+silently discard the first thread's verdict from the index — not from
+`_MINTED_HERE`, so `verdict_was_minted_here` still answers correctly for
+it, but `_medium_was_judged` then answers falsely for a verdict that
+genuinely did judge this exact medium, and `may_migrate`/
+`note_snapshot_written` refuse it with `MEDIUM_MOVED_SINCE_THE_PREFLIGHT` —
+fails closed, since nothing illegitimate is ever granted, but still a real
+misclassification of the kind D7's checks exist to get right. Fixed the
+same way: `_JUDGED_LOCK`, a lock of its own rather than sharing
+`_WRITE_LOCK`, since the two guard independent state reached from
+independent call paths and sharing one lock would serialise two unrelated
+operations against each other for no reason this module's state needs.
 
 **One pair cannot be contested, and saying so is better than a test that looks
 like it proves it.** D8 orders key acquisition before integrity, but at the
