@@ -638,6 +638,26 @@ accidental reach". (A round-twenty doctrine review caught an earlier draft
 of this paragraph, and the matching source comment, saying "bypassing the
 lock" — both were wrong the same way, and are corrected here.)
 
+**A round-seven re-check survived 32 rounds after the fix that made it
+redundant, and a round-39 review found it.** Before the candidate write
+above, `commit()` re-checks the same snapshot and — until this round — the
+stage, added in round 7 so an `attempt()`-triggered interruption raised
+`WORKFLOW_ALREADY_FINISHED` rather than the seal's bare `AttributeError`.
+From `TRIAL_OPEN`, `_STAGE_EDGES` only reaches a terminal stage, so by the
+time that re-check ran, the workflow was either still `TRIAL_OPEN` or
+already terminal — and every statement between it and the candidate write
+already has an identical backstop: `_require_an_unfenced_medium()` refuses
+through `_refuse_gate`, which carries the same terminal-stage guard
+(originally built, per its own docstring, for exactly the rows this
+re-check did *not* cover), and the candidate write itself goes through
+`_sealed_assign`'s own guard. A mutation deleting the re-check passed the
+whole suite. A test built specifically to distinguish it — racing a fence
+and an interruption together, to reach `_refuse_gate` with a different
+classification available — still answered `WORKFLOW_ALREADY_FINISHED`,
+confirming the redundancy is total rather than a common-case coincidence.
+Removed, the same way round eighteen removed its sibling one write later:
+a guard that cannot fail is not a guard.
+
 **`commit` does not hold `self._lock` across its call into
 `_require_the_gates`, and a round-twenty review is why.** `_require_the_
 gates` is where `acquisition.attempt()` lives — "the one step in this

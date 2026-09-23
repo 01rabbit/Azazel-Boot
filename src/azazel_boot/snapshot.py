@@ -2503,12 +2503,29 @@ class RecoveryWorkflow:
             # `RECOVERY_SNAPSHOT_SUBSTITUTED` anywhere. The substitution this whole
             # design exists to notice, through the one wait in the function.
             self._require_the_same_snapshot(snapshot)
-            # `attempt()` is caller code called mid-gate, and a review interrupted
-            # the workflow from inside it. The stage move then raised
-            # `AttributeError` from the seal — outside this module's refusal
-            # vocabulary, so a caller writing `except RecoveryRefused` crashed.
-            # `WORKFLOW_ALREADY_FINISHED` exists for exactly this.
-            self._require_stage(RecoveryStage.TRIAL_OPEN)
+            # **A round-seven re-check, removed by a round-39 review for the
+            # same reason round eighteen removed its sibling below.** This
+            # used to be `self._require_stage(RecoveryStage.TRIAL_OPEN)`,
+            # added so `attempt()` interrupting the workflow from inside
+            # caller code raised `WORKFLOW_ALREADY_FINISHED` rather than the
+            # seal's bare `AttributeError`. From `TRIAL_OPEN`,
+            # `_STAGE_EDGES` only reaches `TERMINAL_STAGES` — so by the time
+            # this line ran, the stage was either still `TRIAL_OPEN` (the
+            # check passed) or already terminal, and every statement between
+            # here and the candidate write has its own identical backstop:
+            # `_require_an_unfenced_medium()` refuses through `_refuse_gate`,
+            # whose own docstring names this exact history ("every other row
+            # reached this function first... a guard over one row"), and the
+            # candidate write itself goes through `_sealed_assign`'s
+            # terminal-stage guard. A mutation deleting this line passed the
+            # whole suite, including a test built to catch it by racing a
+            # fence and an interruption together specifically to reach
+            # `_refuse_gate` with a different classification available —
+            # `_refuse_gate`'s own backstop answered `WORKFLOW_ALREADY_
+            # FINISHED` regardless. "A guard that cannot fail is not a
+            # guard" — this module's own words, about
+            # `_require_this_sitting`, apply here without needing a new
+            # sentence.
 
             # The candidate is minted and held **before** the stage becomes
             # terminal, because `_sealed_assign` refuses to move anything once it
@@ -2887,13 +2904,18 @@ class RecoveryWorkflow:
         """Refuse a gate — in this module's vocabulary, whatever the stage.
 
         `attempt()` is caller code called mid-gate, and a review interrupted
-        the workflow from inside it. Round seven noticed that and re-checked
-        the stage in `commit`, **after** `_require_the_gates` had returned —
-        so the one row it drove (an operator who confirms, over an unfenced
-        medium) reached that re-check, and every other row reached this
-        function first: an operator who stops mid-prompt and then declines, or
-        stops and has the medium pulled, hit `_sealed_assign`'s terminal rule
-        and got an `AttributeError`. That is outside `RecoveryRefused` and
+        the workflow from inside it. Round seven noticed that and, at the
+        time, added a `_require_stage` re-check in `commit`, **after**
+        `_require_the_gates` had returned — so the one row it drove (an
+        operator who confirms, over an unfenced medium) reached that
+        re-check, and every other row reached this function first: an
+        operator who stops mid-prompt and then declines, or stops and has
+        the medium pulled, hit `_sealed_assign`'s terminal rule and got an
+        `AttributeError`. (A round-39 review found the re-check had become
+        fully redundant with this function's own backstop, below, and
+        removed it — every row now reaches this function, or
+        `_sealed_assign` directly, the same as it always did for all but
+        that one row.) That is outside `RecoveryRefused` and
         outside `Refused`, so the single `except` this package promises did not
         catch it, and the unhandled traceback rendered `commit`'s own frame —
         the acquisition object, the sitting and the descriptor included.

@@ -10225,6 +10225,74 @@ def test_interrupt_does_not_deadlock_against_a_commit_blocked_in_attempt(
     ]
 
 
+def test_a_fence_and_an_interruption_together_still_classify_as_the_workflow_ending(
+    observations,
+) -> None:
+    """R39 (test-suite review): tried to isolate `commit()`'s post-`attempt()`
+    `_require_stage(TRIAL_OPEN)` re-check from `_sealed_assign`'s own
+    terminal-stage guard by racing a fence *and* an interruption together —
+    reasoning that `_require_an_unfenced_medium()` sits between the two and
+    would report a *different* classification (`GATE_REFUSED`/
+    `MEDIUM_FENCED`) if reached with the workflow already terminal.
+
+    It does not: `_require_an_unfenced_medium()` refuses through
+    `_refuse_gate`, and `_refuse_gate` carries the **identical**
+    terminal-stage backstop `_sealed_assign` does (its own docstring: "Round
+    seven noticed that and re-checked the stage in `commit`... every other
+    row reached this function first... A guard that fixes one row of the
+    input space is a guard over one row. This is the same fix at the place
+    every row passes through.") — so a fenced, already-terminal medium is
+    *also* reported as `WORKFLOW_ALREADY_FINISHED`, not `MEDIUM_FENCED`, and
+    a mutation deleting the `_require_stage(TRIAL_OPEN)` re-check does not
+    change this test's outcome either (confirmed directly: the re-check is
+    fully redundant on every path this method has, not merely the common
+    one). Kept as a positive test of that "which classification wins" fact,
+    since it's a genuine invariant this module's own doctrine cares about —
+    just not, as first thought, a way to prove the re-check load-bearing.
+    """
+
+    rule = a_quarantine()
+    flow = workflow(observations, quarantine=rule)
+    snap = descriptor()
+    flow.start(
+        snap, observations, media_binding_holds=True, session_id=SESSION, started_by_operator=True
+    )
+    flow.open_trial(snap, observations, media_binding_holds=True, session_id=SESSION)
+
+    acquisition = _BlocksOnAnEvent()
+    commit_outcome: dict[str, object] = {}
+
+    def do_commit() -> None:
+        try:
+            flow.commit(
+                snap,
+                observations,
+                media_binding_holds=True,
+                session_id=SESSION,
+                acquisition=acquisition,
+                confirmed=True,
+            )
+            commit_outcome["kind"] = "returned"
+        except RecoveryRefused as refused:
+            commit_outcome["kind"] = "refused"
+            commit_outcome["refusal"] = refused.refusal
+
+    committer = threading.Thread(target=do_commit)
+    committer.start()
+    assert acquisition.entered.wait(timeout=30)
+
+    flow.interrupt(session_id=SESSION)
+    assert flow.stage is RecoveryStage.INTERRUPTED
+    rule.fence()
+    assert rule.is_fenced is True
+
+    acquisition.release.set()
+    committer.join(timeout=30)
+    assert not committer.is_alive(), "commit() never woke up after attempt() returned"
+    assert commit_outcome["kind"] == "refused"
+    assert commit_outcome["refusal"] is Refusal.WORKFLOW_ALREADY_FINISHED
+
+
 def test_the_workflow_lock_is_reentrant_not_a_plain_lock(observations) -> None:
     """R20 (test-suite review): the reentrant property, proved directly.
 
