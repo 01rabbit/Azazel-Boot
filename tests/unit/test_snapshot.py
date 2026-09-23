@@ -120,6 +120,31 @@ def descriptor(**overrides) -> SnapshotDescriptor:
     return SnapshotDescriptor(**fields)
 
 
+def _half_built(cls, **arguments):
+    """An instance whose `__init__` raised before assigning any slot.
+
+    `__new__` always runs before `__init__`, so the instance and its exact
+    `type()` exist the moment the constructor call is made — `__init__`
+    raising partway through leaves an object of the right class with none
+    of its `__slots__` set, which is exactly the shape a round-22/23
+    security review found several dunder methods unprepared for. Walking
+    the raised exception's own traceback for the `__init__` frame reaches
+    that live half-built `self` directly, the same object a debugger
+    evaluating an expression at a breakpoint would reach.
+    """
+
+    try:
+        cls(**arguments)
+    except TypeError as exc:
+        tb = exc.__traceback__
+        while tb is not None:
+            if tb.tb_frame.f_code.co_name == "__init__":
+                return tb.tb_frame.f_locals["self"]
+            tb = tb.tb_next
+        raise AssertionError("no __init__ frame found in traceback") from exc
+    raise AssertionError("construction unexpectedly succeeded")
+
+
 def capacity(required: int = 100, available: int = 1000) -> CapacityReport:
     return CapacityReport(required=required, available=available)
 
@@ -5657,6 +5682,54 @@ def test_a_snapshot_audit_entrys_repr_survives_an_instance_that_was_never_built(
         assert "SnapshotAuditEntry(unbuilt)" in rendered
         assert FINGERPRINT not in rendered
         assert MEDIUM.identity not in rendered
+
+
+def test_a_half_built_snapshot_descriptor_is_never_equal_and_refuses_to_hash() -> None:
+    """R23 (security review): the repr fix's own regression test, one level
+    deeper. `__eq__`/`__hash__` read `_fields_of(self)` unconditionally and
+    crashed with a second `AttributeError` the same way `__repr__` did
+    before round 22 — not reachable through `pytest --showlocals` (that
+    machinery only ever calls `repr()` on frame locals, never `==`/
+    `hash()`), but reachable by any caller that already holds a reference to
+    the half-built instance, such as a debugger evaluating an expression at
+    a breakpoint, or identity-set dedup over caught construction failures.
+    A half-built instance carries no value, so it is never equal to
+    anything — including another half-built instance, including itself —
+    and hashing it is a deliberate `TypeError`, not a crash.
+    """
+
+    half = _half_built(
+        SnapshotDescriptor,
+        container_version=1,
+        schema_version=1,
+        integrity=SnapshotIntegrity.VERIFIED,
+        fingerprint="bad fingerprint with spaces",
+    )
+    built = descriptor()
+
+    assert (half == built) is False
+    assert (built == half) is False
+    assert (half == half) is False
+    with pytest.raises(TypeError, match="half-built SnapshotDescriptor is not hashable"):
+        hash(half)
+
+
+def test_a_half_built_snapshot_audit_entry_is_never_equal_and_refuses_to_hash() -> None:
+    """R23 (security review): the same gap, for the object this module's own
+    docstring calls "the object destined for a log"."""
+
+    half = _half_built(
+        SnapshotAuditEntry,
+        event=SnapshotAuditEvent.RECOVERY_COMPLETED,
+        fingerprint="bad fingerprint with spaces",
+    )
+    built = SnapshotAuditEntry(event=SnapshotAuditEvent.RECOVERY_COMPLETED)
+
+    assert (half == built) is False
+    assert (built == half) is False
+    assert (half == half) is False
+    with pytest.raises(TypeError, match="half-built SnapshotAuditEntry is not hashable"):
+        hash(half)
 
 
 def test_a_snapshot_mutated_during_the_prompt_is_a_substitution(observations) -> None:

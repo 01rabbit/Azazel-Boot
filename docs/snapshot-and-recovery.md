@@ -721,6 +721,24 @@ own `__init__` assigns — with `getattr(self, "<field>", None)`, and returns
 a plain `"<ClassName>(unbuilt)"` when it is absent, before touching anything
 that construction never reached.
 
+**`__eq__` and `__hash__` on the same two classes shared the identical gap,
+found in the following round.** They are the only two classes in this file
+that define either, and both read every field unconditionally through
+`_fields_of(self)`/`self._fields()` — the same crash `__repr__` had, one
+call deeper, just not reachable through `pytest --showlocals` (that
+machinery only ever calls `repr()` on frame locals, never `==` or
+`hash()`). It needs a caller that already holds a reference to the
+half-built instance by some other means — a debugger evaluating an
+expression at a breakpoint, or identity-set dedup over caught construction
+failures — which is a narrower reach than `__repr__`'s, but the module had
+just finished hardening this exact shape and left these two dunders behind.
+Each class now has a `_fields_if_built()` method that returns `None`
+instead of the field tuple when its canary is absent; `__eq__` returns
+`False` for either operand missing it — a half-built instance carries no
+value, so it is never equal to anything, itself included — and `__hash__`
+raises a deliberate `TypeError` naming the class, rather than crash with
+the same bare `AttributeError` the fields read would otherwise produce.
+
 **The same fourth limit `azazel_boot.quarantine` states applies here.** A
 `__setattr__` stops an attribute being rebound; it does not stop the object it
 points at being mutated, and both `RecoveryWorkflow` and `MigrationLedger`

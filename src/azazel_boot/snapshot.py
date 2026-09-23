@@ -232,10 +232,29 @@ class SnapshotDescriptor:
 
         if type(self) is not SnapshotDescriptor or type(other) is not SnapshotDescriptor:
             return NotImplemented
-        return _fields_of(self) == _fields_of(other)
+        mine = self._fields_if_built()
+        theirs = other._fields_if_built()
+        if mine is None or theirs is None:
+            # A half-built instance — `__init__` validated some field and
+            # raised before assigning any of them (round 22's `__repr__` fix
+            # is the same shape; round 23's security review found `__eq__`
+            # and `__hash__` shared the gap). There is no value here to be
+            # equal *of*, so it is never equal to anything, itself included.
+            return False
+        return mine == theirs
+
+    def _fields_if_built(self) -> tuple[object, ...] | None:
+        """`_fields_of(self)`, or `None` for an instance `__init__` never finished."""
+
+        if getattr(self, "_container_version", None) is None:
+            return None
+        return _fields_of(self)
 
     def __hash__(self) -> int:
-        return hash((SnapshotDescriptor, *_fields_of(self)))
+        fields = self._fields_if_built()
+        if fields is None:
+            raise TypeError("a half-built SnapshotDescriptor is not hashable")
+        return hash((SnapshotDescriptor, *fields))
 
 
 def _require_two_measurements(
@@ -1654,10 +1673,26 @@ class SnapshotAuditEntry:
 
         if type(self) is not SnapshotAuditEntry or type(other) is not SnapshotAuditEntry:
             return NotImplemented
-        return self._fields() == other._fields()
+        mine = self._fields_if_built()
+        theirs = other._fields_if_built()
+        if mine is None or theirs is None:
+            # Same half-built gap `SnapshotDescriptor.__eq__` states in full,
+            # found for this class in the same round-23 security review.
+            return False
+        return mine == theirs
+
+    def _fields_if_built(self) -> tuple[object, ...] | None:
+        """`self._fields()`, or `None` for an instance `__init__` never finished."""
+
+        if getattr(self, "_event", None) is None:
+            return None
+        return self._fields()
 
     def __hash__(self) -> int:
-        return hash((SnapshotAuditEntry, *self._fields()))
+        fields = self._fields_if_built()
+        if fields is None:
+            raise TypeError("a half-built SnapshotAuditEntry is not hashable")
+        return hash((SnapshotAuditEntry, *fields))
 
 
 class RecoveryCandidate:
