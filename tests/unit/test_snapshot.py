@@ -6471,6 +6471,61 @@ def test_the_pin_is_typed_when_it_is_written_not_only_when(observations) -> None
     assert flow.stage is RecoveryStage.NOT_STARTED
 
 
+def test_a_stage_written_through_the_seal_is_typed_before_it_is_compared(
+    observations,
+) -> None:
+    """R16 (security review): the same gap, an eighth time, and the
+    sharpest yet — a `_stage` write was never typed before the edge table,
+    `_REACHED_WITHOUT_GATES` and the `is RecoveryStage.COMMITTED` clearance
+    check all read it.
+
+    A stand-in answering `==`/`in`/`.value` like `RecoveryStage.COMMITTED`
+    but failing `is` it slides through the *permissive* clearance branch —
+    the one `open_trial` alone already satisfies — without D8's gates ever
+    being asked. Nothing this bypasses lets a caller reach an accepted
+    `RecoveryCandidate` (`holds`/`candidate_applies_to` ask `is`, which a
+    stand-in cannot spoof) and the `Quarantine` is never touched, but
+    `flow.stage` then answers `== RecoveryStage.COMMITTED` for any caller
+    who wrote the ordinary comparison instead of this module's own
+    insisted-on `is`, while the audit stays at `RECOVERY_TRIAL_OPENED`
+    forever and the workflow is stuck — every later call meets
+    `WORKFLOW_ALREADY_FINISHED`.
+    """
+
+    class FakeCommitted:
+        value = "committed"
+
+        def __eq__(self, other: object) -> bool:
+            return other is RecoveryStage.COMMITTED or getattr(other, "value", None) == "committed"
+
+        def __ne__(self, other: object) -> bool:
+            return not self.__eq__(other)
+
+        def __hash__(self) -> int:
+            return hash(RecoveryStage.COMMITTED)
+
+    snap = descriptor()
+    flow = workflow(observations)
+    flow.start(
+        snap, observations, media_binding_holds=True, session_id=SESSION, started_by_operator=True
+    )
+    flow.open_trial(snap, observations, media_binding_holds=True, session_id=SESSION)
+    flow._require_the_gates(
+        snap,
+        observations,
+        session_id=SESSION,
+        media_binding_holds=True,
+        acquisition=None,
+        confirmed=None,
+    )
+
+    fake = FakeCommitted()
+    with pytest.raises(AttributeError, match="a stage must be a RecoveryStage exactly"):
+        flow._sealed_assign("_stage", fake)
+    assert flow.stage is RecoveryStage.TRIAL_OPEN
+    assert flow.stage is not fake
+
+
 def test_a_candidate_cannot_be_minted_without_a_pin_via_the_bound_methods_directly(
     observations,
 ) -> None:

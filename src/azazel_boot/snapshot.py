@@ -2382,6 +2382,26 @@ class RecoveryWorkflow:
                 "this workflow has ended; a terminal stage is terminal, and a "
                 "further attempt is a new workflow that runs every gate again"
             )
+        # **The same gap, an eighth time, and the sharpest yet.** Every other
+        # write this method accepts pins the value's exact type before
+        # trusting it in a comparison; a `_stage` write never did, and every
+        # check below it — the edge table, `_REACHED_WITHOUT_GATES`, the
+        # `is RecoveryStage.COMMITTED` branch that decides which clearance is
+        # demanded — reads `value` before its type is known. A round-sixteen
+        # review built a stand-in answering `==`/`in`/`.value` like
+        # `RecoveryStage.COMMITTED` but failing `is` it, and slid through the
+        # *permissive* clearance branch below (the one `open_trial`'s own
+        # transition already satisfies) without ever asking D8's gates. The
+        # `Quarantine` was never touched and no candidate was minted — `holds`
+        # and `candidate_applies_to` still ask `is`, which this could not
+        # spoof — but `flow.stage` then answered `== COMMITTED` for any
+        # caller who wrote the ordinary comparison instead of this module's
+        # own insisted-on `is`, while the audit stayed at
+        # `RECOVERY_TRIAL_OPENED` forever and the workflow was permanently
+        # stuck. Pinned here, the same as every other value this method
+        # accepts.
+        if name == "_stage" and type(value) is not RecoveryStage:
+            raise AttributeError("a stage must be a RecoveryStage exactly")
         if name == "_stage" and (self._stage.value, value.value) not in _STAGE_EDGES:
             raise AttributeError(
                 "the stage travels its own graph; a jump between stages is not "

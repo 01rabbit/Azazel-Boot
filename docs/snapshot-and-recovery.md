@@ -497,6 +497,22 @@ runs `_require_a_real_snapshot` on a `_pinned` write — the identical check
 every legitimate entrance already runs on its own `snapshot` argument,
 reused rather than reimplemented.
 
+**And `_stage` itself — the sharpest instance of the pattern yet.** Every
+check `_sealed_assign` runs on a `_stage` write — the edge table, whether
+the value is one reached without gates, whether it is exactly `COMMITTED`
+— reads `value` before a round-sixteen review found its type was never
+pinned. A stand-in answering `==`/`in`/`.value` like
+`RecoveryStage.COMMITTED` while failing `is` it slid through the
+*permissive* clearance branch — the one `open_trial`'s own transition
+already satisfies — without D8's gates ever being asked. `holds()` and
+`candidate_applies_to()` ask `is`, which a stand-in cannot spoof, so no
+accepted `RecoveryCandidate` and no touch on the `Quarantine` followed —
+but `flow.stage` then answered `== RecoveryStage.COMMITTED` for any caller
+who wrote the ordinary comparison rather than this module's own
+insisted-on `is`, while the audit stayed at `RECOVERY_TRIAL_OPENED`
+forever and the workflow became permanently stuck. `_sealed_assign` now
+pins `type(value) is RecoveryStage` before any of those checks read it.
+
 ## What never leaves, and what the audit may hold
 
 No second partition, no host disk, no network, no USB export, no temporary file
