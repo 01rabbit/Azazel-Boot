@@ -5124,16 +5124,24 @@ def test_two_real_threads_preflighting_the_same_medium_both_stay_judged() -> Non
         )
         outcomes[label]["verdict"] = verdict
 
+    # A generous timeout, not a tight one: nothing here waits on the lock
+    # this test is unrelated to, only on ordinary OS thread scheduling, and
+    # a loaded machine can occasionally take longer than a tight bound to
+    # hand either thread a timeslice — a false failure from that would be
+    # exactly the "flaky by design" antipattern this file's own review
+    # history has flagged elsewhere. A mutant with the check-then-record
+    # race reopened still fails fast, well within this bound, once both
+    # threads run.
     try:
         a_thread = threading.Thread(target=do_preflight, args=("a",))
         a_thread.start()
-        assert arrived["a"].wait(timeout=5)
+        assert arrived["a"].wait(timeout=30)
         b_thread = threading.Thread(target=do_preflight, args=("b",))
         b_thread.start()
-        assert arrived["b"].wait(timeout=5)
+        assert arrived["b"].wait(timeout=30)
         release.set()
-        a_thread.join(timeout=5)
-        b_thread.join(timeout=5)
+        a_thread.join(timeout=30)
+        b_thread.join(timeout=30)
     finally:
         module._WeakIdentityIndex.get = original_get
 
@@ -8467,6 +8475,13 @@ def test_a_fingerprint_is_an_opaque_token_and_not_a_rendered_record() -> None:
     # And an actually opaque one is accepted, so this is not refusing
     # everything.
     assert descriptor(fingerprint="b3c1d9e07f2a4856").fingerprint == "b3c1d9e07f2a4856"
+
+    # R19 (test-suite review): the length check's own boundary was never
+    # driven — only 129 (rejected) and a short opaque token (accepted), with
+    # nothing at the boundary itself. A mutant tightening `> 128` to `>= 128`
+    # survived the whole suite undetected. Isolated the same way R11 isolated
+    # each forbidden character above: the true boundary value, accepted.
+    assert descriptor(fingerprint="a" * 128).fingerprint == "a" * 128
 
 
 def test_the_seals_other_door_is_shut_on_every_class_that_has_one() -> None:
