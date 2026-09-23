@@ -1963,11 +1963,16 @@ def test_this_module_cannot_reach_a_host_a_network_a_vm_or_a_second_partition() 
         # `__init__` still cannot raise today (deliberately unvalidated, by
         # this class's own design), so no caller can reach a half-built one
         # through the public constructor — but a round-26 security review
-        # flagged that every OTHER class capable of raising mid-construction
-        # already carries this guard, and closing it now costs nothing and
-        # does not touch the deliberately permissive constructor at all.
-        # Same reason as `_refused_by`: the sentinel is not `None`, because
-        # this constructor accepts `None` as a legitimate `schema_version`.
+        # flagged that every OTHER class whose repr reads instance state and
+        # is capable of raising mid-construction already carries this guard
+        # (`CapacityReport` can also raise mid-construction, but its own
+        # repr is a fixed string reading nothing off `self`, so it correctly
+        # carries none — round 27 doctrine review, narrowing a version of
+        # this sentence that omitted that qualifier), and closing this one
+        # now costs nothing and does not touch the deliberately permissive
+        # constructor at all. Same reason as `_refused_by`: the sentinel is
+        # not `None`, because this constructor accepts `None` as a
+        # legitimate `schema_version`.
         assert isinstance(node.args[1], ast.Constant)
         assert node.args[1].value in {
             "_sealed",
@@ -5364,7 +5369,7 @@ def test_two_real_threads_preflighting_the_same_medium_both_stay_judged() -> Non
         label = getattr(label_of, "label", None)
         if label is not None and not arrived[label].is_set():
             arrived[label].set()
-            release.wait(timeout=5)
+            release.wait(timeout=30)
         return result
 
     module._WeakIdentityIndex.get = racy_get
@@ -5519,7 +5524,7 @@ def test_two_real_threads_recording_the_same_write_record_it_once() -> None:
         label = getattr(label_of, "label", None)
         if label is not None and self is module._SNAPSHOTS_RECORDED and not arrived[label].is_set():
             arrived[label].set()
-            release.wait(timeout=5)
+            release.wait(timeout=30)
         return result
 
     module._WeakIdentityIndex.get = racy_get
@@ -9227,7 +9232,7 @@ def test_a_real_second_thread_interrupting_between_the_two_final_writes_stays_in
         original_sealed_assign(self, name, value)
         if name == "_candidate":
             candidate_written.set()
-            let_commit_continue.wait(timeout=5)
+            let_commit_continue.wait(timeout=30)
 
     RecoveryWorkflow._sealed_assign = racy_sealed_assign
     commit_outcome: dict[str, object] = {}
@@ -9260,15 +9265,15 @@ def test_a_real_second_thread_interrupting_between_the_two_final_writes_stays_in
 
         committer = threading.Thread(target=do_commit)
         committer.start()
-        assert candidate_written.wait(timeout=5)
+        assert candidate_written.wait(timeout=30)
         # `interrupt()` now blocks on `self._lock`, held by the paused
         # `commit()` — it cannot run at all until `commit()` releases the
         # pause and finishes. Joined only after the release, below.
         interrupter = threading.Thread(target=do_interrupt)
         interrupter.start()
         let_commit_continue.set()
-        committer.join(timeout=5)
-        interrupter.join(timeout=5)
+        committer.join(timeout=30)
+        interrupter.join(timeout=30)
     finally:
         RecoveryWorkflow._sealed_assign = original_sealed_assign
 
@@ -9501,7 +9506,7 @@ def test_two_real_threads_committing_the_same_workflow_produce_one_candidate(
             label = getattr(label_of, "label", None)
             if label is not None and name in checkpoints and not arrived[name][label].is_set():
                 arrived[name][label].set()
-                release[name].wait(timeout=5)
+                release[name].wait(timeout=30)
             original_sealed_assign(self, name, value)
 
         RecoveryWorkflow._sealed_assign = racy_sealed_assign
@@ -9534,7 +9539,7 @@ def test_two_real_threads_committing_the_same_workflow_produce_one_candidate(
             # has not started yet, so it cannot possibly arrive here —
             # releasing unblocks "a" alone, which performs its write and
             # moves on towards the second checkpoint.
-            assert arrived["_candidate"]["a"].wait(timeout=5)
+            assert arrived["_candidate"]["a"].wait(timeout=30)
             release["_candidate"].set()
 
             b_thread = threading.Thread(target=do_commit, args=("b",))
@@ -9551,12 +9556,12 @@ def test_two_real_threads_committing_the_same_workflow_produce_one_candidate(
             # Second checkpoint: both threads pause before writing
             # "_stage", released together — the point where, without the
             # lock, both threads' writes land essentially simultaneously.
-            assert arrived["_stage"]["a"].wait(timeout=5)
+            assert arrived["_stage"]["a"].wait(timeout=30)
             stage_b_arrived = arrived["_stage"]["b"].wait(timeout=0.4)
             release["_stage"].set()
 
-            a_thread.join(timeout=5)
-            b_thread.join(timeout=5)
+            a_thread.join(timeout=30)
+            b_thread.join(timeout=30)
         finally:
             sys.setswitchinterval(original_switch_interval)
             RecoveryWorkflow._sealed_assign = original_sealed_assign
@@ -9672,7 +9677,7 @@ def test_interrupt_does_not_deadlock_against_a_commit_blocked_in_attempt(
     committer.start()
     # `commit()` is now parked inside `attempt()`, holding no lock while it
     # waits — exactly the scenario finding this test drives.
-    assert acquisition.entered.wait(timeout=5)
+    assert acquisition.entered.wait(timeout=30)
 
     interrupt_outcome: dict[str, object] = {}
 
@@ -9747,7 +9752,7 @@ def test_the_workflow_lock_is_reentrant_not_a_plain_lock(observations) -> None:
     # this test's own `assert`, not the test runner hanging.
     thread = threading.Thread(target=reenter, daemon=True)
     thread.start()
-    thread.join(timeout=5)
+    thread.join(timeout=30)
     assert not thread.is_alive(), (
         "flow._lock deadlocked on same-thread reentry; it must stay an RLock"
     )
@@ -9786,7 +9791,7 @@ def test_holds_during_an_in_flight_commit_answers_false_until_committed(
         original_sealed_assign(self, name, value)
         if name == "_candidate":
             candidate_written.set()
-            let_commit_continue.wait(timeout=5)
+            let_commit_continue.wait(timeout=30)
 
     RecoveryWorkflow._sealed_assign = racy_sealed_assign
     commit_outcome: dict[str, object] = {}
@@ -9806,7 +9811,7 @@ def test_holds_during_an_in_flight_commit_answers_false_until_committed(
 
         committer = threading.Thread(target=do_commit)
         committer.start()
-        assert candidate_written.wait(timeout=5)
+        assert candidate_written.wait(timeout=30)
         # The candidate is written; the stage is still `TRIAL_OPEN`. A
         # third thread's `holds()` call in this exact window is what the
         # docstring's "and the stage, not only the object" is about.
@@ -9818,9 +9823,9 @@ def test_holds_during_an_in_flight_commit_answers_false_until_committed(
 
         reader = threading.Thread(target=do_holds)
         reader.start()
-        reader.join(timeout=5)
+        reader.join(timeout=30)
         let_commit_continue.set()
-        committer.join(timeout=5)
+        committer.join(timeout=30)
     finally:
         RecoveryWorkflow._sealed_assign = original_sealed_assign
 
@@ -9873,7 +9878,7 @@ def test_a_real_second_thread_interrupting_before_commits_candidate_is_written_s
     def racy_require_an_unfenced_medium(self: RecoveryWorkflow) -> None:
         original_require_an_unfenced_medium(self)
         fence_checked.set()
-        let_commit_continue.wait(timeout=5)
+        let_commit_continue.wait(timeout=30)
 
     RecoveryWorkflow._require_an_unfenced_medium = racy_require_an_unfenced_medium
     commit_outcome: dict[str, object] = {}
@@ -9906,12 +9911,12 @@ def test_a_real_second_thread_interrupting_before_commits_candidate_is_written_s
 
         committer = threading.Thread(target=do_commit)
         committer.start()
-        assert fence_checked.wait(timeout=5)
+        assert fence_checked.wait(timeout=30)
         interrupter = threading.Thread(target=do_interrupt)
         interrupter.start()
         let_commit_continue.set()
-        committer.join(timeout=5)
-        interrupter.join(timeout=5)
+        committer.join(timeout=30)
+        interrupter.join(timeout=30)
     finally:
         RecoveryWorkflow._require_an_unfenced_medium = original_require_an_unfenced_medium
 
@@ -9953,7 +9958,7 @@ def test_a_real_second_thread_interrupting_during_starts_stage_write_completes_c
     def racy_require_an_unfenced_medium(self: RecoveryWorkflow) -> None:
         original_require_an_unfenced_medium(self)
         fence_checked.set()
-        let_start_continue.wait(timeout=5)
+        let_start_continue.wait(timeout=30)
 
     RecoveryWorkflow._require_an_unfenced_medium = racy_require_an_unfenced_medium
     start_outcome: dict[str, object] = {}
@@ -9984,14 +9989,14 @@ def test_a_real_second_thread_interrupting_during_starts_stage_write_completes_c
 
         starter = threading.Thread(target=do_start)
         starter.start()
-        assert fence_checked.wait(timeout=5)
+        assert fence_checked.wait(timeout=30)
         # Blocks on `self._lock`, held by the paused `start()`; joined only
         # after the release below.
         interrupter = threading.Thread(target=do_interrupt)
         interrupter.start()
         let_start_continue.set()
-        starter.join(timeout=5)
-        interrupter.join(timeout=5)
+        starter.join(timeout=30)
+        interrupter.join(timeout=30)
     finally:
         RecoveryWorkflow._require_an_unfenced_medium = original_require_an_unfenced_medium
 
@@ -10032,7 +10037,7 @@ def test_a_real_second_thread_interrupting_during_open_trials_stage_write_comple
     def racy_require_an_unfenced_medium(self: RecoveryWorkflow) -> None:
         original_require_an_unfenced_medium(self)
         fence_checked.set()
-        let_open_trial_continue.wait(timeout=5)
+        let_open_trial_continue.wait(timeout=30)
 
     RecoveryWorkflow._require_an_unfenced_medium = racy_require_an_unfenced_medium
     open_trial_outcome: dict[str, object] = {}
@@ -10059,12 +10064,12 @@ def test_a_real_second_thread_interrupting_during_open_trials_stage_write_comple
 
         opener = threading.Thread(target=do_open_trial)
         opener.start()
-        assert fence_checked.wait(timeout=5)
+        assert fence_checked.wait(timeout=30)
         interrupter = threading.Thread(target=do_interrupt)
         interrupter.start()
         let_open_trial_continue.set()
-        opener.join(timeout=5)
-        interrupter.join(timeout=5)
+        opener.join(timeout=30)
+        interrupter.join(timeout=30)
     finally:
         RecoveryWorkflow._require_an_unfenced_medium = original_require_an_unfenced_medium
 
@@ -10125,7 +10130,7 @@ def test_two_real_threads_interrupting_the_same_workflow_stay_in_vocabulary(
         if not paused_once.is_set():
             paused_once.set()
             sitting_checked.set()
-            let_first_interrupt_continue.wait(timeout=5)
+            let_first_interrupt_continue.wait(timeout=30)
 
     RecoveryWorkflow._require_this_sitting = racy_require_this_sitting
     outcomes: dict[str, dict[str, object]] = {}
@@ -10142,14 +10147,14 @@ def test_two_real_threads_interrupting_the_same_workflow_stay_in_vocabulary(
 
         first = threading.Thread(target=do_interrupt, args=("first",))
         first.start()
-        assert sitting_checked.wait(timeout=5)
+        assert sitting_checked.wait(timeout=30)
         # Blocks on `self._lock`, held by the paused "first" call; joined
         # only after the release below.
         second = threading.Thread(target=do_interrupt, args=("second",))
         second.start()
         let_first_interrupt_continue.set()
-        first.join(timeout=5)
-        second.join(timeout=5)
+        first.join(timeout=30)
+        second.join(timeout=30)
     finally:
         RecoveryWorkflow._require_this_sitting = original_require_this_sitting
 

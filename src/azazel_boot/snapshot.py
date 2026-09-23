@@ -1841,8 +1841,13 @@ class RecoveryCandidate:
         reach one: `__init__` cannot currently raise, so no caller can hand
         this repr a `self` with no `_schema_version` slot. A round-26
         security review flagged the absence of this class's canary as a
-        latent gap — every sibling class in this file that *can* raise
-        mid-construction already carries one — worth closing now rather
+        latent gap — every sibling class in this file whose repr reads
+        instance state *and* can raise mid-construction already carries one
+        (`CapacityReport` can also raise mid-construction, but its own
+        `__repr__` is a fixed `"CapacityReport(<redacted>)"` that reads
+        nothing off `self`, so it correctly needs none — a round-27
+        doctrine review found this qualifier missing from an earlier,
+        unconditional version of this sentence) — worth closing now rather
         than waiting for a future validation-adding round to reopen it, the
         way round 24's `PreflightVerdict` fix did (closed in round 25).
         `None` is not the sentinel: this constructor's whole point is that
