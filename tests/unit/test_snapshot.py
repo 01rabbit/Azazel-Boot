@@ -9513,15 +9513,30 @@ def test_a_fingerprint_is_an_opaque_token_and_not_a_rendered_record() -> None:
         # added. This reconstructs a Windows-style path with the reverse
         # solidus half alone.
         "C:⧹Users⧹admin⧹.ssh⧹id_rsa",
+        # R42 (security review): every confusable named so far comes from a
+        # symbol block (Mathematical Operators, Miscellaneous Symbols and
+        # Arrows, Ornamental Dingbats, Miscellaneous Mathematical Symbols-B).
+        # Box Drawing (U+2500-U+257F) is a different block with its own
+        # diagonal pair, in ordinary use as an ASCII-art slash stand-in:
+        # U+2571 BOX DRAWINGS LIGHT DIAGONAL UPPER RIGHT TO LOWER LEFT,
+        # category `So`, NFKC/NFD-stable, officially confusable with "/".
+        # Reconstructs the same disclosure this function's founding case
+        # names.
+        "usb-SN-AA11BB22╱dev╱nvme0n1p3",
+        # R42: the backslash half of the same pair, from the same block --
+        # U+2572 BOX DRAWINGS LIGHT DIAGONAL UPPER LEFT TO LOWER RIGHT,
+        # confusable with "\", reconstructing a Windows-style path.
+        "C:╲Users╲admin╲.ssh╲id_rsa",
     ):
         with pytest.raises(TypeError, match="opaque"):
             descriptor(fingerprint=rejected)
 
-    # R41 (test-suite review): `_CONFUSABLE_DELIMITERS` holds twelve named
-    # entries (eleven plus round 41's own BIG REVERSE SOLIDUS above), and
-    # the loop above -- the only one that exercises the set at all -- left
-    # four of them, at the time, with no driving case anywhere in this
-    # file: FRACTION SLASH, SET MINUS, MATHEMATICAL RISING DIAGONAL and
+    # R41 (test-suite review): `_CONFUSABLE_DELIMITERS` held twelve named
+    # entries at the time (eleven plus round 41's own BIG REVERSE SOLIDUS
+    # above; two more, from Box Drawing, were added above in round 42), and
+    # the loop above -- the only one that exercised the set at the time --
+    # left four of them with no driving case anywhere in this file:
+    # FRACTION SLASH, SET MINUS, MATHEMATICAL RISING DIAGONAL and
     # MATHEMATICAL FALLING DIAGONAL. Deleting all four from the set
     # (confirmed by removing them directly and re-running this file) left
     # `tests/unit` fully green: a regression dropping any of the four from
@@ -9543,6 +9558,38 @@ def test_a_fingerprint_is_an_opaque_token_and_not_a_rendered_record() -> None:
         # MATHEMATICAL FALLING DIAGONAL (U+27CD) -- confusable with "\",
         # from the same block as MATHEMATICAL RISING DIAGONAL.
         "host⟍Administrator⟍Desktop",
+    ):
+        with pytest.raises(TypeError, match="opaque"):
+            descriptor(fingerprint=rejected)
+
+    # R42 (test-suite review, confirmed independently by a round-42 doctrine
+    # review counting the same set): R41's own count above was itself wrong
+    # by two. It said "left four of them ... with no driving case" and named
+    # FRACTION SLASH, SET MINUS, MATHEMATICAL RISING DIAGONAL and
+    # MATHEMATICAL FALLING DIAGONAL -- but BIG SOLIDUS (U+29F8, named by
+    # round 39) and REVERSE SOLIDUS OPERATOR (U+29F5, also named by round
+    # 39) were two more members with no driving case anywhere in this file,
+    # missed by the same audit that closed the other four -- plausibly
+    # because the R41 case two loops above reads "BIG SOLIDUS" in its own
+    # comment while the string it actually builds is confusable with "\",
+    # not "/", and is BIG REVERSE SOLIDUS: an easy pair to conflate by name
+    # once one of the two is already covered. Confirmed the same way: an AST
+    # walk of every string constant in this file found zero occurrences of
+    # either codepoint anywhere, and deleting both from
+    # `_CONFUSABLE_DELIMITERS` (confirmed by removing them directly and
+    # re-running this file) left `tests/unit` fully green. Driven on their
+    # own, isolated the same way as the four above.
+    for rejected in (
+        # BIG SOLIDUS (U+29F8) -- confusable with "/", from the
+        # Miscellaneous Mathematical Symbols-B block. Named by round 39;
+        # its own sibling BIG REVERSE SOLIDUS (two loops above) had a
+        # driving case from round 41's security fix onward, but this one,
+        # the original of the pair, never did.
+        "usb-SN-AA11BB22⧸dev⧸nvme0n1p3",
+        # REVERSE SOLIDUS OPERATOR (U+29F5) -- confusable with "\", from
+        # the same block as BIG SOLIDUS and MATHEMATICAL FALLING DIAGONAL.
+        # Also named by round 39, with the identical no-driving-case gap.
+        "host⧵Administrator⧵Desktop",
     ):
         with pytest.raises(TypeError, match="opaque"):
             descriptor(fingerprint=rejected)

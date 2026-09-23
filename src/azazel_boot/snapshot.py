@@ -990,6 +990,8 @@ _CONFUSABLE_DELIMITERS = frozenset(
         "\U0001f67d",  # VERY HEAVY REVERSE SOLIDUS — confusable with "\"
         "\U0001f7f0",  # HEAVY EQUALS SIGN — confusable with "="
         "⠀",  # BRAILLE PATTERN BLANK — confusable with " "
+        "╱",  # BOX DRAWINGS LIGHT DIAGONAL UPPER RIGHT TO LOWER LEFT — confusable with "/"
+        "╲",  # BOX DRAWINGS LIGHT DIAGONAL UPPER LEFT TO LOWER RIGHT — confusable with "\"
     }
 )
 
@@ -1164,6 +1166,36 @@ def _require_an_opaque_value(name: str, value: str) -> None:
     Deleting all four from the set left the whole suite green: a regression
     dropping any of them would have shipped undetected. Each now has its
     own isolated case.
+
+    **A round-42 security review found a whole block round 39's search never
+    reached.** Every entry named so far comes from Mathematical Operators,
+    Miscellaneous Symbols and Arrows, Ornamental Dingbats or Miscellaneous
+    Mathematical Symbols-B — symbol blocks. Box Drawing (U+2500–U+257F) is a
+    different block entirely, and it defines its own diagonal pair: U+2571
+    BOX DRAWINGS LIGHT DIAGONAL UPPER RIGHT TO LOWER LEFT ("╱") and U+2572
+    BOX DRAWINGS LIGHT DIAGONAL UPPER LEFT TO LOWER RIGHT ("╲") — both
+    category `So`, both NFKC/NFD-stable, both officially listed in
+    Unicode's own confusables data as confusable with `/` and `\\`
+    respectively, and both in ordinary use as ASCII-art slash/backslash
+    stand-ins, which makes them a more, not less, plausible bypass than the
+    lower-frequency mathematical-operator glyphs already listed. Closed the
+    same way as every entry before it: two more named entries, not a new
+    mechanism — and the search this time was not "another literal", as
+    round 40 was, but another *block*, since nothing so far had asked
+    whether more than one block holds this shape.
+
+    **A round-42 doctrine review, and independently a round-42 test-suite
+    review, both found the round-41 coverage-gap fix's own count was wrong
+    by two.** "Exercised by five, four more added" is nine, not the twelve
+    the set held at the time. BIG SOLIDUS (U+29F8) and REVERSE SOLIDUS
+    OPERATOR (U+29F5), both named by round 39, had no driving test anywhere
+    — plausibly missed because round 41's own new case for the *sibling*
+    entry, BIG REVERSE SOLIDUS, reads "BIG SOLIDUS" in its comment while
+    building a string confusable with `\\`, not `/`, an easy pair to
+    conflate by name once one of the two already has a case. Both are
+    genuine denylist members and both were already refused correctly — a
+    coverage gap, not a live bypass. Closed the same way: two more isolated
+    test cases.
     """
 
     if len(value) > 128:
@@ -2456,8 +2488,35 @@ class RecoveryWorkflow:
             _require_a_real_snapshot(snapshot)
             _require_real_observations(observations)
             self._require_stage(RecoveryStage.PREFLIGHT_PASSED)
-            self._require_this_sitting(session_id)
-            self._require_the_same_snapshot(snapshot)
+            # **A round-42 test-suite review found the sitting and the
+            # substitution check re-asked here fully redundant with
+            # `_require_the_gates`'s own copies, immediately below.** This
+            # used to call `self._require_this_sitting(session_id)` then
+            # `self._require_the_same_snapshot(snapshot)` before the line
+            # below — and `_require_the_gates` calls the identical two, with
+            # the identical arguments, unconditionally at its own top (the
+            # substitution check is conditional on `self._pinned is not
+            # None`, which `start` has already made true by the time
+            # `open_trial` can run at all). Nothing between the two call
+            # sites can change `self._session_id`, `self._pinned` or the
+            # `snapshot`/`session_id` arguments — the whole of this method's
+            # body runs under one `self._lock` acquisition with no caller
+            # code in between — so whichever of the pair a mismatch would
+            # have raised from, it raises the identical `RecoveryRefused`,
+            # with the identical stage move and the identical audit entry,
+            # from the copy inside `_require_the_gates` instead. Unlike
+            # `_require_the_gates`'s other duplicated inputs (the snapshot
+            # and observation *type* checks below), which the function's own
+            # docstring keeps deliberately doubled as a direct-call defence,
+            # these two were plain double execution with no such caller to
+            # defend against reaching *this* method's own entrance a second
+            # time. Confirmed by deleting both lines and running the full
+            # suite, including the foreign-sitting and snapshot-substitution
+            # cases parametrised over every stage
+            # (`test_every_stage_refuses_a_foreign_sitting`,
+            # `test_mutating_the_held_descriptor_between_the_stages_is_a_substitution`):
+            # the same `Refusal`, the same terminal stage and the same audit
+            # event come back either way.
             self._require_the_gates(
                 snapshot,
                 observations,
@@ -2500,8 +2559,22 @@ class RecoveryWorkflow:
         _require_an_actual_bool("confirmed", confirmed)
         with self._lock:
             self._require_stage(RecoveryStage.TRIAL_OPEN)
-            self._require_this_sitting(session_id)
-            self._require_the_same_snapshot(snapshot)
+            # **A round-42 test-suite review found the same redundancy as
+            # `open_trial`'s, one method over.** This block used to also call
+            # `self._require_this_sitting(session_id)` then
+            # `self._require_the_same_snapshot(snapshot)`, and
+            # `_require_the_gates` — called next, still inside this same
+            # `self._lock` acquisition, before `attempt()`'s wait is ever
+            # reached — asks the identical two, unconditionally, at its own
+            # top. `_pinned` cannot change here (only `start`, from
+            # `NOT_STARTED`, ever writes it, and this method only runs from
+            # `TRIAL_OPEN`), and `snapshot`/`session_id` are this call's own
+            # arguments, so the two copies see identical state and answer
+            # identically. See `open_trial`'s own comment for the full
+            # reasoning and the mutation-testing confirmation, which drove
+            # both methods together. This is not the "again, after the
+            # prompt" recheck a few lines below — that one guards the
+            # genuine gap `attempt()`'s wait opens, and stays.
         # **`self._lock` is not held across this call — round twenty found the
         # reason it must not be.** `_require_the_gates` is where `attempt()`
         # lives, "the one step in this workflow that blocks on a human," and

@@ -285,6 +285,50 @@ mutation-tested on its own after merging (deleting the newly-added entry
 or the newly-tested entries and confirming the corresponding new test
 case, and only that case, fails).
 
+**Round 42, security: another block, not another literal.** Every
+confusable named through round 41 came from a symbol block (Mathematical
+Operators, Miscellaneous Symbols and Arrows, Ornamental Dingbats,
+Miscellaneous Mathematical Symbols-B). Box Drawing (U+2500–U+257F) is a
+different block with its own diagonal pair — U+2571/U+2572 — in ordinary
+use as ASCII-art slash/backslash stand-ins, arguably a more plausible
+bypass than the lower-frequency glyphs already listed. Closed the same
+way: two more named entries.
+
+**Round 42, test-suite: the same "sealed backstop reached one call-frame
+later" shape round 39/40 found, recurring a third time.** `open_trial()`
+and `commit()` each re-asked `_require_this_sitting(session_id)` and
+`_require_the_same_snapshot(snapshot)` immediately before calling
+`_require_the_gates(...)`, which itself asks the identical two,
+unconditionally, at its own top. `self._session_id` and `self._pinned`
+are each written exactly once (at construction and at `start()`
+respectively) and never again, so nothing between the outer call and the
+inner one can make them disagree — unlike `_require_the_gates`'s other
+duplicated inputs (the snapshot/observation *type* checks), which its own
+docstring keeps deliberately doubled as a defence against a *direct* call
+to `_require_the_gates` bypassing the three entrances entirely (the
+round-14 finding). That rationale never applied to these two, since they
+only ever ran on the entrance path itself. Removed from both methods,
+mutation-tested by deleting both lines from each and confirming the full
+suite — including the foreign-sitting and snapshot-substitution tests
+parametrised over every stage — stays green with the identical
+`Refusal`, stage and audit event returned either way. This is unrelated
+to `commit()`'s *second* `_require_the_same_snapshot` re-check, a few
+lines further down, which guards the genuine gap `attempt()`'s wait
+opens and was untouched.
+
+**Round 42, doctrine and test-suite, independently: round 41's own
+coverage-gap fix miscounted by two.** "Exercised by five, four more
+added" is nine, not the twelve the set held at the time. BIG SOLIDUS
+(U+29F8) and REVERSE SOLIDUS OPERATOR (U+29F5), both named by round 39,
+had no driving test anywhere — plausibly missed because round 41's own
+new case for the *sibling* entry, BIG REVERSE SOLIDUS, names "BIG
+SOLIDUS" in its comment while building a string confusable with `\`, not
+`/`. Both were already correctly refused — a coverage gap, not a live
+bypass — closed with two more isolated cases, produced independently by
+the test-suite review (which wrote the fix) and the doctrine review
+(which found the same arithmetic error and recommended the identical
+fix without touching test code, per its own remit).
+
 ## Preflight (D7)
 
 Read-only **by construction**: it takes reports and returns a verdict. It has
