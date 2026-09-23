@@ -2863,6 +2863,44 @@ def test_a_stand_in_for_the_quarantine_is_refused(observations) -> None:
             RecoveryWorkflow(a_quarantine(), binding, session_id=bad_sitting)
 
 
+def test_a_bindings_own_fields_are_pinned_not_only_its_container_type(observations) -> None:
+    """R13 (security review): `type(binding) is not SessionBinding` checks
+    the container; nothing checked what was *inside* it.
+
+    `SessionBinding` is a public `@dataclass` with no field validation of
+    its own, and `binding_applies` (`commissioning.py`) decides
+    `RecoveryGate.HOST_BINDING` with `binding.host_fingerprint == observed
+    and binding.session_id == session_id` — the caller's own operand on the
+    left of `==`, the exact shape `_require_an_exact_str`'s own docstring
+    names for the `session_id` *parameter* ("a `str` subclass whose
+    `__ne__` answers `False` decided ... for the caller"). Nothing pinned
+    the same hazard for `binding`'s own two fields: a genuine
+    `SessionBinding`, built through its own public constructor with an
+    `__eq__`-hostile `str` subclass as `host_fingerprint`, passed the gate
+    for a host the real fingerprint never matched and committed a full
+    recovery — `docs/snapshot-and-recovery.md`'s "a binding from another
+    machine refuses with the acquisition never invoked" did not hold.
+    """
+
+    class AlwaysEqual(str):
+        def __eq__(self, other: object) -> bool:
+            return True
+
+        def __ne__(self, other: object) -> bool:
+            return False
+
+        def __hash__(self) -> int:
+            return 0
+
+    real_fingerprint = host_fingerprint(observations)
+    for forged in (
+        SessionBinding(host_fingerprint=AlwaysEqual("not the real host"), session_id=SESSION),
+        SessionBinding(host_fingerprint=real_fingerprint, session_id=AlwaysEqual(SESSION)),
+    ):
+        with pytest.raises(TypeError, match="binding\\."):
+            RecoveryWorkflow(a_quarantine(), forged, session_id=SESSION)
+
+
 def test_an_attempted_automatic_start_is_terminal_and_audited(observations) -> None:
     """F-12: it used to take the silent refusal and leave no trace.
 

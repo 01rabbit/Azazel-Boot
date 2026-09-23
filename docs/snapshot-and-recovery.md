@@ -342,7 +342,19 @@ four that precede them:
    all three inputs and compared none of them.
 4. **host binding** (`HOST_BINDING`) — `commissioning.binding_applies`,
    re-derived from the supplied inventory rather than re-compared against a
-   stored answer, now named for what it answers
+   stored answer, now named for what it answers. `binding_applies` decides it
+   with `binding.host_fingerprint == observed and binding.session_id ==
+   session_id` — the `SessionBinding`'s own operand on the left of `==` — and
+   a round-thirteen review built a genuine `SessionBinding`, through its own
+   public constructor, whose `host_fingerprint` was a `str` subclass
+   answering `True` to every comparison; it passed the gate for a host the
+   real fingerprint never matched. `RecoveryWorkflow.__init__` pins
+   `type(binding) is SessionBinding` but had never pinned the *fields inside
+   it*, the same gap `_require_an_exact_str` already existed to close for
+   every operand this module owns directly. Fixed the same way: `binding.
+   host_fingerprint` and `binding.session_id` are now pinned to exactly
+   `str` where the binding is received, not merely type-checked as a
+   container.
 5. **target binding** (`TARGET_BINDING`) — **ADR-0010 D8 gate 1**: ADR-0008
    D4.1.1's key-protected media binding. **Not checked here directly**: it
    needs a `BindingKey`, and key material in a decision module would break the

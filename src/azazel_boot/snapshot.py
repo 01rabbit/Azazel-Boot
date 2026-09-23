@@ -1687,6 +1687,22 @@ class RecoveryWorkflow:
         _require_a_real_quarantine(quarantine)
         if type(binding) is not SessionBinding:
             raise TypeError("binding must be a SessionBinding")
+        # **The container's type is not its fields' types.** `SessionBinding`
+        # is a public `@dataclass` with no field validation of its own, and
+        # `binding_applies` (`commissioning.py`) decides `HOST_BINDING` with
+        # `binding.host_fingerprint == observed and binding.session_id ==
+        # session_id` — the caller's own operand on the left, exactly the
+        # shape `_require_an_exact_str`'s own docstring names for the
+        # `session_id` *parameter*. A round-thirteen review built a genuine
+        # `SessionBinding` — public constructor, no `object.__setattr__` —
+        # whose `host_fingerprint` was a `str` subclass answering `True` to
+        # every `==`, passed it here, and committed a full recovery for a
+        # host the real fingerprint never matched. Pinned here, on the
+        # binding this class was actually handed, for the same reason
+        # `SnapshotDescriptor` pins its own fields rather than trusting its
+        # constructor's caller.
+        _require_an_exact_str("binding.host_fingerprint", binding.host_fingerprint)
+        _require_an_exact_str("binding.session_id", binding.session_id)
         _require_an_exact_str("session_id", session_id)
         if not session_id.strip():
             raise TypeError("session_id must be a non-empty string")
