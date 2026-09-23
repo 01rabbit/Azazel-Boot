@@ -985,6 +985,25 @@ def _require_an_opaque_value(name: str, value: str) -> None:
     is built from), and `Cf` is the invisible format characters (bidi
     overrides, zero-width joiners) a spoofed or reordered-looking log line
     could be built from the same way.
+
+    **The forbidden-character tuple above is ASCII, and Unicode has other
+    ways to spell the same characters.** A round-35 security review passed
+    two values through unchanged: one joined by IDEOGRAPHIC SPACE (U+3000,
+    category `Zs`, not the literal `" "` this function already forbade and
+    not `Cc`/`Cf` either) instead of an ordinary space, which `str.split()`
+    — the simplest possible log tokenizer, and how many field-splitting
+    tools work — still cut into the same discrete fields a rendered record
+    would; and one built entirely from fullwidth compatibility variants of
+    `=` and `/` (U+FF1D, U+FF0F) and that same ideographic space, which
+    `unicodedata.normalize("NFKC", ...)` — an ordinary, common defensive
+    normalization step — turns back into the exact `"capacity=17179869184
+    medium=usb-SN-AA11BB22 host=/dev/nvme0n1p3"` string this function's own
+    docstring names as the original finding. Closed two ways: `Zs` joins
+    `Cc`/`Cf` in the category check, since it is itself the general case the
+    literal `" "` check was only a specific instance of; and a value whose
+    NFKC-normalized form differs from itself is refused outright, which is
+    the conservative bound an "opaque token" (akin to a hex digest) can
+    afford that free text could not.
     """
 
     if len(value) > 128:
@@ -1000,11 +1019,16 @@ def _require_an_opaque_value(name: str, value: str) -> None:
                 "a line of text is not one"
             )
     for character in value:
-        if unicodedata.category(character) in ("Cc", "Cf"):
+        if unicodedata.category(character) in ("Cc", "Cf", "Zs"):
             raise TypeError(
-                f"{name} must be an opaque token; a control or format "
-                "character is not one"
+                f"{name} must be an opaque token; a control, format or "
+                "space character is not one"
             )
+    if unicodedata.normalize("NFKC", value) != value:
+        raise TypeError(
+            f"{name} must be an opaque token; a value that normalises to a "
+            "different one is not opaque"
+        )
 
 
 def _require_real_observations(observations: object) -> None:
@@ -1371,6 +1395,17 @@ def _gate_fails(
         # re-asks before a recovery's write. Recorded as an undisclosed
         # extension of D7 in ADR-0010's "four further facts" note — reconciling
         # it is not this pull request's to do.
+        #
+        # **"The same elements" is that record's claim, not a verified one.**
+        # A round-34 doctrine review pointed out D8 gate 1's `media_binding_
+        # holds` is one opaque bool over all five bound elements, deliberately,
+        # to avoid becoming an oracle over which element failed — while these
+        # three branches are independently settable. No caller-side
+        # implementation of the three exists in this repository to say which
+        # shape they actually are. See `RecoveryGate.TARGET_BINDING`'s own
+        # comment and ADR-0010's fourth further fact for the full reasoning;
+        # a round-35 review found this note had not reached here (or the
+        # design doc's D7 table) when round 34 first wrote it.
         return not binding_holds
     if check is PreflightCheck.GENERATION:
         return not generation_holds

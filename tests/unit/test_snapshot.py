@@ -9260,9 +9260,37 @@ def test_a_fingerprint_is_an_opaque_token_and_not_a_rendered_record() -> None:
         # unnoticed. An ESC-led OSC sequence isolates it the same way R11 and
         # R19 isolated their own gaps above.
         "\x1b]0;pwned\x07",
+        # R35 (security review): the forbidden-character tuple is ASCII, and
+        # a Unicode space (`　`, IDEOGRAPHIC SPACE) tokenizes a rendered
+        # record exactly like the literal `" "` this function already
+        # forbids, without being one and without being `Cc`/`Cf` either.
+        "medium_usb-SN-AA11BB22　host_quarantined-laptop-01　operator_jdoe",
+        # R35 (security review): fullwidth compatibility variants of `=` and
+        # `/` plus an ideographic space pass every check above unchanged, and
+        # `unicodedata.normalize("NFKC", ...)` — an ordinary defensive
+        # normalization step, not an exotic one — turns this back into
+        # exactly the rendered record the docstring names as the original
+        # finding.
+        "capacity＝17179869184　medium＝usb-SN-AA11BB22　host＝"
+        "／dev／nvme0n1p3",
+        # R35: isolates the `Zs` category check from the NFKC check above —
+        # OGHAM SPACE MARK is `Zs`, like every case above, but is one of only
+        # two `Zs` characters NFKC leaves unchanged (the plain `" "` already
+        # forbidden by name is the other), so a mutant dropping `"Zs"` from
+        # the category tuple would pass this specific case even though the
+        # ideographic-space cases above still catch it via NFKC.
+        "medium_usb-SN-AA11BB22 host_quarantined-laptop-01",
     ):
         with pytest.raises(TypeError, match="opaque"):
             descriptor(fingerprint=rejected)
+
+    # R35: isolates the NFKC round-trip check from the category check —
+    # fullwidth digits are category `Nd`, not `Cc`/`Cf`/`Zs`, so this value
+    # passes every character-by-character check above and is refused only by
+    # noticing the value normalizes to something else, the same way the
+    # cases above isolate the category check from the literal-character one.
+    with pytest.raises(TypeError, match="opaque"):
+        descriptor(fingerprint="１２３")  # fullwidth "123"
 
     # And an actually opaque one is accepted, so this is not refusing
     # everything.

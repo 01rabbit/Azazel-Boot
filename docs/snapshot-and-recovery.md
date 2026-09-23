@@ -166,6 +166,26 @@ was plain text, so a regression silently dropping the check would have
 passed unnoticed. Closed the same way earlier gaps in that same test were
 isolated: one case built from nothing but an ESC-led OSC sequence.
 
+**ASCII is not the only way to spell a forbidden character.** A round-35
+security review passed two values through unchanged: one joined by
+IDEOGRAPHIC SPACE (`Zs`, not the literal `" "` already forbidden and not
+`Cc`/`Cf` either) instead of an ordinary space, which an ordinary
+`str.split()` still tokenized into the same discrete fields a rendered
+record would; and one built from fullwidth compatibility variants of `=`
+and `/` plus that same ideographic space, which
+`unicodedata.normalize("NFKC", ...)` — an ordinary defensive normalization
+step — turned back into exactly the `"capacity=17179869184
+medium=usb-SN-AA11BB22 host=/dev/nvme0n1p3"` string this function's own
+history names as the original finding. Closed two ways: `Zs` joined
+`Cc`/`Cf` in the category check, since it is the general case the literal
+`" "` check was only a specific instance of; and a value whose
+NFKC-normalized form differs from itself is refused outright — a bound an
+opaque token (akin to a hex digest) can afford that free text could not.
+Each check was mutation-tested in isolation from the other: OGHAM SPACE
+MARK (one of the only two `Zs` characters NFKC itself leaves unchanged)
+isolates the category check, and a fullwidth-digit value isolates the NFKC
+check, the same way earlier rounds isolated `"="` from space/slash.
+
 ## Preflight (D7)
 
 Read-only **by construction**: it takes reports and returns a verdict. It has
@@ -196,7 +216,7 @@ successors failing at once.
 | 5 | its integrity verified | `INDETERMINATE` lands with `FAILED`; ambiguity refuses |
 | 6 | required vs available space | |
 | 7 | schema compatibility | forward to a version this build knows; a downgrade, a no-op and a version outside the supported set all refuse |
-| 8 | binding, generation, image digest | re-asks, before a migration's write, the same ADR-0008 D4.1.1 elements D8 gate 1 re-asks before a recovery's write — undisclosed in D7's own four-item text; see ADR-0010's "four further facts" note |
+| 8 | binding, generation, image digest | re-asks, before a migration's write, ADR-0008 D4.1.1 elements D8 gate 1 re-asks before a recovery's write — undisclosed in D7's own four-item text; whether it is really the *same* shape D8 gate 1 asks is itself unverified (round 34); see ADR-0010's "four further facts" note and the D8 gate-1 entry below |
 
 **Check 7's own function is now guarded on its own terms, not only by its one
 caller's.** `schema_is_compatible(*, current, target)` is public and
@@ -403,7 +423,15 @@ four that precede them:
    needs a `BindingKey`, and key material in a decision module would break the
    rule that the secret never arrives. The check stays in
    `azazel_boot.persistence`; this gate is the caller's re-derived `bool`
-   report, `media_binding_holds`, asked again at every stage.
+   report, `media_binding_holds`, asked again at every stage. D7's own
+   `binding`/`generation`/`image digest` row (table above) is often described
+   as asking "the same" ADR-0008 D4.1.1 elements as this gate — a round-34
+   review found that claim unverified rather than false: this gate is one
+   opaque bool over all five bound elements, deliberately, to avoid becoming
+   an oracle over which element failed, while D7's three are independently
+   settable, and no caller-side implementation of D7's three exists in this
+   repository to say which shape they actually are. See ADR-0010's fourth
+   further fact.
 6. **key acquisition** (`KEY_ACQUISITION`) — `session_mode`'s `KeyAcquisition`
    Protocol, reused rather than reimplemented, so what crosses back is the
    same single enum and this module never sees a passphrase. `commit`
