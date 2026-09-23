@@ -485,6 +485,18 @@ had just added. `value.schema_version` is now pinned to exactly `int`
 immediately before that comparison, the same way `binding`'s and
 `quarantine`'s fields are pinned before theirs.
 
+**And the pin itself, not only the candidate written against it.** The
+`_pinned` write path checked *when* it could be written (only from
+`NOT_STARTED`) but never *what* was written — a round-fifteen review wrote
+a `_pinned` that was not a `SnapshotDescriptor` at all, through the same
+bound-method reach `start` itself has, and the workflow accepted it
+silently; the crash landed several calls later, inside the substitution
+check's own field-reading helper, as a bare `AttributeError` from ordinary
+attribute lookup rather than a refusal at the write. `_sealed_assign` now
+runs `_require_a_real_snapshot` on a `_pinned` write — the identical check
+every legitimate entrance already runs on its own `snapshot` argument,
+reused rather than reimplemented.
+
 ## What never leaves, and what the audit may hold
 
 No second partition, no host disk, no network, no USB export, no temporary file

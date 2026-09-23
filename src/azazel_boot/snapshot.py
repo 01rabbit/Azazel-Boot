@@ -930,8 +930,9 @@ def _fields_of(snapshot: SnapshotDescriptor) -> tuple[object, ...]:
 
     Named rather than spelled inline so that the comparison and the pin cannot
     drift apart; `tests/unit/test_snapshot.py` derives the field names from
-    this function's source and asserts they are the dataclass's own, so a
-    fifth field cannot be added and silently left uncompared.
+    this function's source and asserts they are `SnapshotDescriptor`'s own
+    `__slots__`, so a fifth field cannot be added and silently left
+    uncompared.
     """
 
     return (
@@ -1240,7 +1241,7 @@ def preflight(
     # The two schema versions were annotated and unchecked, so an object whose
     # `__eq__`/`__gt__` always answer True produced a **legitimately minted**
     # passing verdict for a step that is in no supported set — and `True`
-    # passed as version 1, the exact case `SnapshotDescriptor.__post_init__`
+    # passed as version 1, the exact case `SnapshotDescriptor.__init__`
     # goes out of its way to refuse.
     for name, value in (
         ("current_schema", current_schema),
@@ -1432,9 +1433,15 @@ class SnapshotAuditEntry:
 
     There is **no** field for snapshot contents, a byte count, a free-space
     figure, a capacity, a raw key, a passphrase, a device identity, a path or
-    an operator identifier. `schema_version` is here because ADR-0010's list of
-    permitted payload names it, and `fingerprint` because "which snapshot" has
-    to be answerable — it is the caller's opaque value, never an identity.
+    an operator identifier. ADR-0010 D10 states the boundary in general terms
+    — "the classification of what happened and nothing more: which condition
+    was detected, which transition occurred, which refusal fired" — and does
+    not itself enumerate fields; `schema_version` and `fingerprint` are this
+    module's own reading of that boundary: `schema_version` is a classifying
+    fact about the transition (which schema a migration moved toward, or a
+    recovery would reach), not a measurement, and `fingerprint` is here
+    because "which snapshot" has to be answerable — it is the caller's opaque
+    value, never an identity.
 
     **Not a dataclass**, for the same reason `SnapshotDescriptor` is not one:
     this is "the object actually destined for a log", by this module's own
@@ -2108,8 +2115,8 @@ class RecoveryWorkflow:
         # Against the **values** taken at `start`, not against the object
         # still held: `held = self._snapshot` was the object the caller
         # presented, so the comparison compared it with itself and an in-place
-        # mutation of the frozen descriptor passed unnoticed. The field types
-        # are pinned to exactly `int` and exactly `str` in `__post_init__`, so
+        # mutation of the sealed descriptor passed unnoticed. The field types
+        # are pinned to exactly `int` and exactly `str` in `__init__`, so
         # neither operand can answer for the comparison either.
         pinned = self._pinned
         same = pinned is not None and _fields_of(snapshot) == _fields_of(pinned)
@@ -2827,7 +2834,7 @@ class MigrationLedger:
         # still accepted as the record of a write.
         self._require_every_gate_was_asked(verdict)
         # **The values the preflight judged**, not the values the descriptor
-        # answers now. The dataclass is frozen and its fields are pinned to
+        # answers now. The descriptor is sealed and its fields are pinned to
         # exactly `int` and exactly `str`, and neither stops
         # `object.__setattr__` from rewriting one between the preflight and
         # this call — the same in-place mutation `_require_the_same_snapshot`
