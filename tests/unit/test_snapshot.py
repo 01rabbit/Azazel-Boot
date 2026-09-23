@@ -4237,6 +4237,29 @@ def test_an_interruption_belongs_to_its_sitting_like_every_other_stage(
         flow.interrupt(session_id=type("S", (str,), {})(SESSION))
 
 
+def test_an_interruption_reaches_its_terminal_stage_from_not_started_too(observations) -> None:
+    """R33 (test-suite review): `("not_started", "interrupted")` is a real edge
+    in `_STAGE_EDGES`, and the design doc and `interrupt`'s own docstring both
+    claim an interruption is available throughout — but nothing drove this leg
+    of that claim directly. `preflight_passed -> interrupted` is asserted one
+    stage later (`test_an_interruption_belongs_to_its_sitting_like_every_other_
+    stage`, just above) and `trial_open -> interrupted` two stages later
+    (`test_an_interrupted_recovery_leaves_the_volume_quarantined`); only this
+    one, from a workflow `interrupt` is called on before `start` ever runs, had
+    no test of its own. What incidentally exercised it — a mutation removing
+    the edge was still caught — was `test_no_public_method_ever_turns_either_
+    flag_off`'s loose exception filter, not a positive assertion.
+    """
+
+    flow = workflow(observations)
+    assert flow.stage is RecoveryStage.NOT_STARTED
+
+    flow.interrupt(session_id=SESSION)
+
+    assert flow.stage is RecoveryStage.INTERRUPTED
+    assert flow.audit()[-1].event is SnapshotAuditEvent.RECOVERY_INTERRUPTED
+
+
 @pytest.mark.parametrize("stage", ["start", "open_trial", "commit"])
 def test_every_stage_refuses_observations_that_are_not_observations(stage, observations) -> None:
     """R4, low: the one input to the gates that nothing pinned.
