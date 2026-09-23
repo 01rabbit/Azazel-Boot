@@ -5422,21 +5422,28 @@ def test_two_real_threads_preflighting_the_same_medium_both_stay_judged() -> Non
         )
         outcomes[label]["verdict"] = verdict
 
-    # A generous timeout, not a tight one: nothing here waits on the lock
-    # this test is unrelated to, only on ordinary OS thread scheduling, and
-    # a loaded machine can occasionally take longer than a tight bound to
-    # hand either thread a timeslice — a false failure from that would be
-    # exactly the "flaky by design" antipattern this file's own review
-    # history has flagged elsewhere. A mutant with the check-then-record
-    # race reopened still fails fast, well within this bound, once both
-    # threads run.
+    # **Not a hard assertion on `arrived["b"]`, and this is deliberate** —
+    # see the identical note and its full reasoning in
+    # `test_two_real_threads_recording_the_same_write_record_it_once`.
+    # `_remember_the_medium` holds `_JUDGED_LOCK` across this exact same
+    # `racy_get` pause, so under the correct, locked implementation "b"
+    # cannot reach this checkpoint while "a" is paused there, full stop —
+    # a round-29 investigation found this test was passing only by
+    # consistently winning a coin-flip race between two independent
+    # ~30-second timers (confirmed: every isolated run still took the
+    # full ~30s despite "passing"), the identical latent flaw its sibling
+    # test lost consistently. "b" gets a short, generous grace period to
+    # reach the checkpoint on its own (all the mutated/lock-removed code
+    # under test needs, since nothing blocks it there in that case), and
+    # `release` fires unconditionally afterward so a correctly-locked "a"
+    # is never held hostage waiting for a "b" that cannot arrive.
     try:
         a_thread = threading.Thread(target=do_preflight, args=("a",))
         a_thread.start()
         assert arrived["a"].wait(timeout=30)
         b_thread = threading.Thread(target=do_preflight, args=("b",))
         b_thread.start()
-        assert arrived["b"].wait(timeout=30)
+        arrived["b"].wait(timeout=2)
         release.set()
         a_thread.join(timeout=30)
         b_thread.join(timeout=30)
@@ -5574,15 +5581,36 @@ def test_two_real_threads_recording_the_same_write_record_it_once() -> None:
             outcomes[label]["kind"] = "refused"
             outcomes[label]["refusal"] = refused.refusal
 
-    # A generous timeout, not a tight one — see the identical note in
-    # `test_two_real_threads_preflighting_the_same_medium_both_stay_judged`.
+    # **Not a hard assertion on `arrived["b"]`, and this is deliberate.**
+    # `_remember_a_write_if_new` holds `_WRITE_LOCK` for the entire span
+    # `racy_get`'s pause sits inside, so under the *correct*, locked
+    # implementation thread "b" cannot reach this checkpoint at all while
+    # "a" is paused there — it blocks acquiring the same lock "a" already
+    # holds, full stop, no amount of waiting changes that. A round-29
+    # follow-up investigation found the previous `assert
+    # arrived["b"].wait(timeout=30)` here made this test structurally
+    # racy against its *own* correct-code path: "a" only ever gives up
+    # its pause via its own internal 30s timeout (nothing else can reach
+    # `release.set()`), and whether "b" then reaches `arrived["b"]`
+    # before *this* thread's independent 30s deadline expires came down
+    # to which of two ~30-second timers, started microseconds apart,
+    # fired first — a coin flip that this environment was found to lose
+    # consistently (3/3 isolated runs), not occasional background-load
+    # flakiness. `b` is given a short, generous grace period to reach the
+    # checkpoint on its own — which is all the *mutated* (lock-removed)
+    # code being probed for needs, since nothing blocks it there in that
+    # case — and `release` is set unconditionally afterward either way,
+    # so a correctly-locked "a" is never held hostage waiting for a "b"
+    # that cannot arrive. Correctness is verified below by the outcome
+    # (exactly one recorded, one refused), not by whether the rendezvous
+    # itself completed.
     try:
         a_thread = threading.Thread(target=do_record, args=("a",))
         a_thread.start()
         assert arrived["a"].wait(timeout=30)
         b_thread = threading.Thread(target=do_record, args=("b",))
         b_thread.start()
-        assert arrived["b"].wait(timeout=30)
+        arrived["b"].wait(timeout=2)
         release.set()
         a_thread.join(timeout=30)
         b_thread.join(timeout=30)
@@ -9738,7 +9766,14 @@ def test_interrupt_does_not_deadlock_against_a_commit_blocked_in_attempt(
     # waiting on a clock, it is `interrupt()` waiting on a lock nothing will
     # ever release. `join(timeout=...)` here only bounds how long *this test*
     # waits before declaring the deadlock; it does not paper over one.
-    interrupter.join(timeout=10)
+    # `timeout=30`, not a tight one: round 27 standardized every thread-
+    # rendezvous wait in this file to this value under this environment's
+    # documented scheduling contention, and a round-29 test-suite review
+    # found these two joins — waiting for a real thread to actually finish
+    # executing, not merely to be signaled — were left at the older,
+    # tighter `timeout=10` alongside `_BlocksOnAnEvent.attempt()`'s own
+    # rendezvous wait, which round 28 had already widened in this same test.
+    interrupter.join(timeout=30)
     assert not interrupter.is_alive(), (
         "interrupt() deadlocked behind a commit() blocked in attempt()"
     )
@@ -9748,7 +9783,7 @@ def test_interrupt_does_not_deadlock_against_a_commit_blocked_in_attempt(
     # Only now does the acquisition let go — the ordering the finding is
     # about: record the interruption first, release what was blocking second.
     acquisition.release.set()
-    committer.join(timeout=10)
+    committer.join(timeout=30)
     assert not committer.is_alive(), "commit() never woke up after attempt() returned"
     assert commit_outcome["kind"] == "refused"
     assert commit_outcome["refusal"] is Refusal.WORKFLOW_ALREADY_FINISHED
