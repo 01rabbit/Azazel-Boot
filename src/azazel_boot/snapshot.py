@@ -2475,6 +2475,26 @@ class RecoveryWorkflow:
                     "a candidate is minted from the snapshot a workflow "
                     "pinned at start; there is no pin to mint one from"
                 )
+            # **The same gap, a fourth time.** `RecoveryCandidate` is the
+            # one class in this module whose constructor validates nothing
+            # — deliberately, since its *published* surface is checked by
+            # identity (`holds`/`candidate_applies_to`), never by reading a
+            # field, and its own docstring says so: "Anyone can build a
+            # `RecoveryCandidate(99, …)` and it will answer `99`." This
+            # check, added at round fourteen, is a second reader that does
+            # trust the field — and a round-fifteen review built a genuine
+            # `RecoveryCandidate`, through its own public constructor, with
+            # an `int` subclass `schema_version` whose `__ne__` always
+            # answered `False`, and this `!=` accepted it. Pinned here, the
+            # same as `binding`'s and `quarantine`'s fields two rounds
+            # running: the operand this check is about to compare is typed
+            # before it is compared, not after. `_require_an_exact_int`
+            # raises `TypeError`, not this method's own `AttributeError` —
+            # deliberately reused as-is rather than reimplemented, so a
+            # value's *type* is refused in the one vocabulary every other
+            # type pin in this file uses, and only the *state* checks below
+            # stay in `_sealed_assign`'s own.
+            _require_an_exact_int("candidate.schema_version", value.schema_version)
             if value.schema_version != self._pinned.schema_version:
                 raise AttributeError(
                     "a candidate names the schema version the pin was "

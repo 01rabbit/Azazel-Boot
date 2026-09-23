@@ -6479,6 +6479,57 @@ def test_a_candidate_names_the_pins_schema_version_not_a_separate_one(observatio
     assert flow._candidate is matching
 
 
+def test_the_candidates_schema_version_is_typed_before_it_is_compared_to_the_pin(
+    observations,
+) -> None:
+    """R15 (security review): the same gap, a fourth time — the check
+    above compares `value.schema_version != self._pinned.schema_version`
+    without ever pinning `value.schema_version`'s type first.
+
+    `RecoveryCandidate` is the one class in this module with a fully
+    unchecked constructor — deliberate, since its published surface
+    (`holds`/`candidate_applies_to`) is checked by identity, never by
+    reading a field. Round fourteen's fix made `_sealed_assign` a second
+    reader that *does* trust the field, and a genuine `RecoveryCandidate`,
+    built through its own public constructor with an `int` subclass
+    `schema_version` whose `__ne__` always answers `False`, defeated the
+    very check built to close the round-fourteen attack. Pinned the same
+    way `binding`'s and `quarantine`'s fields were, two rounds running.
+    """
+
+    class LyingInt(int):
+        def __eq__(self, other: object) -> bool:
+            return True
+
+        def __ne__(self, other: object) -> bool:
+            return False
+
+        def __hash__(self) -> int:
+            return int.__hash__(self)
+
+    snap = descriptor()
+    flow = workflow(observations)
+    flow.start(
+        snap, observations, media_binding_holds=True, session_id=SESSION, started_by_operator=True
+    )
+    flow.open_trial(snap, observations, media_binding_holds=True, session_id=SESSION)
+    flow._require_the_gates(
+        snap,
+        observations,
+        session_id=SESSION,
+        media_binding_holds=True,
+        acquisition=Opens(),
+        confirmed=True,
+    )
+
+    assert flow._pinned.schema_version == 1
+    forged = RecoveryCandidate(LyingInt(999), "not-derived-from-any-pin")
+    with pytest.raises(TypeError, match="candidate\\.schema_version"):
+        flow._sealed_assign("_candidate", forged)
+    assert flow.stage is RecoveryStage.TRIAL_OPEN
+    assert flow.holds(forged) is False
+
+
 def test_one_write_is_one_record_even_after_the_snapshot_is_dropped() -> None:
     """R7: "Once" was decided by the garbage collector.
 
