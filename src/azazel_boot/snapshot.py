@@ -479,6 +479,45 @@ class PreflightVerdict:
         return self._evaluated
 
 
+#: Where a `_WeakIdentityIndex`'s per-instance `(weak reference, value)`
+#: store actually lives — **round eleven's fix, replacing an instance
+#: attribute.** It was `self._by_id`, and two independent reviews (security,
+#: doctrine) broke that the same way from different directions:
+#:
+#: - `gc.get_referents(idx)` — stdlib, always available, no private name
+#:   anywhere in the call — walks an object's own `__slots__` and hands back
+#:   whatever is stored there. For `__slots__ = ("_by_id",)` that is the
+#:   live dict itself, not a copy: `list(gc.get_referents(_JUDGED_BY))[0]`
+#:   recovered every `(weakref, Quarantine)` pair the index held, and a
+#:   handful of lines of stdlib-only code turned that into a forged
+#:   `PreflightVerdict` accepted by `MigrationLedger.may_migrate` with none
+#:   of the ten gates run.
+#: - The class defined no `__setattr__`, so `idx._by_id = {...}` — ordinary
+#:   dot assignment, the weakest reach in the language — rebound it
+#:   outright. The docstring used to claim this needed "`object.__setattr__`
+#:   -grade access"; it did not, and saying so was simply wrong.
+#:
+#: Both routes exploited the same fact: **a value stored as an instance's
+#: own attribute is that instance's attribute**, reachable however Python
+#: reaches attributes. There is no fix that keeps storing it there. Instead
+#: `_WeakIdentityIndex` keeps `__slots__ = ("__weakref__",)` — no attribute
+#: for either route to reach — and the dict for each instance lives here,
+#: keyed by the instance itself. `gc.get_referents(idx)` now yields only
+#: `type(idx)`, and `idx._by_id = {...}` — with or without
+#: `object.__setattr__` — raises `AttributeError`, because there is no such
+#: slot to assign into on the instance at all.
+#:
+#: This module's own global-reachability rule still applies to
+#: `_INDEX_STORAGE` itself, exactly as it does to `_MINTED_HERE` and every
+#: other module-level name here: reaching it by that name, or by walking
+#: this module's own `__dict__`, is the disclosed "careless-caller defence,
+#: not a capability boundary" limit stated throughout this file, not a new
+#: one. What changed is narrower and real — the index no longer falls
+#: *short* of that limit, handing a live medium back through channels that
+#: need no name at all.
+_INDEX_STORAGE: _WeakKeyDictionary = _WeakKeyDictionary()
+
+
 class _WeakIdentityIndex:
     """Maps an object, by identity, to a value — with no way to enumerate
     the objects back out.
@@ -488,37 +527,38 @@ class _WeakIdentityIndex:
     `.keys()` on a `WeakKeyDictionary` dereferences every live weak key and
     hands back the real objects — no prior possession of one required, only
     `import azazel_boot.snapshot` and a call to an entirely ordinary public
-    method. A review read `list(_JUDGED_BY.keys())` and got back every medium
-    any preflight in the process had judged, live, through the exact
+    method. A review read `list(_JUDGED_BY.keys())` and got back every
+    medium any preflight in the process had judged, live, through the exact
     container chosen specifically to avoid handing one back.
 
     This closes that door by never using the object as a dict key at all.
-    The underlying dict is keyed by `id(obj)` — an opaque integer with no
-    path back to the object — and a weak reference is kept alongside the
-    value purely to *verify* identity on lookup and to *notice* when the
-    object dies, closing the id-reuse hazard a bare `id()` key would have on
-    its own: a collected object's slot, re-used by an unrelated later object
-    allocated at the same address, would otherwise answer for it. `get` and
-    `__contains__` dereference the stored weak reference and compare it with
-    `is` against the object presented, so a coincidental `id()` collision
-    with a *different*, still-live object answers `False`, not `True`.
+    The store, keyed by `id(obj)`, holds `(weak reference, value)` pairs —
+    an opaque integer key with no path back to the object, verified by the
+    weak reference on every lookup so a collected object's slot, re-used by
+    an unrelated later object at the same address, cannot answer for it.
+    `get` and `__contains__` dereference the stored weak reference and
+    compare it with `is` against the object presented, so a coincidental
+    `id()` collision with a *different*, still-live object answers `False`,
+    not `True`.
 
     No method here returns the object, iterates it, or exposes the
-    underlying dict — there is nothing analogous to `.keys()` to call. The
-    `_by_id` dict, holding `(weak reference, value)` pairs, is this
-    instance's own attribute; reaching it needs `object.__setattr__`-grade
-    access to private state, the same reach the rest of this module concedes
-    everywhere else as careless-caller defence rather than a capability
-    boundary, not an ordinary public method call.
+    underlying dict — there is nothing analogous to `.keys()` to call.
+    **The store is not this instance's own attribute** — see
+    `_INDEX_STORAGE` above for why, and for what that does and does not
+    close. `__slots__` holds only `__weakref__`, so `gc.get_referents` on an
+    instance yields nothing but its type, and any attempt to assign a
+    `_by_id`-shaped attribute onto the instance — by any route, ordinary or
+    `object.__setattr__` — fails with `AttributeError` for the same reason:
+    there is no such slot to hold it.
     """
 
-    __slots__ = ("_by_id",)
+    __slots__ = ("__weakref__",)
 
     def __init__(self) -> None:
-        object.__setattr__(self, "_by_id", {})
+        _INDEX_STORAGE[self] = {}
 
     def get(self, obj: object) -> object | None:
-        entry = self._by_id.get(id(obj))
+        entry = _INDEX_STORAGE.get(self).get(id(obj))
         if entry is None:
             return None
         alive, value = entry
@@ -526,7 +566,7 @@ class _WeakIdentityIndex:
 
     def __setitem__(self, obj: object, value: object) -> None:
         oid = id(obj)
-        store = self._by_id
+        store = _INDEX_STORAGE.get(self)
 
         def _cleanup(_dead_ref: object, oid: int = oid, store: dict = store) -> None:
             store.pop(oid, None)
@@ -534,7 +574,7 @@ class _WeakIdentityIndex:
         store[oid] = (_weakref(obj, _cleanup), value)
 
     def __contains__(self, obj: object) -> bool:
-        entry = self._by_id.get(id(obj))
+        entry = _INDEX_STORAGE.get(self).get(id(obj))
         if entry is None:
             return False
         alive, _value = entry
@@ -2279,7 +2319,7 @@ class RecoveryWorkflow:
             # `_require_this_sitting`.
             if self._quarantine.is_fenced:
                 # **`_refuse_gate`, not a raised `AttributeError`.** A
-                # round-nine review found the gap this closes: `commit` asks
+                # round-ten review found the gap this closes: `commit` asks
                 # `_require_an_unfenced_medium()`, mints the candidate, and
                 # only then moves the stage — and the fence can still be
                 # raised in that window, by a device this method does not

@@ -20,6 +20,7 @@ from __future__ import annotations
 import ast
 import copy
 import dataclasses
+import gc
 import inspect
 import os
 import pickle
@@ -7245,15 +7246,26 @@ def _media_reachable_from(root: object, *, depth: int = 6) -> list[str]:
     the closures and defaults of its functions. A medium stashed somewhere this
     does not walk is a limit, and the limit is named rather than assumed away.
 
-    **One exemption, and it is a class, not a place or an object**:
-    `_WeakIdentityIndex._by_id`. That dict's whole purpose is to hold a weak
-    reference to a `Quarantine` — dereferencing it is the mechanism, not a
-    bug — and reaching `_by_id` at all needs `object.__setattr__`-grade access
-    to an index's private state, the same reach this module concedes
-    everywhere else as careless-caller defence rather than a capability
-    boundary. What this proves instead is that nothing **else** — no module
-    global, no other object's field, no closure — holds one, and that
-    `_WeakIdentityIndex`'s own *public* surface hands nothing back.
+    **No class exemption any more.** R10 exempted `_WeakIdentityIndex` by
+    name, because its `_by_id` dict — holding the live weak reference to a
+    `Quarantine` — was that instance's own `__slots__` attribute, and walking
+    it would have defeated the point of the object it was walking *for*. R11
+    found that reasoning did not hold: `_by_id` was reachable through
+    `gc.get_referents` on the index alone, no exemption asked. The fix moved
+    the store off the instance entirely (`_INDEX_STORAGE`, a module global
+    keyed by the index), so this walker no longer special-cases the class —
+    it walks straight into `_INDEX_STORAGE` like any other `WeakKeyDictionary`
+    global, and into the plain `dict` each index keeps there.
+
+    What still stops it at a `Quarantine` is narrower and unexempted: each
+    entry in that dict is `(weakref.ref, value)`, and a bare `weakref.ref` is
+    not `dict`, `list`, `tuple`, `set`, a `WeakSet`/`WeakKeyDictionary`, a
+    function or a value from `azazel_boot` — so the walk reaches it, cannot
+    classify it, and stops without calling it. **Dereferencing it is
+    `_WeakIdentityIndex.get`/`__contains__`'s own job**, gated by the identity
+    check those methods run before handing anything back; nothing here
+    special-cases the weak reference to avoid that job, it simply is not one
+    of the shapes this walker knows how to open.
     """
 
     found: list[str] = []
@@ -7280,12 +7292,6 @@ def _media_reachable_from(root: object, *, depth: int = 6) -> list[str]:
                 walk(cell.cell_contents, f"{path}.<closure>", left - 1)
             for default in value.__defaults__ or ():
                 walk(default, f"{path}.<default>", left - 1)
-            return
-        if type(value).__name__ == "_WeakIdentityIndex":
-            # The one exemption, by class. Nothing else about the object is
-            # walked — not even its other slots, though it has none — so a
-            # second field added to this class later is not silently exempted
-            # along with `_by_id`.
             return
         if type(value).__module__.startswith("azazel_boot"):
             for name in getattr(type(value), "__slots__", ()):
@@ -7973,17 +7979,73 @@ def test_the_identity_index_does_not_answer_for_a_dead_or_different_object() -> 
     # A stand-in for "the id-keyed slot survives after the object it named
     # is gone" — reached deterministically by writing the internal store
     # directly, since natural id reuse depends on allocator timing this test
-    # does not control.
+    # does not control. The store is no longer the index's own attribute
+    # (R11: `gc.get_referents` read it straight off `self._by_id`, and
+    # ordinary `index._by_id = ...` assignment rebound it outright — see
+    # `_INDEX_STORAGE`'s module comment in `snapshot.py`), so reaching it
+    # white-box now goes through the module-level registry, keyed by the
+    # index instance itself.
     second = a_quarantine()
     assert id(second) != id(first)
-    stale_ref, value = index._by_id[id(first)]
-    index._by_id[id(second)] = (stale_ref, value)
+    store = module._INDEX_STORAGE.get(index)
+    stale_ref, value = store[id(first)]
+    store[id(second)] = (stale_ref, value)
 
     assert index.get(second) is None
     assert second not in index
     # And the entry keyed by its own, correct id is unaffected.
     assert index.get(first) == "value-for-first"
     assert first in index
+
+
+def test_gc_get_referents_does_not_recover_a_live_medium_from_the_index() -> None:
+    """R11 (security review): `gc.get_referents` read `self._by_id` straight
+    off the instance, no private name anywhere in the call.
+
+    `_WeakIdentityIndex`'s docstring claimed reaching its store needed
+    "`object.__setattr__`-grade access to private state" — a caller doing
+    something deliberate and named. That was false in both directions at
+    once: `gc.get_referents(idx)` is stdlib, always available, needs no name
+    at all, and returns exactly what an object's own `__slots__` hold —
+    which, for `__slots__ = ("_by_id",)`, was the live `(weakref, value)`
+    dict itself, not a copy. A review turned one call into every `Quarantine`
+    any preflight in the process had judged, live — the exact leak this
+    class exists to prevent, reached by a route its own review missed.
+
+    The fix stores nothing on the instance: `__slots__` holds only
+    `__weakref__`, and the dict lives in `_INDEX_STORAGE`, a module global
+    keyed by the index itself (see its comment in `snapshot.py`). This drives
+    both halves directly — the read `gc.get_referents` no longer serves, and
+    the ordinary attribute writes the docstring also overstated the
+    difficulty of.
+    """
+
+    from azazel_boot import snapshot as module
+
+    index = module._WeakIdentityIndex()
+    medium = a_quarantine(quarantined=False)
+    index[medium] = "judged"
+
+    # The read: what an attacker with only the index object, and gc — no
+    # private name literal anywhere — gets back.
+    referents = gc.get_referents(index)
+    assert referents == [module._WeakIdentityIndex], referents
+    for referent in referents:
+        assert referent is not medium
+        if isinstance(referent, dict):
+            raise AssertionError("gc.get_referents(index) exposed a dict")
+
+    # The write: ordinary dot assignment, the weakest reach in the language,
+    # and `object.__setattr__` alongside it — both refused for the same
+    # reason, there is no such slot to hold either.
+    with pytest.raises(AttributeError):
+        index._by_id = {"forged": "entry"}
+    with pytest.raises(AttributeError):
+        object.__setattr__(index, "_by_id", {"forged": "entry"})
+
+    # And the index still does its one job correctly throughout.
+    assert index.get(medium) == "judged"
+    assert medium in index
 
 
 def test_the_mintedness_check_is_not_saved_by_the_medium_check() -> None:

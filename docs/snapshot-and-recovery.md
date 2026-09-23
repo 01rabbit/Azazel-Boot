@@ -121,6 +121,29 @@ is not a check — `azazel_boot.dirty_write` paid for that lesson when a review
 built its observation out of three strings naming the worst faults there are
 and got a clean write.
 
+`SnapshotDescriptor` and `SnapshotAuditEntry` are not dataclasses — a fourth
+field each, a hand-written `__init__` doing what `__post_init__` did, and an
+explicit `__eq__`/`__hash__`, for the reason `CapacityReport` gives for
+itself: `dataclasses.asdict()` walks `dataclasses.fields()` directly and
+bypasses `__getstate__`/`__reduce__` entirely, handing a redacted fingerprint
+back in plain sight. Both `__eq__` methods type-check **both** operands before
+deciding: one checked only `other`, so a subclass with no `__eq__` of its own
+inherited equality that a caller could pass as either argument, and Python
+tries the reflected call — `other.__eq__(self)` — when the first returns
+`NotImplemented`, which the one-sided check never did. Neither `__eq__` is
+what `_require_the_same_snapshot` uses to decide a substitution, below — that
+check is a type pin plus a field-by-field comparison on its own terms, not a
+call to either class's `__eq__`.
+
+`_require_an_opaque_value`, which every fingerprint and every audited string
+passes through, refuses more than a length: `len(value.splitlines()) > 1`
+refuses any value `str.splitlines()` would treat as more than one line — form
+feeds and Unicode line separators included, not only `\n`/`\r` — because that
+is the same boundary a `.splitlines()`-based log viewer would split on. A
+value made of several such "lines" joined by a boundary the check does not ask
+about would satisfy a narrower check and still render as several lines
+wherever the audit is read back.
+
 ## Preflight (D7)
 
 Read-only **by construction**: it takes reports and returns a verdict. It has
@@ -372,11 +395,17 @@ could drive, and a branch nothing can drive is not a check.
 That read happens **twice, in two vocabularies**. Each stage method asks it as
 a gate, so what a caller meets is `GATE_REFUSED` with `medium_fenced` in the
 audit; the seal keeps its own rule as the structural backstop for a direct
-`_sealed_assign`. The seal alone would have answered an `AttributeError` — a
-seal's answer, outside the `RecoveryRefused` vocabulary a caller writes
-`except` for — and the fence is raised by device monitoring rather than by any
-call here, so a legitimate stage move can meet it. The same shape was fixed
-once already, for an interruption raised from inside `attempt()`.
+`_sealed_assign`. The seal's own recheck used to answer a bare
+`AttributeError` there — a seal's answer, outside the `RecoveryRefused`
+vocabulary a caller writes `except` for — and the fence is raised by device
+monitoring rather than by any call here, so a legitimate stage move can meet
+it. A round-ten review drove exactly that window (a fence landing between
+`commit`'s own gate check and the mint) and reached the crash; the fix has
+`_sealed_assign`'s internal recheck call `_refuse_gate` directly rather than
+raise, recursing once into a stage move — `REFUSED` — that the fence branch
+does not re-enter, so no `try`/`except` was needed for it either. The same
+shape was fixed once already, for an interruption raised from inside
+`attempt()`.
 
 **A candidate is held by a workflow that committed**, asked by stage as well as
 by identity. `commit` writes the candidate and then moves the stage, and
@@ -497,6 +526,30 @@ door than they used to: `__delattr__` refuses `del x._sealed`, which was
 cheaper than everything built on top of it and let a plain assignment write a
 stage, a candidate, a quarantine and a sitting onto a workflow, reaching
 `COMMITTED` with a forged candidate and an empty audit.
+
+**`_JUDGED_BY` and `_SNAPSHOTS_RECORDED` hold a live `Quarantine` for the life
+of the process**, and each is a two-round history of the same lesson landing
+somewhere new. They were `WeakKeyDictionary` instances keyed by the medium; a
+round-ten review called the entirely ordinary `.keys()` and got back every
+medium any preflight had judged, live, through the exact container chosen to
+avoid handing one back. The fix, `_WeakIdentityIndex`, keys its store by
+`id(obj)` instead — an opaque integer with no path back, a weak reference kept
+alongside each value purely to verify identity and close the id-reuse hazard a
+bare `id()` key would reopen — and exposes no `.keys()`, `.values()`,
+`.items()` or `__iter__` at all. A round-eleven review found that public
+surface was not the whole of the reach: `gc.get_referents(idx)`, stdlib, no
+private name in the call, walks an object's own `__slots__` and hands back
+whatever they hold — the live `(weakref, value)` dict itself, for
+`__slots__ = ("_by_id",)`. One call recovered every judged medium the same way
+`.keys()` had. The fix moves the store off the instance: `__slots__` now holds
+only `__weakref__`, and the dict lives in a module-level `_INDEX_STORAGE`,
+keyed by the index itself. `gc.get_referents` on an index now yields only its
+type, and — since there is no such slot any more — an ordinary
+`idx._by_id = …` and even `object.__setattr__(idx, "_by_id", …)` both raise
+`AttributeError` rather than rebind anything. Reaching `_INDEX_STORAGE` by its
+own name, or by walking this module's `__dict__`, is the same disclosed
+"careless-caller defence, not a capability boundary" limit as `_MINTED_HERE`
+two paragraphs up — not a new one, and not what either review found.
 
 **"Once" counts judged snapshots, not write operations.** `may_migrate` is a
 question and answers it as often as it is asked; `note_snapshot_written`
