@@ -1880,11 +1880,22 @@ def test_this_module_cannot_reach_a_host_a_network_a_vm_or_a_second_partition() 
         # assigns in each of these classes, and the traceback machinery
         # calls `repr` on the half-built object — a clean `TypeError` became
         # an `AttributeError` raised from inside the redacting repr. Each
-        # canary is the first field its own class's `__init__` would assign,
-        # so its absence means none of the others were assigned either
-        # (round 22: `RecoveryWorkflow`'s `_stage` had this repr fix already;
-        # `SnapshotDescriptor` and `SnapshotAuditEntry` shared the identical
-        # gap, closed with the same one-canary-field shape).
+        # canary is a field its own `__init__` always sets once validation
+        # has passed, before the constructor can raise again, and each repr
+        # reads nothing else without going through the same canary check
+        # first — so its absence still means "not safely readable" even
+        # where it is not literally the first field written.
+        # `SnapshotDescriptor` and `SnapshotAuditEntry`'s canaries (round 22)
+        # were deliberately chosen to be their first-assigned field, so
+        # there absence also means none of the others were assigned either.
+        # `RecoveryWorkflow`'s pre-existing `_stage` canary is not first —
+        # `_sealed`, `_quarantine`, `_binding` and `_session_id` are all
+        # written before it — but `RecoveryWorkflow.__repr__` reads only
+        # `_stage` and nothing built after it, so the same "absent means
+        # unbuilt, for what this repr touches" reasoning still holds for it
+        # alone (round 23 doctrine review: an earlier version of this
+        # comment claimed `_stage` was also "the first field", which is
+        # false and was corrected here without changing the runtime code).
         assert isinstance(node.args[1], ast.Constant)
         assert node.args[1].value in {
             "_sealed",
