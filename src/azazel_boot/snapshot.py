@@ -2068,11 +2068,18 @@ class RecoveryWorkflow:
         # protects (`fence()` is `Quarantine`'s own method, called from device
         # monitoring, entirely outside `self._lock`); `_require_the_gates`'s
         # own `_cleared` write, at its very end, is unconditionally the same
-        # sentinel for identical inputs, so two threads racing to write it
-        # concurrently — impossible in practice, since reaching it needs
-        # `TRIAL_OPEN`, which only one racing `commit()` can still be sitting
-        # at once the other reaches `COMMITTED` below — cannot disagree even
-        # if they somehow both did. What genuinely changed during the wait is
+        # sentinel for identical inputs — so two threads racing to write it
+        # concurrently cannot disagree about what they write, whatever
+        # order they write it in. (A round-21 doctrine review caught an
+        # earlier draft of this comment overclaiming further, that the
+        # race "cannot happen" because only one racing `commit()` "can
+        # still be sitting at `TRIAL_OPEN`" once another reaches
+        # `COMMITTED`: false, and beside the point — both can genuinely be
+        # concurrently inside `_require_the_gates`/`attempt()`, both still
+        # at `TRIAL_OPEN`, well before either reaches `COMMITTED`, which is
+        # exactly the window this whole paragraph is about. The safety
+        # here rests only on the sentinel being deterministic, not on the
+        # race being impossible.) What genuinely changed during the wait is
         # exactly what the re-checks immediately below exist to catch, the
         # same "again, after the prompt" reasoning round 7 built this pattern
         # for in the first place, single-threaded reentrancy included.

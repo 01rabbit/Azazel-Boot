@@ -8734,18 +8734,22 @@ def test_a_real_second_thread_interrupting_between_the_two_final_writes_stays_in
     legitimate `commit()` calls (no `interrupt()` needed at all) and got a
     real double commit: both passed every check before either wrote,
     because nothing serialised the *whole* read-then-write sequence, only
-    each individual `_sealed_assign` call. **`commit`/`start`/`open_trial`/
+    each individual `_sealed_assign` call. **`start`/`open_trial`/
     `interrupt` and `_sealed_assign` itself now each acquire
     `self._lock` (a per-instance `threading.RLock`) around their entire
-    body**, so no second call on the same workflow — this method or a
-    different one, `interrupt` racing in included — can run at all until
-    the first one currently running has completely finished. This test
-    still drives the same real race in the same real gap; what it now
-    proves is that `interrupt()`, started while `commit()` is paused
+    body, and `commit` around all of its body but one call** (round
+    twenty released the lock across `_require_the_gates`, to avoid holding
+    it across `attempt()`'s wait on a human — see that method's own
+    comment; the write this test drives at is in the section still fully
+    locked), so no second call on the same workflow — this method or a
+    different one, `interrupt` racing in included — can proceed past the
+    lock at all until the first one currently holding it has released it.
+    This test still drives the same real race in the same real gap; what it
+    now proves is that `interrupt()`, started while `commit()` is paused
     mid-body holding the lock, simply cannot proceed until `commit()`
     releases it — so the interleaving this test injects can no longer land
-    inside `commit()` at all, only after it, which is exactly the
-    deterministic outcome asserted below.
+    inside this specific locked section at all, only after it, which is
+    exactly the deterministic outcome asserted below.
 
     The `RecoveryCandidate` `commit` had already minted before the race
     lands is never returned either way (the exception fires before
@@ -8845,13 +8849,21 @@ def test_two_real_threads_committing_the_same_workflow_produce_one_candidate(
     — contradicting round 18's own claim that "no write these races contest
     is ever returned to a caller."
 
-    `self._lock`, a per-instance `RLock` each of `commit`/`start`/
-    `open_trial`/`interrupt`/`_sealed_assign` now holds for its entire body,
-    closes this: only one call can be inside any of them, on one workflow,
-    at a time — a second concurrent `commit()` cannot even begin reading
-    state until the first has completely finished (and moved the stage to
-    the terminal `COMMITTED`), so it meets `_require_stage`'s ordinary
-    refusal at the very top, before touching anything.
+    `self._lock`, a per-instance `RLock` each of `start`/`open_trial`/
+    `interrupt`/`_sealed_assign` holds for its entire body, and `commit`
+    for all of its body except the call into `_require_the_gates` (round
+    twenty released the lock there, to avoid holding it across
+    `attempt()`'s wait on a human — see `commit`'s own comment above that
+    call), closes this: only one call can be inside a locked section, on
+    one workflow, at a time. This test's own race lands in the section
+    that is still fully locked — the mint and the two final writes — so a
+    second concurrent `commit()` racing to reach *that* section cannot
+    begin until the first has completely finished it (and moved the stage
+    to the terminal `COMMITTED`), meeting `_require_stage`'s ordinary
+    refusal there. (A concurrent `commit()` *can* begin reading state and
+    reach as far as `_require_the_gates`/`attempt()` while another is
+    still in progress — that specific window is what the checkpoints below
+    are built to drive into.)
 
     Forced deterministically at **two** checkpoints, not left to
     GIL-scheduling luck at either: `_sealed_assign` is patched to pause
