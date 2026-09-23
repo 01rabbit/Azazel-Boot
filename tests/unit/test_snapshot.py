@@ -7281,6 +7281,48 @@ def test_a_stage_is_asked_for_before_the_operator_flag_is_read(observations) -> 
     ]
 
 
+def test_the_sitting_is_asked_for_before_the_operator_flag_is_read(observations) -> None:
+    """R43: the same crossing R6 found, one pair over, and just as undriven.
+
+    `start` asks `_require_stage`, then `_require_this_sitting`, then reads
+    `started_by_operator` — and `test_a_stage_is_asked_for_before_the_operator_
+    flag_is_read` (R6) drives the *first* pair by putting a workflow past
+    `NOT_STARTED` so `_require_stage` fires ahead of everything else, `STAGE_
+    SKIPPED` rather than `RECOVERY_NOT_STARTED_BY_AN_OPERATOR`. It says nothing
+    about the *second* pair: on a fresh, correctly-staged workflow, does a
+    foreign sitting outrank a declined operator, or the other way around?
+    Every existing foreign-sitting case for `start`
+    (`test_every_stage_refuses_a_foreign_sitting[start]`,
+    `test_a_sitting_that_merely_resembles_this_one_is_not_this_one`) passes
+    `started_by_operator=True`, and every existing automatic-start case
+    (`test_no_recovery_starts_by_itself`,
+    `test_an_attempted_automatic_start_is_terminal_and_audited`) passes
+    `session_id=SESSION`, so neither wrong value is ever presented alongside
+    the other. Confirmed undriven by moving the `started_by_operator` check
+    ahead of `_require_this_sitting` in the source: the whole suite, including
+    both tests named above, stayed green.
+
+    A foreign sitting is refused first: an operator who never asked to start
+    this recovery is answered as a stranger, not merely as someone who
+    declined a prompt they were never entitled to see, and the classification
+    a caller sees should not depend on argument-checking order that nothing
+    here pins.
+    """
+
+    flow = workflow(observations)
+    with pytest.raises(RecoveryRefused) as refused:
+        flow.start(
+            descriptor(),
+            observations,
+            media_binding_holds=True,
+            session_id="somebody-elses-sitting",
+            started_by_operator=False,
+        )
+    assert refused.value.refusal is Refusal.NOT_THIS_SITTING
+    assert flow.stage is RecoveryStage.REFUSED
+    assert flow.audit()[-1].event is SnapshotAuditEvent.RECOVERY_FOREIGN_SITTING
+
+
 @pytest.mark.parametrize(
     "near_miss",
     [
@@ -9593,6 +9635,15 @@ def test_a_fingerprint_is_an_opaque_token_and_not_a_rendered_record() -> None:
     ):
         with pytest.raises(TypeError, match="opaque"):
             descriptor(fingerprint=rejected)
+
+    # R43 (security review): bypass #14, a sixth Unicode block
+    # (Supplemental Punctuation) none of rounds 39-42 had searched -- U+2E4A
+    # DOTTED SOLIDUS, category `Po` (not `Sm`/`So` like every prior entry),
+    # NFKC/NFD-stable, no decomposition relationship to "/". Found by a
+    # systematic walk of every codepoint named SOLIDUS/SLASH/VIRGULE/
+    # BACKSLASH/EQUALS, not another single guess.
+    with pytest.raises(TypeError, match="opaque"):
+        descriptor(fingerprint="usb-SN-AA11BB22⹊dev⹊nvme0n1p3")
 
     # R35: isolates the NFKC round-trip check from the category check —
     # fullwidth digits are category `Nd`, not `Cc`/`Cf`/`Zs`, so this value

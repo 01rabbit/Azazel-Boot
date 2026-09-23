@@ -992,6 +992,7 @@ _CONFUSABLE_DELIMITERS = frozenset(
         "⠀",  # BRAILLE PATTERN BLANK — confusable with " "
         "╱",  # BOX DRAWINGS LIGHT DIAGONAL UPPER RIGHT TO LOWER LEFT — confusable with "/"
         "╲",  # BOX DRAWINGS LIGHT DIAGONAL UPPER LEFT TO LOWER RIGHT — confusable with "\"
+        "⹊",  # DOTTED SOLIDUS — confusable with "/"
     }
 )
 
@@ -1196,6 +1197,29 @@ def _require_an_opaque_value(name: str, value: str) -> None:
     genuine denylist members and both were already refused correctly — a
     coverage gap, not a live bypass. Closed the same way: two more isolated
     test cases.
+
+    **A round-43 security review found bypass #14: DOTTED SOLIDUS (U+2E4A),
+    a block none of rounds 39-42 had searched.** Every entry so far came
+    from one of five blocks (Mathematical Operators, Miscellaneous Symbols
+    and Arrows, Ornamental Dingbats, Miscellaneous Mathematical Symbols-B,
+    Box Drawing). Supplemental Punctuation (U+2E00–U+2E7F) is a sixth, and
+    defines its own bare diagonal: U+2E4A DOTTED SOLIDUS ("⹊"), category
+    `Po` (not `Sm`/`So` like every prior entry, and still outside the eight
+    denylisted categories), NFKC-stable, NFD-stable, no decomposition
+    relationship to `/` at all. `"usb-SN-AA11BB22⹊dev⹊nvme0n1p3"` passed
+    every check above unchanged. The search this round was systematic
+    rather than another single guess: every Unicode codepoint whose name
+    contains SOLIDUS/SLASH/VIRGULE/BACKSLASH/EQUALS was walked and filtered
+    against category, NFKC-stability, NFD-stability and the existing
+    denylist; the survivors beyond DOTTED SOLIDUS were compound or
+    decorated glyphs (overbars, circles, strokes) judged visually distinct
+    enough from a bare `/`/`\\`/`=` to leave out, the same "narrows, does
+    not guarantee" line this whole mechanism has always drawn. Bidirectional
+    override characters and Unicode variation selectors were also checked
+    as candidate "different mechanisms" and ruled out — both already fall
+    under categories `Cf`/`Mn` this function has denylisted since rounds 31
+    and 37 respectively. Closed the same way as every entry before it: one
+    more named entry, not a new mechanism.
     """
 
     if len(value) > 128:
@@ -2563,18 +2587,25 @@ class RecoveryWorkflow:
             # `open_trial`'s, one method over.** This block used to also call
             # `self._require_this_sitting(session_id)` then
             # `self._require_the_same_snapshot(snapshot)`, and
-            # `_require_the_gates` — called next, still inside this same
-            # `self._lock` acquisition, before `attempt()`'s wait is ever
-            # reached — asks the identical two, unconditionally, at its own
-            # top. `_pinned` cannot change here (only `start`, from
-            # `NOT_STARTED`, ever writes it, and this method only runs from
-            # `TRIAL_OPEN`), and `snapshot`/`session_id` are this call's own
-            # arguments, so the two copies see identical state and answer
-            # identically. See `open_trial`'s own comment for the full
-            # reasoning and the mutation-testing confirmation, which drove
-            # both methods together. This is not the "again, after the
-            # prompt" recheck a few lines below — that one guards the
-            # genuine gap `attempt()`'s wait opens, and stays.
+            # `_require_the_gates` — called next, after this `with self._lock:`
+            # block has released (see round twenty's comment just below for
+            # why), before `attempt()`'s wait is ever reached — asks the
+            # identical two, unconditionally, at its own top. `_pinned` cannot
+            # change here (only `start`, from `NOT_STARTED`, ever writes it,
+            # and this method only runs from `TRIAL_OPEN`), and
+            # `snapshot`/`session_id` are this call's own arguments and this
+            # workflow's own sealed field, neither of which the lock's
+            # absence lets anything else touch — so the two copies see
+            # identical state and answer identically regardless of whether
+            # the lock is held across the gap. See `open_trial`'s own comment
+            # for the full reasoning and the mutation-testing confirmation,
+            # which drove both methods together. This is not the "again,
+            # after the prompt" recheck a few lines below — that one guards
+            # the genuine gap `attempt()`'s wait opens, and stays.
+            # (A round-43 doctrine review caught this paragraph's earlier
+            # draft claiming `_require_the_gates` runs "still inside this
+            # same lock acquisition" — false, and contradicted by the very
+            # next comment; corrected here.)
         # **`self._lock` is not held across this call — round twenty found the
         # reason it must not be.** `_require_the_gates` is where `attempt()`
         # lives, "the one step in this workflow that blocks on a human," and

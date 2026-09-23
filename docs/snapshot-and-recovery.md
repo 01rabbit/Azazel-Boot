@@ -318,16 +318,73 @@ opens and was untouched.
 
 **Round 42, doctrine and test-suite, independently: round 41's own
 coverage-gap fix miscounted by two.** "Exercised by five, four more
-added" is nine, not the twelve the set held at the time. BIG SOLIDUS
-(U+29F8) and REVERSE SOLIDUS OPERATOR (U+29F5), both named by round 39,
-had no driving test anywhere — plausibly missed because round 41's own
-new case for the *sibling* entry, BIG REVERSE SOLIDUS, names "BIG
-SOLIDUS" in its comment while building a string confusable with `\`, not
-`/`. Both were already correctly refused — a coverage gap, not a live
-bypass — closed with two more isolated cases, produced independently by
-the test-suite review (which wrote the fix) and the doctrine review
-(which found the same arithmetic error and recommended the identical
-fix without touching test code, per its own remit).
+added" is nine — correct against the eleven-entry set (the round-39 and
+round-40 additions) the test-suite review's own isolated copy held, but
+the security review running the same round had, separately, just merged
+in a twelfth entry, BIG REVERSE SOLIDUS, with its own driving case from
+the moment it landed. Nine from the pre-merge eleven, plus that one, is
+ten of twelve — still two short. BIG SOLIDUS (U+29F8) and REVERSE
+SOLIDUS OPERATOR (U+29F5), both named by round 39, had no driving test
+anywhere — plausibly missed because round 41's own new case for BIG
+REVERSE SOLIDUS names "BIG SOLIDUS" in its comment while building a
+string confusable with `\`, not `/`, an easy pair to conflate by name.
+Both were already correctly refused — a coverage gap, not a live
+bypass — closed with two more isolated cases: 9 (of 11) + 1 (BIG REVERSE
+SOLIDUS) + 2 (this fix) = 12, matching the set's full size at the time.
+Produced independently by the test-suite review (which wrote the fix)
+and the doctrine review (which found the same arithmetic gap and
+recommended the identical fix without touching test code, per its own
+remit).
+
+**Round 43, doctrine: the paragraph above still didn't visibly sum, one
+round later.** A round-43 doctrine review re-derived the count a third
+time directly against the live set and the test file, confirmed the
+*coverage itself* was genuinely complete (all twelve then-current
+entries, and both of round 42's own new Box Drawing entries, each have a
+driving test case — not just a comment naming the codepoint), and
+rewrote the paragraph above to show its arithmetic rather than assert a
+conclusion a reader had to re-derive independently to check. The same
+review also found and corrected a factual error in the round-42 `commit()`
+source comment (immediately below, in the code): it claimed
+`_require_the_gates` runs "still inside this same lock acquisition,"
+which the very next comment in the same method — round twenty's, on why
+the lock is *not* held across that call — directly contradicts. The
+redundancy proof itself never depended on the lock being held across the
+gap (`_pinned` and `_session_id` are write-once regardless), so nothing
+about the round-42 fix's correctness changes; only the comment's account
+of the locking was wrong, and is now corrected in the source.
+
+**Round 43, security: bypass #14, a sixth Unicode block.** Every entry
+through round 42 came from one of five blocks (Mathematical Operators,
+Miscellaneous Symbols and Arrows, Ornamental Dingbats, Miscellaneous
+Mathematical Symbols-B, Box Drawing). Supplemental Punctuation
+(U+2E00–U+2E7F) is a sixth, and defines U+2E4A DOTTED SOLIDUS ("⹊") — the
+first entry with category `Po` rather than `Sm`/`So`, still outside the
+eight denylisted categories, NFKC/NFD-stable, no decomposition
+relationship to `/`. Found by a systematic walk of every codepoint named
+SOLIDUS/SLASH/VIRGULE/BACKSLASH/EQUALS rather than another single guess;
+the other candidates that walk turned up were decorated or compound
+glyphs (overbars, circles, strokes) judged visually distinct enough from
+a bare `/`/`\`/`=` to leave out, same as every round before it. Closed
+the same way: one more named entry.
+
+**Round 43, test-suite: not a sixth redundant-check instance, but a
+genuine adjacent test gap.** `start()` also calls
+`self._require_this_sitting(session_id)` explicitly before
+`_require_the_gates`'s own identical, unconditional call — superficially
+the same shape rounds 39/40/42 removed elsewhere. It is not redundant:
+between the two sits the `started_by_operator` check, which can itself
+raise a *different* refusal (`RECOVERY_NOT_STARTED_BY_AN_OPERATOR`), so
+removing the explicit sitting check would change which classification a
+caller passing both a foreign sitting and a declined operator start
+receives. Confirmed by reordering the two checks in an isolated copy: the
+whole suite stayed green, because nothing tested that specific crossing —
+proving a test gap, not proving the check redundant. Closed with one new
+test, `test_the_sitting_is_asked_for_before_the_operator_flag_is_read`,
+asserting the foreign sitting is refused first. A round-43 doctrine
+review independently re-derived the same non-redundancy from
+`self._session_id`/`self._pinned`'s write-once assignment sites and
+confirmed no removal was warranted.
 
 ## Preflight (D7)
 
