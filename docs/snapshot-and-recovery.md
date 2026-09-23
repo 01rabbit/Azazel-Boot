@@ -488,10 +488,15 @@ already read its own value back to return. This is not the "wrong
 exception type" class round eighteen closes; the race itself, not merely
 which vocabulary a loser meets, needed closing. Every `RecoveryWorkflow`
 now holds a per-instance `_lock` (a `threading.RLock`, reentrant because
-`_refuse_gate` calls back into `_sealed_assign` on the same thread, and
-`attempt()` can call back into `interrupt()` the same way) for the whole
-body of `start`, `open_trial`, `interrupt` and `_sealed_assign` itself, and
-for all of `commit` except one call — see below. No second call on the
+`_refuse_gate` calls back into `_sealed_assign` on the same thread while
+`start`/`open_trial` still hold the lock for their own whole body) for the
+whole body of `start`, `open_trial`, `interrupt` and `_sealed_assign`
+itself, and for all of `commit` except one call — see below. `attempt()`
+calling back into `interrupt()` is not an instance of this reentrancy: by
+the time `attempt()` runs, `commit` has already released the lock (see
+below), so that `interrupt()` call is an ordinary acquisition of a lock
+nobody is holding — it would succeed even with a plain, non-reentrant
+`Lock`. No second call on the
 same workflow — this method or a different one, `interrupt` racing in
 included — can begin while the lock is held, so there is no window left
 for either to observe state the other is mid-write on. `_sealed_assign`
@@ -698,6 +703,23 @@ descriptor's redaction carried the comment that a fingerprint in a repr is one
 in every traceback, and the same value then rendered verbatim through the audit
 entry's generated repr. A review found it by rendering `repr(workflow.audit())`,
 which the absence test had not.
+
+**Both reprs also survive being called on a half-built instance, the same way
+`RecoveryWorkflow.__repr__` already did.** `SnapshotDescriptor.__init__` and
+`SnapshotAuditEntry.__init__` validate every field before assigning any of
+them, so a rejected constructor call — a caller's malformed fingerprint,
+among the shapes each `__init__`'s own docstring already describes finding —
+leaves an object with none of its slots set. A round-22 security review
+asked `traceback.TracebackException.from_exception(..., capture_locals=True)`
+for exactly that `TypeError` — the ordinary shape of `pytest --showlocals`
+and most crash reporters, and a code path this module's own test suite
+already relies on elsewhere — and found it called the unguarded, redacting
+`__repr__` and died a second time inside it with an `AttributeError`: a
+clean, message-only refusal became a crash in the code written to keep
+refusals clean. Each repr now reads one canary field — the first one its
+own `__init__` assigns — with `getattr(self, "<field>", None)`, and returns
+a plain `"<ClassName>(unbuilt)"` when it is absent, before touching anything
+that construction never reached.
 
 **The same fourth limit `azazel_boot.quarantine` states applies here.** A
 `__setattr__` stops an attribute being rebound; it does not stop the object it

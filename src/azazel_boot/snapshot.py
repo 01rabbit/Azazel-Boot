@@ -185,10 +185,24 @@ class SnapshotDescriptor:
         raise TypeError("a SnapshotDescriptor is not serialisable")
 
     def __repr__(self) -> str:
-        """Redacted. A fingerprint in a repr is a fingerprint in every traceback."""
+        """Redacted. A fingerprint in a repr is a fingerprint in every traceback.
 
+        Also survives a half-built instance, the same way
+        `RecoveryWorkflow.__repr__` does and for the same reason: `__init__`
+        validates every field before assigning any of them, so a `TypeError`
+        from one of its checks leaves an object with none of its slots set.
+        A round-22 review found that asking `traceback.TracebackException`
+        for captured locals on exactly that `TypeError` — the ordinary shape
+        of `pytest --showlocals` and most crash reporters — called this
+        unguarded repr and died inside it with a second, unhandled
+        `AttributeError`, turning a clean refusal into a crash.
+        """
+
+        container_version = getattr(self, "_container_version", None)
+        if container_version is None:
+            return "SnapshotDescriptor(unbuilt)"
         return (
-            f"SnapshotDescriptor(container_version={self.container_version}, "
+            f"SnapshotDescriptor(container_version={container_version}, "
             f"schema_version={self.schema_version}, "
             f"integrity={self.integrity.value}, fingerprint=<redacted>)"
         )
@@ -1601,9 +1615,20 @@ class SnapshotAuditEntry:
         rendered verbatim through the generated repr of this class, which is
         what an operator-facing log actually holds. A review found it by
         rendering `repr(workflow.audit())`, which the absence test had not.
+
+        Also survives a half-built instance, for the same reason
+        `SnapshotDescriptor.__repr__` and `RecoveryWorkflow.__repr__` do:
+        `__init__` validates every field before assigning any of them, so a
+        rejected fingerprint — the exact leak this constructor's own
+        docstring describes finding — left an object with no `_event` slot,
+        and the redacting repr above died reading it before it ever reached
+        the fingerprint it exists to redact.
         """
 
-        parts = [f"event={self.event.value}"]
+        event = getattr(self, "_event", None)
+        if event is None:
+            return "SnapshotAuditEntry(unbuilt)"
+        parts = [f"event={event.value}"]
         if self.check is not None:
             parts.append(f"check={self.check.value}")
         if self.gate is not None:
@@ -1840,9 +1865,14 @@ class RecoveryWorkflow:
         # same thread or a different one — ever observes state a first call
         # has not finished changing, in the parts that matter. The same
         # thread reentering through `_refuse_gate` (which calls back into
-        # `_sealed_assign`) or through `attempt()` calling back into
-        # `interrupt()` still succeeds, the same as before this lock
-        # existed: an `RLock` only blocks a *different* thread.
+        # `_sealed_assign`) while `start`/`open_trial` still hold the lock
+        # for their whole body still succeeds, the same as before this lock
+        # existed: an `RLock` only blocks a *different* thread. `attempt()`
+        # calling back into `interrupt()` is a different case, not a
+        # reentrancy one: round twenty's split means `commit` holds no lock
+        # at all while `attempt()` runs, so that `interrupt()` call acquires
+        # a lock nobody is holding — it would succeed even with a plain,
+        # non-reentrant `Lock`.
         object.__setattr__(self, "_lock", threading.RLock())
         object.__setattr__(self, "_sealed", True)
 

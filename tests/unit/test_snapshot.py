@@ -258,6 +258,76 @@ def test_a_completed_recovery_leaves_the_volume_quarantined(observations) -> Non
         assert refused.value.refusal.value == "volume_quarantined"
 
 
+def test_an_interrupted_recovery_leaves_the_volume_quarantined(observations) -> None:
+    """The doctrine names three outcomes for a recovery workflow — success,
+    failure and interruption — and drives the full ordinary-act refusal loop
+    through a real session only for success (above). This drives it after an
+    interruption: `flow.interrupt()` ends the workflow with no candidate at
+    all, and the quarantine that judged the medium is exactly as unmoved as
+    if the workflow had never run.
+    """
+
+    quarantine = a_quarantine()
+    live = session(observations, quarantine=quarantine)
+    assert live.volume_is_quarantined
+
+    flow = workflow(observations, quarantine=quarantine)
+    snap = descriptor()
+    flow.start(
+        snap, observations, media_binding_holds=True, session_id=SESSION, started_by_operator=True
+    )
+    flow.open_trial(snap, observations, media_binding_holds=True, session_id=SESSION)
+    flow.interrupt(session_id=SESSION)
+    assert flow.stage is RecoveryStage.INTERRUPTED
+
+    assert quarantine.volume_is_quarantined
+    assert live.volume_is_quarantined
+    assert live.status().state is PersistenceState.QUARANTINED
+    for act in OrdinaryAct:
+        with pytest.raises(PersistenceRefused) as refused:
+            live.require_ordinary(act, observations)
+        assert refused.value.refusal.value == "volume_quarantined"
+
+
+def test_a_gate_refused_recovery_leaves_the_volume_quarantined(observations) -> None:
+    """The third of the doctrine's three outcomes: a recovery refused at a
+    gate before `start` even opens a trial. The workflow never advances past
+    `REFUSED`, and the quarantine is exactly as unmoved as after a success or
+    an interruption.
+
+    Uses the blind quarantine (`_a_quarantine_that_never_saw_the_medium`)
+    rather than a fenced one: a fenced *quarantine* also fences the
+    `PersistenceSession` wrapping it (`_is_fenced` is `self._fenced or
+    self._quarantine.is_fenced`), which changes `require_ordinary`'s refusal
+    to `SESSION_FENCED` before it ever reaches the `volume_quarantined`
+    check this test means to drive. `MEDIUM_NOT_RECOGNISED` refuses the gate
+    without touching the fence, keeping the two vocabularies apart.
+    """
+
+    quarantine = _a_quarantine_that_never_saw_the_medium()
+    flow = workflow(observations, quarantine=quarantine)
+    with pytest.raises(RecoveryRefused) as refused:
+        flow.start(
+            descriptor(),
+            observations,
+            media_binding_holds=True,
+            session_id=SESSION,
+            started_by_operator=True,
+        )
+    assert refused.value.refusal is Refusal.GATE_REFUSED
+    assert flow.audit()[-1].gate is RecoveryGate.MEDIUM_NOT_RECOGNISED
+    assert flow.stage is RecoveryStage.REFUSED
+
+    live = session(observations, quarantine=quarantine)
+    assert quarantine.volume_is_quarantined
+    assert live.volume_is_quarantined
+    assert live.status().state is PersistenceState.QUARANTINED
+    for act in OrdinaryAct:
+        with pytest.raises(PersistenceRefused) as refused_ordinary:
+            live.require_ordinary(act, observations)
+        assert refused_ordinary.value.refusal.value == "volume_quarantined"
+
+
 def test_a_candidate_is_not_a_volume_and_grants_nothing(observations) -> None:
     """It says which schema version a restore would reach — not that one
     happened — and it cannot do anything with it."""
@@ -1804,13 +1874,24 @@ def test_this_module_cannot_reach_a_host_a_network_a_vm_or_a_second_partition() 
             continue
         assert len(node.args) == 3, "getattr is permitted only as the seal's read"
         assert isinstance(node.args[0], ast.Name) and node.args[0].id == "self"
-        # Two shapes, both reads of this object's own state with a default:
-        # the seal, and the stage the repr renders. The repr needs one because
-        # `__init__` validates before it assigns, and the traceback machinery
-        # calls `repr` on the half-built object — a clean `TypeError` became an
-        # `AttributeError` raised from inside the redacting repr.
+        # Four shapes, all reads of this object's own state with a default:
+        # the seal, and one canary field per class whose `__repr__` must
+        # survive a half-built instance. `__init__` validates before it
+        # assigns in each of these classes, and the traceback machinery
+        # calls `repr` on the half-built object — a clean `TypeError` became
+        # an `AttributeError` raised from inside the redacting repr. Each
+        # canary is the first field its own class's `__init__` would assign,
+        # so its absence means none of the others were assigned either
+        # (round 22: `RecoveryWorkflow`'s `_stage` had this repr fix already;
+        # `SnapshotDescriptor` and `SnapshotAuditEntry` shared the identical
+        # gap, closed with the same one-canary-field shape).
         assert isinstance(node.args[1], ast.Constant)
-        assert node.args[1].value in {"_sealed", "_stage"}, node.args[1].value
+        assert node.args[1].value in {
+            "_sealed",
+            "_stage",
+            "_container_version",
+            "_event",
+        }, node.args[1].value
 
     # Over **code**, with every docstring excluded — which is the opposite of
     # what `test_dirty_write.py`'s erasure scan does, deliberately. The two
@@ -5487,6 +5568,82 @@ def test_the_repr_survives_an_instance_that_was_never_built(observations) -> Non
             traceback.TracebackException.from_exception(raised.value, capture_locals=True).format()
         )
         assert "RecoveryWorkflow(stage=unbuilt)" in rendered
+        assert FINGERPRINT not in rendered
+        assert MEDIUM.identity not in rendered
+
+
+def test_a_snapshot_descriptors_repr_survives_an_instance_that_was_never_built() -> None:
+    """R22 (security review): the same crash, for a sibling class.
+
+    `SnapshotDescriptor.__init__` validates every field before assigning any
+    of them, the identical shape `RecoveryWorkflow.__init__` has, and its
+    `__repr__` read `self.container_version`/`self.schema_version`/
+    `self.integrity` unconditionally — so the same `capture_locals=True`
+    traceback rendering that `RecoveryWorkflow`'s test above drives died the
+    same way here, one validation failure away.
+    """
+
+    import traceback
+
+    # None of these pass `FINGERPRINT` itself: the constructor's own
+    # `fingerprint` parameter becomes a local of the raising `__init__`
+    # frame regardless of which check actually fails, and `capture_locals`
+    # renders every frame's locals — a property of the traceback machinery
+    # this fix cannot and does not change. What this test drives is the
+    # `__repr__` fallback specifically, so the fingerprint used here is an
+    # unrelated placeholder, not the value the suite treats as "the secret
+    # under test" elsewhere.
+    placeholder_fingerprint = "unrelated-placeholder-fingerprint"
+    for arguments in (
+        {
+            "container_version": 0,
+            "schema_version": 1,
+            "integrity": SnapshotIntegrity.VERIFIED,
+            "fingerprint": placeholder_fingerprint,
+        },
+        {
+            "container_version": 1,
+            "schema_version": 1,
+            "integrity": "not-a-member",
+            "fingerprint": placeholder_fingerprint,
+        },
+        {
+            "container_version": 1,
+            "schema_version": 1,
+            "integrity": SnapshotIntegrity.VERIFIED,
+            "fingerprint": "",
+        },
+    ):
+        with pytest.raises(TypeError) as raised:
+            SnapshotDescriptor(**arguments)
+        rendered = "".join(
+            traceback.TracebackException.from_exception(raised.value, capture_locals=True).format()
+        )
+        assert "SnapshotDescriptor(unbuilt)" in rendered
+        assert FINGERPRINT not in rendered
+        assert MEDIUM.identity not in rendered
+
+
+def test_a_snapshot_audit_entrys_repr_survives_an_instance_that_was_never_built() -> None:
+    """R22 (security review): the same crash, for the object this module's
+    own docstring calls "the object destined for a log"."""
+
+    import traceback
+
+    for arguments in (
+        {"event": "not-a-member"},
+        {"event": SnapshotAuditEvent.RECOVERY_COMPLETED, "check": "not-a-member"},
+        {
+            "event": SnapshotAuditEvent.RECOVERY_COMPLETED,
+            "fingerprint": "bad fingerprint with spaces",
+        },
+    ):
+        with pytest.raises(TypeError) as raised:
+            SnapshotAuditEntry(**arguments)
+        rendered = "".join(
+            traceback.TracebackException.from_exception(raised.value, capture_locals=True).format()
+        )
+        assert "SnapshotAuditEntry(unbuilt)" in rendered
         assert FINGERPRINT not in rendered
         assert MEDIUM.identity not in rendered
 
@@ -9404,10 +9561,15 @@ def test_a_real_second_thread_interrupting_before_commits_candidate_is_written_s
     concurrent `commit()` calls, no `interrupt()` involved — see
     `test_two_real_threads_committing_the_same_workflow_produce_one_candidate`
     below). The real close is `self._lock`, a per-instance `RLock` each of
-    `commit`/`start`/`open_trial`/`interrupt`/`_sealed_assign` now holds for
-    its whole body, so `interrupt()` paused here cannot run at all — not
-    just cannot land badly — until `commit()` finishes. The outcome is
-    therefore fully deterministic now, not merely "stays in vocabulary."
+    `start`/`open_trial`/`interrupt`/`_sealed_assign` holds for its entire
+    body, and `commit` for all of its body except the call into
+    `_require_the_gates` (round twenty released the lock there, to avoid
+    holding it across `attempt()`'s wait on a human). This test's own race
+    lands in the section of `commit` that is still fully locked — between
+    `_require_an_unfenced_medium()`'s return and the candidate write — so
+    `interrupt()` paused here cannot run at all — not just cannot land
+    badly — until `commit()` finishes. The outcome is therefore fully
+    deterministic now, not merely "stays in vocabulary."
     """
 
     flow = workflow(observations)
