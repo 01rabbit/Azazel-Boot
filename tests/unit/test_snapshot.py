@@ -4932,6 +4932,67 @@ def test_the_candidate_names_the_snapshot_that_was_judged(observations) -> None:
     assert flow.audit()[-1].schema_version == 1
 
 
+def test_reading_pinned_rather_than_the_argument_at_the_mint_is_what_this_test_drives(
+    monkeypatch, observations
+) -> None:
+    """R11 (test-suite review): the comment at the mint says reading
+    `_pinned` rather than `snapshot` is what closed the mid-prompt mutation
+    bug — nothing drove the one window that distinguishes the two.
+
+    `test_a_snapshot_mutated_during_the_prompt_is_a_substitution` mutates
+    `snap` from inside `attempt()`, which lands *before* `commit`'s second
+    `_require_the_same_snapshot(snapshot)` check — so it is caught as
+    `SNAPSHOT_CHANGED_UNDER_THE_WORKFLOW` and never reaches the mint at all.
+    That test proves the re-check exists; it cannot prove which object the
+    mint itself reads, because a mutation it drives never survives to that
+    line. Monkeypatching `RecoveryCandidate.__init__` does not reach it
+    either: Python evaluates `judged.schema_version, judged.fingerprint`
+    before `__init__` runs, so the constructor only ever sees an
+    already-resolved value.
+
+    The one place left is the narrow window *after* the second same-snapshot
+    check and *before* the mint — `_require_an_unfenced_medium()`, the last
+    synchronous call in between, re-checks the fence and nothing about the
+    snapshot. Hooking it to mutate the live `snap` object right there is the
+    same shape a review used mid-`attempt()`, aimed at the one instant that
+    shape cannot otherwise reach. If the mint read `snapshot` instead of
+    `self._pinned`, the candidate and the audit would show the mutated
+    values; `_pinned` was built as its own copy back at `start()` and cannot.
+    """
+
+    snap = descriptor()
+    flow = workflow(observations)
+    flow.start(
+        snap, observations, media_binding_holds=True, session_id=SESSION, started_by_operator=True
+    )
+    flow.open_trial(snap, observations, media_binding_holds=True, session_id=SESSION)
+
+    original_gate = RecoveryWorkflow._require_an_unfenced_medium
+
+    def mutate_after_the_last_gate(self):
+        original_gate(self)
+        object.__setattr__(snap, "_schema_version", 99)
+        object.__setattr__(snap, "_fingerprint", "mutated-after-the-last-gate")
+
+    monkeypatch.setattr(
+        RecoveryWorkflow, "_require_an_unfenced_medium", mutate_after_the_last_gate
+    )
+
+    candidate = flow.commit(
+        snap,
+        observations,
+        media_binding_holds=True,
+        session_id=SESSION,
+        acquisition=Opens(),
+        confirmed=True,
+    )
+
+    assert candidate.schema_version == 1
+    assert flow.audit()[-1].schema_version == 1
+    assert flow.audit()[-1].fingerprint == FINGERPRINT
+    assert not [entry for entry in flow.audit() if entry.schema_version == 99]
+
+
 def test_a_preflight_is_free_so_spending_is_keyed_on_the_snapshot() -> None:
     """R5: the write-once defence was one `preflight()` call wide.
 
@@ -5904,6 +5965,45 @@ def test_a_verdict_is_spent_against_the_medium_its_preflight_judged() -> None:
         with pytest.raises(RecoveryRefused) as refused:
             act()
         assert refused.value.refusal is Refusal.MEDIUM_MOVED_SINCE_THE_PREFLIGHT
+    assert ledger.audit() == ()
+    assert ledger.may_migrate(verdict, quarantine=judged_medium) is True
+
+
+def test_a_verdict_is_spent_against_the_medium_that_judged_it_not_any_judged_medium() -> None:
+    """R11 (test-suite review): `_medium_was_judged`'s identity half —
+    `judged is not None and verdict in judged` — was untested in isolation.
+
+    Every prior "wrong medium" test presents a medium with **no** preflight
+    history at all, so `_JUDGED_BY.get(elsewhere) is None` either way —
+    mutating the check to `judged is not None` alone (dropping `and verdict
+    in judged`) agrees with the real one on every case any test drives, and
+    the whole suite stays green. That mutant accepts exactly the durable
+    bearer-token attack ADR-0010 D9 exists to refuse: a verdict minted for
+    one medium, spent against a second medium that merely *has some*
+    preflight history of its own.
+
+    `elsewhere` gets its own, unrelated preflight here — so it genuinely is
+    judged, and `judged is not None` is true — without ever judging
+    `verdict`. Only `verdict in judged` tells the two apart.
+    """
+
+    judged_medium, _snapshot, verdict = a_migration()
+    elsewhere = a_quarantine(quarantined=False)
+    preflight(
+        elsewhere,
+        snapshot=descriptor(fingerprint="an-unrelated-fingerprint"),
+        capacity=capacity(),
+        current_schema=1,
+        target_schema=2,
+        binding_holds=True,
+        generation_holds=True,
+        image_digest_holds=True,
+    )
+
+    ledger = MigrationLedger()
+    with pytest.raises(RecoveryRefused) as refused:
+        ledger.may_migrate(verdict, quarantine=elsewhere)
+    assert refused.value.refusal is Refusal.MEDIUM_MOVED_SINCE_THE_PREFLIGHT
     assert ledger.audit() == ()
     assert ledger.may_migrate(verdict, quarantine=judged_medium) is True
 
@@ -7400,6 +7500,11 @@ def test_a_fingerprint_is_an_opaque_token_and_not_a_rendered_record() -> None:
         "snapshot fingerprint",
         "two\nlines",
         "a" * 129,
+        # R11 (test-suite review): every case above combines "=" with a space
+        # or a slash, so it was never asked in isolation — a mutant dropping
+        # `"="` from the forbidden-character tuple survived undetected. One
+        # rendered `key=value` field, with neither, isolates it.
+        "generation=17",
     ):
         with pytest.raises(TypeError, match="opaque"):
             descriptor(fingerprint=rejected)
@@ -8046,6 +8151,53 @@ def test_gc_get_referents_does_not_recover_a_live_medium_from_the_index() -> Non
     # And the index still does its one job correctly throughout.
     assert index.get(medium) == "judged"
     assert medium in index
+
+
+def test_the_index_answers_false_for_a_key_it_never_held() -> None:
+    """R11 (test-suite review): `__contains__`'s "no entry at all" branch —
+    as opposed to "an entry, but a dead or different object" — was unreached
+    by the whole suite, because every existing `in`/`not in` drive presents
+    either a key the index holds or one it was made to hold a stale entry
+    for. `azazel_boot.snapshot` itself never calls `in` on either module
+    index, only `.get()`/`[...] =`, so this is the one place production code
+    does not backstop a coverage gap in its own test suite. Inverting the
+    branch (`return True`) went undetected; this drives the branch directly.
+    """
+
+    from azazel_boot import snapshot as module
+
+    index = module._WeakIdentityIndex()
+    never_added = a_quarantine(quarantined=False)
+
+    assert never_added not in index
+    assert index.get(never_added) is None
+
+
+def test_a_dead_referent_is_dropped_from_the_index_not_merely_unreadable() -> None:
+    """R11 (test-suite review): `__setitem__`'s weakref cleanup callback
+    (`store.pop(oid, None)` on collection) was untested — the identity check
+    already proves a dead entry answers `False`/`None`, but proves nothing
+    about whether the entry is actually removed. Without the callback the
+    same behaviour holds from the outside, while `_by_id` grows one stale
+    `(dead weakref, value)` pair per judged-then-dropped medium for the rest
+    of the process — a slow leak invisible to every existing assertion,
+    which all ask "what does a lookup answer" and none ask "how many entries
+    are actually held".
+    """
+
+    from azazel_boot import snapshot as module
+
+    index = module._WeakIdentityIndex()
+    medium = a_quarantine(quarantined=False)
+    index[medium] = "judged"
+
+    store = module._INDEX_STORAGE.get(index)
+    assert len(store) == 1
+
+    del medium
+    gc.collect()
+
+    assert len(store) == 0, "the dead entry was expected to be dropped, not merely unreadable"
 
 
 def test_the_mintedness_check_is_not_saved_by_the_medium_check() -> None:
