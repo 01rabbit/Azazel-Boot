@@ -8962,6 +8962,124 @@ def test_two_real_threads_committing_the_same_workflow_produce_one_candidate(
     for _attempt in range(5):
         attempt()
 
+
+class _BlocksOnAnEvent:
+    """An acquisition whose `attempt()` blocks until told to stop, like a
+    real operator prompt — used to force `commit()` to sit inside
+    `_require_the_gates` for as long as a test needs, without a real human.
+    """
+
+    channel = PassphraseChannel.LOCAL_HIDDEN_PROMPT
+
+    def __init__(self) -> None:
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def attempt(self) -> AttemptOutcome:
+        self.entered.set()
+        self.release.wait(timeout=10)
+        return AttemptOutcome.OPENED
+
+
+def test_interrupt_does_not_deadlock_against_a_commit_blocked_in_attempt(
+    observations,
+) -> None:
+    """R20 (security review): a genuine circular wait `self._lock` introduced.
+
+    Round 19's fix held `self._lock` across `commit()`'s entire body,
+    `_require_the_gates` — and so `acquisition.attempt()`, "the one step in
+    this workflow that blocks on a human" — included. A round-20 review
+    built the natural integration pattern this breaks: a cancel handler that
+    calls `interrupt()` *first*, to record the interruption before tearing
+    anything down, and only afterwards releases whatever `attempt()` was
+    waiting on. With the lock held across `attempt()`, that is a genuine,
+    unbounded circular wait — `commit()` blocked inside `attempt()` holding
+    the lock, waiting for a release only the interrupter sends; the
+    interrupter blocked on the lock, only sending that release after
+    `interrupt()` returns, which it never does. Confirmed live: `interrupt()`
+    made no progress in a 20-second window.
+
+    `commit()` no longer holds `self._lock` across the call into
+    `_require_the_gates` (see the comment there, and in `__init__`), so this
+    same ordering no longer deadlocks: `interrupt()` runs and returns while
+    `commit()` is still parked inside `attempt()`, unprotected exactly where
+    it needs to be. Once `attempt()` is released, `commit()`'s own
+    post-prompt re-check — the ordinary "again, after the prompt" pattern —
+    finds the workflow already `INTERRUPTED` (a terminal stage) and refuses
+    cleanly, the same vocabulary every other race in this file resolves to.
+    """
+
+    flow = workflow(observations)
+    snap = descriptor()
+    flow.start(
+        snap, observations, media_binding_holds=True, session_id=SESSION, started_by_operator=True
+    )
+    flow.open_trial(snap, observations, media_binding_holds=True, session_id=SESSION)
+
+    acquisition = _BlocksOnAnEvent()
+    commit_outcome: dict[str, object] = {}
+
+    def do_commit() -> None:
+        try:
+            candidate = flow.commit(
+                snap,
+                observations,
+                media_binding_holds=True,
+                session_id=SESSION,
+                acquisition=acquisition,
+                confirmed=True,
+            )
+            commit_outcome["kind"] = "returned"
+            commit_outcome["candidate"] = candidate
+        except RecoveryRefused as refused:
+            commit_outcome["kind"] = "refused"
+            commit_outcome["refusal"] = refused.refusal
+
+    committer = threading.Thread(target=do_commit)
+    committer.start()
+    # `commit()` is now parked inside `attempt()`, holding no lock while it
+    # waits — exactly the scenario finding this test drives.
+    assert acquisition.entered.wait(timeout=5)
+
+    interrupt_outcome: dict[str, object] = {}
+
+    def do_interrupt() -> None:
+        try:
+            flow.interrupt(session_id=SESSION)
+            interrupt_outcome["kind"] = "returned"
+        except RecoveryRefused as refused:
+            interrupt_outcome["kind"] = "refused"
+            interrupt_outcome["refusal"] = refused.refusal
+
+    interrupter = threading.Thread(target=do_interrupt)
+    interrupter.start()
+    # The deadlock, if this fix were absent, is unbounded — no timeout on
+    # `interrupt()`'s own side would ever fire, since it is not `interrupt()`
+    # waiting on a clock, it is `interrupt()` waiting on a lock nothing will
+    # ever release. `join(timeout=...)` here only bounds how long *this test*
+    # waits before declaring the deadlock; it does not paper over one.
+    interrupter.join(timeout=10)
+    assert not interrupter.is_alive(), (
+        "interrupt() deadlocked behind a commit() blocked in attempt()"
+    )
+    assert interrupt_outcome["kind"] == "returned"
+    assert flow.stage is RecoveryStage.INTERRUPTED
+
+    # Only now does the acquisition let go — the ordering the finding is
+    # about: record the interruption first, release what was blocking second.
+    acquisition.release.set()
+    committer.join(timeout=10)
+    assert not committer.is_alive(), "commit() never woke up after attempt() returned"
+    assert commit_outcome["kind"] == "refused"
+    assert commit_outcome["refusal"] is Refusal.WORKFLOW_ALREADY_FINISHED
+    # The interruption records once; the blocked commit records nothing.
+    assert [entry.event for entry in flow.audit()] == [
+        SnapshotAuditEvent.RECOVERY_STARTED,
+        SnapshotAuditEvent.RECOVERY_TRIAL_OPENED,
+        SnapshotAuditEvent.RECOVERY_INTERRUPTED,
+    ]
+
+
 def test_a_real_second_thread_interrupting_before_commits_candidate_is_written_stays_in_vocabulary(
     observations,
 ) -> None:

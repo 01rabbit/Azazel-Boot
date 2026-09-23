@@ -490,16 +490,46 @@ which vocabulary a loser meets, needed closing. Every `RecoveryWorkflow`
 now holds a per-instance `_lock` (a `threading.RLock`, reentrant because
 `_refuse_gate` calls back into `_sealed_assign` on the same thread, and
 `attempt()` can call back into `interrupt()` the same way) for the whole
-body of `start`, `open_trial`, `commit`, `interrupt` and `_sealed_assign`
-itself. No second call on the same workflow — this method or a different
-one, `interrupt` racing in included — can begin at all until whichever one
-is currently running has completely finished. The race is not narrowed
-this time; it is closed: two calls into any of these five now serialise
-completely, so there is no window left for either to observe state the
-other is mid-write on. Round eighteen's `_sealed_assign` fix stays in
-place as the backstop for a caller who reaches it directly, bypassing the
-lock the public methods take — the same reach this module has never
-claimed a capability boundary against, only "the accidental reach".
+body of `start`, `open_trial`, `interrupt` and `_sealed_assign` itself, and
+for all of `commit` except one call — see below. No second call on the
+same workflow — this method or a different one, `interrupt` racing in
+included — can begin while the lock is held, so there is no window left
+for either to observe state the other is mid-write on. `_sealed_assign`
+takes the *same* `self._lock`, not a different one and not none: a caller
+who reaches it directly does not bypass the lock, only the business-logic
+checks (`_require_stage`, `_require_this_sitting`, and the rest) the
+public methods run before ever calling it — round eighteen's fix inside
+`_sealed_assign` is the backstop for *that* reach, the same one this
+module has never claimed a capability boundary against, only "the
+accidental reach". (A round-twenty doctrine review caught an earlier draft
+of this paragraph, and the matching source comment, saying "bypassing the
+lock" — both were wrong the same way, and are corrected here.)
+
+**`commit` does not hold `self._lock` across its call into
+`_require_the_gates`, and a round-twenty review is why.** `_require_the_
+gates` is where `acquisition.attempt()` lives — "the one step in this
+workflow that blocks on a human." Holding `self._lock` across a
+human-speed wait turns an operator screen into a lock an unrelated
+`interrupt()` call queues behind, and a round-twenty security review built
+a genuine circular wait out of exactly that: a device-pull handler that
+calls `interrupt()` first, to record the interruption before tearing
+anything down, and only afterwards releases whatever `attempt()` was
+blocked on. `commit()`'s thread sits inside `attempt()` holding the lock,
+waiting for a signal that only arrives after `interrupt()` returns;
+`interrupt()`'s thread sits blocked on the lock `commit()` holds. Neither
+moves. `commit` now releases the lock before calling `_require_the_gates`
+and reacquires it only afterward, for the mint and the two final writes.
+This does not reopen the double-commit race above: gates 1-4 only read the
+quarantine, the binding and the sitting — none of which `self._lock` ever
+protected (`Quarantine.fence()` is that object's own method, called from
+device monitoring, entirely outside this lock) — and `_require_the_gates`'s
+one write, `_cleared`, is the same sentinel for identical inputs
+regardless of which of two racing threads' writes lands, so two threads
+disagreeing about it is not a shape that can occur. What can genuinely
+change while the lock is released — the snapshot, the stage — is exactly
+what the "again, after the prompt" re-checks immediately after
+`_require_the_gates` returns exist to catch, the same pattern round 7
+built for the single-threaded case this reopens nothing in.
 
 **A sibling of the same shape existed one step upstream, in
 `_remember_the_medium`** (called from every `preflight()`, which this

@@ -1830,17 +1830,19 @@ class RecoveryWorkflow:
         # after the winner had already read it back. A second, unrelated bare
         # `AttributeError` leak was found the same way, through `_cleared`
         # being read in one statement and reset in a later one, both inside
-        # `_sealed_assign`'s own `_stage` branch. Reentrant, an `_RLock`
-        # around each of `start`/`open_trial`/`commit`/`interrupt`'s whole
-        # body (and, for a caller who reaches it directly, `_sealed_assign`'s
-        # own body) makes each of them a single atomic operation per
-        # workflow, so no second call — same method or a different one, same
-        # thread or a different one — ever observes state a first call has
-        # not finished changing. The same thread reentering through
-        # `_refuse_gate` (which calls back into `_sealed_assign`) or through
-        # `attempt()` calling back into `interrupt()` still succeeds, the
-        # same as before this lock existed: an `RLock` only blocks a
-        # *different* thread.
+        # `_sealed_assign`'s own `_stage` branch. Reentrant, an `RLock`
+        # around each of `start`/`open_trial`/`interrupt`'s whole body, all
+        # but one call inside `commit`'s (a round-twenty refinement — see
+        # the comment above `commit`'s call into `_require_the_gates`), and
+        # `_sealed_assign`'s own body for a caller who reaches it directly,
+        # makes the read-then-write parts of each a single atomic operation
+        # per workflow, so no second call — same method or a different one,
+        # same thread or a different one — ever observes state a first call
+        # has not finished changing, in the parts that matter. The same
+        # thread reentering through `_refuse_gate` (which calls back into
+        # `_sealed_assign`) or through `attempt()` calling back into
+        # `interrupt()` still succeeds, the same as before this lock
+        # existed: an `RLock` only blocks a *different* thread.
         object.__setattr__(self, "_lock", threading.RLock())
         object.__setattr__(self, "_sealed", True)
 
@@ -2042,22 +2044,47 @@ class RecoveryWorkflow:
         confirmation.
         """
 
+        _require_a_real_snapshot(snapshot)
+        _require_real_observations(observations)
+        _require_an_acquisition(acquisition)
+        _require_an_actual_bool("confirmed", confirmed)
         with self._lock:
-            _require_a_real_snapshot(snapshot)
-            _require_real_observations(observations)
-            _require_an_acquisition(acquisition)
-            _require_an_actual_bool("confirmed", confirmed)
             self._require_stage(RecoveryStage.TRIAL_OPEN)
             self._require_this_sitting(session_id)
             self._require_the_same_snapshot(snapshot)
-            self._require_the_gates(
-                snapshot,
-                observations,
-                session_id=session_id,
-                media_binding_holds=media_binding_holds,
-                acquisition=acquisition,
-                confirmed=confirmed,
-            )
+        # **`self._lock` is not held across this call — round twenty found the
+        # reason it must not be.** `_require_the_gates` is where `attempt()`
+        # lives, "the one step in this workflow that blocks on a human," and
+        # holding a lock across a human-speed wait turns an operator screen
+        # into a lock an unrelated `interrupt()` call queues behind. A
+        # round-twenty review built exactly that: a device-pull handler that
+        # calls `interrupt()` first (to record the interruption before tearing
+        # anything down) and only then releases whatever `attempt()` was
+        # waiting on — a genuine circular wait, `interrupt()` blocked on
+        # `self._lock`, `commit()` blocked inside `attempt()` waiting for a
+        # signal `interrupt()` was supposed to send. Nothing here needs the
+        # lock held across `attempt()`: gates 1-4, above, only read the
+        # quarantine, the binding and the sitting, none of which this lock
+        # protects (`fence()` is `Quarantine`'s own method, called from device
+        # monitoring, entirely outside `self._lock`); `_require_the_gates`'s
+        # own `_cleared` write, at its very end, is unconditionally the same
+        # sentinel for identical inputs, so two threads racing to write it
+        # concurrently — impossible in practice, since reaching it needs
+        # `TRIAL_OPEN`, which only one racing `commit()` can still be sitting
+        # at once the other reaches `COMMITTED` below — cannot disagree even
+        # if they somehow both did. What genuinely changed during the wait is
+        # exactly what the re-checks immediately below exist to catch, the
+        # same "again, after the prompt" reasoning round 7 built this pattern
+        # for in the first place, single-threaded reentrancy included.
+        self._require_the_gates(
+            snapshot,
+            observations,
+            session_id=session_id,
+            media_binding_holds=media_binding_holds,
+            acquisition=acquisition,
+            confirmed=confirmed,
+        )
+        with self._lock:
             # **Again, after the prompt.** The two quarantine flags were re-read
             # after `attempt()` and the pin was not, so a review mutated the frozen
             # descriptor from inside the acquisition and committed on a different
@@ -2121,9 +2148,28 @@ class RecoveryWorkflow:
             # guard has nothing to say about that, because neither call is
             # racing a workflow that has *already* gone terminal; both are
             # racing to be the one that does. `self._lock` (`__init__`,
-            # above), held for this whole method's body, is what actually
-            # makes this line safe: a second call, on any thread, cannot
-            # even be inside `commit` while this one is.
+            # above) is what actually makes this line safe: from here
+            # through the write below, a second call, on any thread, cannot
+            # even be inside `commit` while this one is. (Round twenty split
+            # this method's locking into two sections rather than one
+            # continuous hold, for an unrelated reason — see the comment
+            # above `_require_the_gates` — but this second section, covering
+            # every remaining write, is unbroken.)
+            #
+            # **Same-thread reentrancy is still an "accidental reach," not a
+            # capability boundary, and can still confuse a caller.** A
+            # round-twenty review built an `acquisition.attempt()` that
+            # calls `commit()` again, on the same thread — the `RLock`
+            # allows it, and doctrine holds (one candidate, one audit
+            # entry, quarantine untouched): the inner call mints and
+            # commits honestly, and the outer call's own re-check above
+            # then meets the now-terminal workflow and is refused. But the
+            # outer caller — the one who actually invoked `commit()` — sees
+            # only that refusal; the real candidate went to whatever ran
+            # inside `attempt()`. This needs a hostile or buggy
+            # `KeyAcquisition` with a `flow` reference to trigger at all —
+            # the same trust boundary `_require_the_gates` already states
+            # for a direct call — so it is not fixed here, only named.
             self._sealed_assign("_stage", RecoveryStage.COMMITTED)
             self._record(
                 SnapshotAuditEvent.RECOVERY_COMPLETED,
@@ -2527,15 +2573,22 @@ class RecoveryWorkflow:
             # produced a real double commit — two `RECOVERY_COMPLETED`
             # entries, and a legitimately returned candidate `holds()`
             # denied — not merely the wrong exception type. `self._lock`
-            # (`__init__`, above) is the actual close: every one of
-            # `start`/`open_trial`/`commit`/`interrupt`/`_sealed_assign`
-            # holds it for its whole body now, so two calls on the same
-            # workflow can never run at once regardless of which of them
-            # they are. This check stays as the backstop for a caller who
-            # reaches `_sealed_assign` directly, bypassing the lock the
-            # public methods take — the same reach this method has never
-            # claimed a capability boundary against, only "the accidental
-            # reach". A caller who correctly wrote `except RecoveryRefused:`
+            # (`__init__`, above) is the actual close: `start`/`open_trial`/
+            # `interrupt`/`_sealed_assign` hold it for their whole body, and
+            # `commit` for all of its body except one call (see the comment
+            # above the call into `_require_the_gates`, round twenty), so
+            # two calls on the same workflow can never be inside the parts
+            # that read-then-write at once. This check stays as the
+            # backstop for a caller who reaches `_sealed_assign` directly —
+            # `_sealed_assign` takes this same `self._lock` itself, so that
+            # reach does not bypass the lock, only the business-logic
+            # checks (`_require_stage` and the rest) the public methods run
+            # first — the same reach this method has never claimed a
+            # capability boundary against, only "the accidental reach". (A
+            # round-twenty doctrine review caught an earlier draft of this
+            # comment saying "bypassing the lock"; `docs/snapshot-and-
+            # recovery.md` had the identical error, also corrected.)
+            # A caller who correctly wrote `except RecoveryRefused:`
             # used to crash on whichever race it lost, through either
             # route; now it is refused, the same `WORKFLOW_ALREADY_FINISHED`
             # `interrupt` and `_require_stage` already answer for the
