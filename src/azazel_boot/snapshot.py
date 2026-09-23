@@ -1523,6 +1523,16 @@ class RecoveryGate(Enum):
     #: a decision module that holds key material is a decision module the
     #: secret arrives at, and `session_mode` fixed that boundary for the
     #: passphrase in exactly this way.
+    #:
+    #: **"The same shape" is this module's claim, not a verified one.** A
+    #: round-34 doctrine review pointed out that `media_binding_applies`
+    #: deliberately collapses all five bound elements into one opaque `bool`
+    #: to avoid becoming "an oracle that tells an attacker which of the five
+    #: inputs they got wrong" — while `preflight`'s three (`binding_holds`,
+    #: `generation_holds`, `image_digest_holds`) are independently settable.
+    #: No caller-side implementation of those three exists in this
+    #: repository to say whether they preserve that same anti-oracle
+    #: property or not. See ADR-0010's fourth further fact.
     TARGET_BINDING = "target_binding"
     KEY_ACQUISITION = "key_acquisition"
     INTEGRITY_VERIFICATION = "integrity_verification"

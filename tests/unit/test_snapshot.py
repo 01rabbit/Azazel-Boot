@@ -4242,13 +4242,20 @@ def test_an_interruption_reaches_its_terminal_stage_from_not_started_too(observa
     in `_STAGE_EDGES`, and the design doc and `interrupt`'s own docstring both
     claim an interruption is available throughout — but nothing drove this leg
     of that claim directly. `preflight_passed -> interrupted` is asserted one
-    stage later (`test_an_interruption_belongs_to_its_sitting_like_every_other_
-    stage`, just above) and `trial_open -> interrupted` two stages later
+    stage later (`test_the_seal_writes_only_the_three_fields_a_recovery_moves`)
+    and `trial_open -> interrupted` two stages later
     (`test_an_interrupted_recovery_leaves_the_volume_quarantined`); only this
     one, from a workflow `interrupt` is called on before `start` ever runs, had
     no test of its own. What incidentally exercised it — a mutation removing
     the edge was still caught — was `test_no_public_method_ever_turns_either_
     flag_off`'s loose exception filter, not a positive assertion.
+
+    R34 (doctrine review): this docstring first cited
+    `test_an_interruption_belongs_to_its_sitting_like_every_other_stage` for
+    the `preflight_passed -> interrupted` leg. That test only drives two
+    *refused* `interrupt` calls (a foreign sitting, a non-`str` session id) —
+    neither ever reaches `INTERRUPTED`. Corrected above to the test that
+    actually asserts it.
     """
 
     flow = workflow(observations)
@@ -8929,6 +8936,26 @@ def test_a_capacity_report_refuses_a_bool_on_either_side() -> None:
             CapacityReport(**arguments)
 
     assert CapacityReport(required=100, available=1000).has_room_for_the_snapshot() is True
+
+
+def test_a_capacity_reports_zero_boundary_is_driven_on_both_sides() -> None:
+    """R34 (test-suite review): the same asymmetry as the bool test above, one
+    boundary over. `_require_two_measurements` checks `required >= 0` and
+    `available >= 0`, and `available=0` is driven throughout this file
+    (`capacity(required=10**9, available=0)`, repeatedly, to fail
+    `REQUIRED_SPACE`) — but nothing ever built a `CapacityReport` with
+    `required=0`. A mutant narrowing `required`'s own check from `>= 0` to
+    `> 0` passed the whole suite: a snapshot legitimately reported as needing
+    zero additional bytes would have started refusing, silently, on a
+    boundary this file has otherwise been careful to drive on both sides of
+    every comparison.
+    """
+
+    with pytest.raises(TypeError, match="required must be a non-negative integer"):
+        CapacityReport(required=-1, available=1000)
+
+    assert CapacityReport(required=0, available=0).has_room_for_the_snapshot() is True
+    assert CapacityReport(required=0, available=1000).has_room_for_the_snapshot() is True
 
 
 def test_the_audit_entry_renders_the_payload_it_is_allowed_to_carry() -> None:

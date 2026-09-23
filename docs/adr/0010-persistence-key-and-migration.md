@@ -52,18 +52,35 @@ is the secret arriving where `session_mode` decided it must not. (3) D4 says
 "leaving quarantine is possible **only** through the explicit recovery workflow
 in D8" — and D8 as implemented does not leave quarantine at all: it hands back
 a candidate, so as written that sentence names an empty set. (4) D7's own text
-above names four preflight checks; `azazel_boot.snapshot.preflight()` asks ten.
-Six of the extra six are load-bearing on other decisions this record already
-makes elsewhere (the fence, on D9; the volume quarantine, on D4; the snapshot's
-existence and container version, on D7's own "no migration without a snapshot"
-before the cheap answers) and are recorded as such next to their checks. Three
-are not: `binding_holds`, `generation_holds` and `image_digest_holds` re-ask,
-before a migration's large write, the same ADR-0008 D4.1.1 media-binding
-elements D8 gate 1 already re-asks before a recovery's write — but nothing in
-this record or in `azazel_boot.snapshot` says so next to the check itself. A
-round-33 doctrine review found the gap; this fact records it rather than
-inventing the rationale after the fact. Each of the four is recorded here as
-an observed difference between this record and the code; reconciling them is
+above names four preflight checks, and those four collapse to **three**
+`PreflightCheck` members (`REQUIRED_SPACE` is one check for both "required"
+and "available"; `SNAPSHOT_INTEGRITY`; `SCHEMA_COMPATIBILITY`).
+`azazel_boot.snapshot.preflight()` asks ten, so **seven** are not in D7's own
+text. Four of the seven are load-bearing on other decisions this record
+already makes elsewhere (the fence, on D9; the volume quarantine, on D4; the
+snapshot's existence and container version, on D7's own "no migration without
+a snapshot" before the cheap answers) and are recorded as such next to their
+checks. Three are not: `binding_holds`, `generation_holds` and
+`image_digest_holds` re-ask, before a migration's large write, the same
+ADR-0008 D4.1.1 media-binding elements D8 gate 1 already re-asks before a
+recovery's write. A round-33 doctrine review found that nothing in this
+record or in `azazel_boot.snapshot` said so next to the check itself at the
+time; that same round's code comment on the `BINDING` check and the design
+doc's table now do, and this paragraph does too. **A round-34 doctrine
+review then questioned the "same elements" claim itself, rather than take it
+on faith:** D8 gate 1 is one opaque `bool` over all five bound elements
+together, by `media_binding_applies`'s own docstring, deliberately — because
+splitting the refusal by element would be "an oracle that tells an attacker
+which of the five inputs they got wrong". D7's three checks are independently
+settable booleans, each triggerable alone
+(`tests/unit/test_snapshot.py` drives `binding_holds`/`generation_holds`/
+`image_digest_holds` failing one at a time). No caller-side implementation of
+these three exists anywhere in this repository to say whether they are
+derived from one combined comparison — preserving `media_binding_applies`'s
+anti-oracle property — or three separate ones, which would not. "The same
+elements, in the same shape `preflight` takes its three" is this record's
+claim, not yet a verified one. Each of the four facts is recorded here as an
+observed difference between this record and the code; reconciling them is
 not this pull request's to do.
 [#7](https://github.com/01rabbit/Azazel-Boot/issues/7) stays open, and so do
 the three children this record names.
