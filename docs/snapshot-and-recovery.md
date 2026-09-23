@@ -339,7 +339,17 @@ four that precede them:
    in turn, and the audit said `recovery_completed` for a volume the module
    could not name. The quarantine must also be this sitting's —
    `PersistenceSession` refuses the identical pairing, and this type-checked
-   all three inputs and compared none of them.
+   all three inputs and compared none of them. The comparison itself
+   (`self._quarantine.session_id != self._session_id`) puts the quarantine's
+   own field on the left, where its `__ne__` decides first; a round-fourteen
+   review built a genuine `Quarantine`, through its own public constructor,
+   whose `session_id` was a `str` subclass answering `False` to every
+   `!=`, and reached `COMMITTED` over a quarantine whose honest sitting was
+   someone else's. `RecoveryWorkflow.__init__` now pins `quarantine.
+   session_id` to exactly `str` where it takes the quarantine, the same way
+   it pins `binding`'s two fields — `Quarantine.__init__` itself performs no
+   such validation and is tracked separately, out of this file's ownership,
+   as [#51](https://github.com/01rabbit/Azazel-Boot/issues/51).
 4. **host binding** (`HOST_BINDING`) — `commissioning.binding_applies`,
    re-derived from the supplied inventory rather than re-compared against a
    stored answer, now named for what it answers. `binding_applies` decides it

@@ -1703,6 +1703,25 @@ class RecoveryWorkflow:
         # constructor's caller.
         _require_an_exact_str("binding.host_fingerprint", binding.host_fingerprint)
         _require_an_exact_str("binding.session_id", binding.session_id)
+        # **The same gap, one field over.** `_require_a_real_quarantine`
+        # pins `type(quarantine) is Quarantine`, the container, and
+        # `_require_the_gates` later decides `MEDIUM_NOT_RECOGNISED` with
+        # `self._quarantine.session_id != self._session_id` — the
+        # quarantine's own field on the *left* of `!=`, where its `__ne__`
+        # is asked first. `Quarantine.__init__` performs no validation of
+        # its own on `session_id` (`azazel_boot.quarantine`, tracked
+        # separately as issue #51, out of this file's ownership), so a
+        # genuine `Quarantine`, built only through its public constructor,
+        # can hold a `str` subclass whose `__ne__` always answers `False` —
+        # a round-fourteen review built exactly that, reached `COMMITTED`
+        # and minted a real `RecoveryCandidate` for a quarantine whose
+        # honest `session_id` was a different sitting entirely, defeating
+        # the gate `MEDIUM_NOT_RECOGNISED`'s own comment says exists
+        # precisely to catch that pairing. This module does not have to
+        # wait on `quarantine.py`'s own fix to close its end: pinned here,
+        # on the value this class is about to compare, the same way
+        # `binding`'s fields are pinned two lines up.
+        _require_an_exact_str("quarantine.session_id", quarantine.session_id)
         _require_an_exact_str("session_id", session_id)
         if not session_id.strip():
             raise TypeError("session_id must be a non-empty string")

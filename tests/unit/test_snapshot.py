@@ -2901,6 +2901,46 @@ def test_a_bindings_own_fields_are_pinned_not_only_its_container_type(observatio
             RecoveryWorkflow(a_quarantine(), forged, session_id=SESSION)
 
 
+def test_a_quarantines_own_session_id_is_pinned_not_only_the_container_type() -> None:
+    """R14 (security review): the same gap round 13 closed for `binding`,
+    one field over, on the quarantine itself.
+
+    `_require_a_real_quarantine` pins `type(quarantine) is Quarantine`, the
+    container, and `_require_the_gates` decides `MEDIUM_NOT_RECOGNISED` with
+    `self._quarantine.session_id != self._session_id` — the quarantine's own
+    field on the *left* of `!=`, asked first. `Quarantine.__init__`
+    (`azazel_boot.quarantine`, tracked separately as issue #51, out of this
+    file's ownership) performs no validation of its own on `session_id`, so
+    a genuine `Quarantine`, built only through its public constructor, can
+    hold a `str` subclass whose `__ne__` always answers `False`. Reached
+    `COMMITTED` and minted a real `RecoveryCandidate` for a quarantine whose
+    honest `session_id` was a different sitting entirely — the exact pairing
+    the comment above `MEDIUM_NOT_RECOGNISED`'s check says it exists to
+    refuse (`QUARANTINE_FROM_ANOTHER_SESSION`'s sibling check here).
+    """
+
+    class LyingStr(str):
+        def __eq__(self, other: object) -> bool:
+            return True
+
+        def __ne__(self, other: object) -> bool:
+            return False
+
+        def __hash__(self) -> int:
+            return str.__hash__(self)
+
+    lying = Quarantine(
+        session_id=LyingStr("session-elsewhere"), boot_medium_identity=MEDIUM.identity
+    )
+    lying.observe(MEDIUM)
+    lying.observe(Device(identity="host-nvme-SN-1", device_class=DeviceClass.HOST_STORAGE))
+    lying.quarantine_volume()
+
+    binding = SessionBinding(host_fingerprint="irrelevant-to-this-check", session_id=SESSION)
+    with pytest.raises(TypeError, match="quarantine\\.session_id"):
+        RecoveryWorkflow(lying, binding, session_id=SESSION)
+
+
 def test_an_attempted_automatic_start_is_terminal_and_audited(observations) -> None:
     """F-12: it used to take the silent refusal and leave no trace.
 
