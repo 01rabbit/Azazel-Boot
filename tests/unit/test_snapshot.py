@@ -3736,6 +3736,47 @@ def test_the_two_operator_flags_must_be_actual_bools(truthy, observations) -> No
     assert good.stage is RecoveryStage.TRIAL_OPEN
 
 
+def test_a_bad_confirmed_type_never_reaches_the_key_prompt(observations) -> None:
+    """R44 (doctrine review): `commit()`'s own top-of-function type checks
+    look, at first glance, like the same redundant-with-`_require_the_gates`
+    shape rounds 39/40/42 already removed elsewhere -- `_require_an_
+    acquisition(acquisition)` and `_require_an_actual_bool("confirmed",
+    confirmed)` run again, conditionally, inside `_require_the_gates` itself,
+    at the `OPERATOR_CONFIRMATION` gate. They are not redundant, and for a
+    sharper reason than `start()`'s sitting check (R43): between the two
+    checks sits the whole of `_require_the_gates`'s gate order, including
+    `KEY_ACQUISITION`'s `acquisition.attempt()` -- the one step in this
+    workflow that prompts a human and spends one of D2's per-boot attempts.
+    `_require_the_gates`'s own `confirmed`-type check does not run until
+    `OPERATOR_CONFIRMATION`, well after `attempt()`. So a bad `confirmed`
+    value is refused by `commit()`'s outer check with zero gates evaluated
+    and zero prompts issued -- an invariant `test_the_two_operator_flags_
+    must_be_actual_bools` exercises (it asserts the `TypeError` and the
+    stage) but never actually asserts, since it passes a bare inline
+    `Opens()` with nothing to read `.attempts` off afterward. This test
+    keeps a handle on the acquisition and checks the count directly.
+    """
+
+    good = workflow(observations)
+    snap = descriptor()
+    good.start(
+        snap, observations, media_binding_holds=True, session_id=SESSION, started_by_operator=True
+    )
+    good.open_trial(snap, observations, media_binding_holds=True, session_id=SESSION)
+    acquisition = Opens()
+    with pytest.raises(TypeError, match="confirmed"):
+        good.commit(
+            snap,
+            observations,
+            media_binding_holds=True,
+            session_id=SESSION,
+            acquisition=acquisition,
+            confirmed="declined",
+        )
+    assert acquisition.attempts == 0
+    assert good.stage is RecoveryStage.TRIAL_OPEN
+
+
 def test_a_quarantine_subclass_that_lies_about_its_state_is_refused(observations) -> None:
     """F-4: `isinstance` was the fix for a stand-in, and a subclass wore the class.
 
@@ -9644,6 +9685,23 @@ def test_a_fingerprint_is_an_opaque_token_and_not_a_rendered_record() -> None:
     # BACKSLASH/EQUALS, not another single guess.
     with pytest.raises(TypeError, match="opaque"):
         descriptor(fingerprint="usb-SN-AA11BB22⹊dev⹊nvme0n1p3")
+
+    # R44 (security review): bypasses #15/#16, found by reading a whole
+    # Unicode category (`Pd`, Dash Punctuation, 26 codepoints) rather than
+    # a name pattern -- R43's own search misses a confusable whose Unicode
+    # name doesn't mention its ASCII target, the same blind spot R35's
+    # OGHAM SPACE MARK already showed once. U+30A0 KATAKANA-HIRAGANA DOUBLE
+    # HYPHEN, real-world Japanese typography for a transliterated
+    # hyphen/equals.
+    with pytest.raises(TypeError, match="opaque"):
+        descriptor(fingerprint="generation゠17")
+
+    # R44: U+2E40 DOUBLE HYPHEN, the Latin-block sibling of the entry just
+    # above -- the identical glyph shape, added in the same fix rather than
+    # left for a future round to rediscover as "the missing half" (R41's
+    # own lesson with BIG SOLIDUS/BIG REVERSE SOLIDUS).
+    with pytest.raises(TypeError, match="opaque"):
+        descriptor(fingerprint="generation⹀17")
 
     # R35: isolates the NFKC round-trip check from the category check —
     # fullwidth digits are category `Nd`, not `Cc`/`Cf`/`Zs`, so this value

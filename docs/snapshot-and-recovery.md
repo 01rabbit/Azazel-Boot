@@ -386,6 +386,39 @@ review independently re-derived the same non-redundancy from
 `self._session_id`/`self._pinned`'s write-once assignment sites and
 confirmed no removal was warranted.
 
+**Round 44, security: bypasses #15/#16, found by searching a whole
+category instead of a name pattern.** Round 43's own method — walking
+codepoint names for SOLIDUS/SLASH/VIRGULE/BACKSLASH/EQUALS — cannot find
+a confusable whose Unicode name doesn't mention its ASCII target, the same
+blind spot round 35's OGHAM SPACE MARK already demonstrated once. This
+round read the entire `Pd` (Dash Punctuation) category in full — 26
+codepoints, never previously examined since none of the eight denylisted
+categories or six confusable blocks found so far is `Pd` — and found two
+live bypasses confusable with `=`: U+30A0 KATAKANA-HIRAGANA DOUBLE HYPHEN
+(genuine real-world Japanese typography) and its Latin-block sibling
+U+2E40 DOUBLE HYPHEN, added together to avoid round 41's "missing half of
+a pair" mistake. Two further `Pd` candidates (the oblique variants) were
+judged visually distinct enough to leave out. `_CONFUSABLE_DELIMITERS` now
+holds 17 entries across three literals, seven Unicode blocks/categories.
+
+**Round 44, doctrine: `commit()`'s own top-of-function `acquisition`/
+`confirmed` type checks look like the redundant-check shape again, and
+are not — for a sharper reason than round 43's `start()` case.** Between
+`commit()`'s outer checks and `_require_the_gates`'s own conditional copy
+of the `confirmed` check (at the `OPERATOR_CONFIRMATION` gate, the last
+gate evaluated) sits the entire gate order, including `KEY_ACQUISITION`'s
+`acquisition.attempt()` — the one step that prompts a human and spends
+one of D2's per-boot attempts. Removing the outer check would mean a
+caller bug supplying a non-bool `confirmed` still eventually raises the
+identical `TypeError`, but only after `attempt()` has already run: a
+prompt issued and an attempt spent on a call that was always going to be
+refused. This was correct and already in place, but untested —
+`test_the_two_operator_flags_must_be_actual_bools` asserts the exception
+and the stage but passes a bare inline `Opens()` with no way to check
+`.attempts` afterward. Closed with a new test,
+`test_a_bad_confirmed_type_never_reaches_the_key_prompt`, which keeps a
+handle on the acquisition and asserts `attempts == 0`.
+
 ## Preflight (D7)
 
 Read-only **by construction**: it takes reports and returns a verdict. It has

@@ -993,6 +993,8 @@ _CONFUSABLE_DELIMITERS = frozenset(
         "╱",  # BOX DRAWINGS LIGHT DIAGONAL UPPER RIGHT TO LOWER LEFT — confusable with "/"
         "╲",  # BOX DRAWINGS LIGHT DIAGONAL UPPER LEFT TO LOWER RIGHT — confusable with "\"
         "⹊",  # DOTTED SOLIDUS — confusable with "/"
+        "゠",  # KATAKANA-HIRAGANA DOUBLE HYPHEN — confusable with "="
+        "⹀",  # DOUBLE HYPHEN — confusable with "="
     }
 )
 
@@ -1220,6 +1222,30 @@ def _require_an_opaque_value(name: str, value: str) -> None:
     under categories `Cf`/`Mn` this function has denylisted since rounds 31
     and 37 respectively. Closed the same way as every entry before it: one
     more named entry, not a new mechanism.
+
+    **A round-44 security review found bypasses #15 and #16 by searching a
+    whole Unicode *category* rather than a name pattern.** Round 43's own
+    search method — walking codepoint names for SOLIDUS/SLASH/VIRGULE/
+    BACKSLASH/EQUALS — cannot find a confusable whose Unicode name does not
+    mention its ASCII target, the same blind spot round 35's OGHAM SPACE
+    MARK finding already illustrated once. This round instead read the
+    entire `Pd` (Dash Punctuation) category — only 26 codepoints, small
+    enough to read in full, and never previously examined since none of the
+    eight denylisted categories or six confusable blocks found so far is
+    `Pd`. Two live bypasses: U+30A0 KATAKANA-HIRAGANA DOUBLE HYPHEN ("゠"),
+    genuine real-world Japanese typography for a transliterated hyphen/
+    equals (e.g. "サン゠テグジュペリ"), and its Latin-block sibling U+2E40
+    DOUBLE HYPHEN ("⹀"), the identical glyph shape used the same way in
+    European dictionary typography — added together rather than leaving the
+    second for a future round to rediscover as "the missing half," the same
+    mistake round 41 found and had to close separately. Both `Pd`, both
+    NFKC/NFD-stable, no decomposition relationship to `=`.
+    `"generation゠17"` reconstructed this function's own founding
+    `"generation=17"` disclosure through a different glyph. Two further `Pd`
+    candidates in the same sweep — U+2E17 DOUBLE OBLIQUE HYPHEN and U+2E5D
+    OBLIQUE HYPHEN — were left out as slanted rather than a bare double
+    horizontal stroke, judged visually distinct enough, the same "narrows,
+    does not guarantee" line every round before it has drawn.
     """
 
     if len(value) > 128:
