@@ -9203,6 +9203,13 @@ def test_a_fingerprint_is_an_opaque_token_and_not_a_rendered_record() -> None:
         # `"="` from the forbidden-character tuple survived undetected. One
         # rendered `key=value` field, with neither, isolates it.
         "generation=17",
+        # R32 (security review): R31 added a `unicodedata`-category check to
+        # this function closing an ANSI/OSC terminal-escape-injection path,
+        # but nothing here drove it — every case above is plain text, so a
+        # regression silently dropping that check would pass this test
+        # unnoticed. An ESC-led OSC sequence isolates it the same way R11 and
+        # R19 isolated their own gaps above.
+        "\x1b]0;pwned\x07",
     ):
         with pytest.raises(TypeError, match="opaque"):
             descriptor(fingerprint=rejected)

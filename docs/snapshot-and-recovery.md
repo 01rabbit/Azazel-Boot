@@ -144,6 +144,28 @@ value made of several such "lines" joined by a boundary the check does not ask
 about would satisfy a narrower check and still render as several lines
 wherever the audit is read back.
 
+**Not every dangerous byte is a line boundary.** A round-31 security review
+pointed out that `ESC` (`\x1b`) is neither a forbidden character in
+`_require_an_opaque_value`'s existing checks nor a `str.splitlines()`
+boundary, so a fingerprint carrying raw ANSI/OSC terminal escape
+sequences — cursor movement, conceal/colour codes, an OSC window-title or
+clipboard-write sequence — passed the check unchanged, as a single "line",
+and reached the one property this module deliberately leaves
+unredacted: `fingerprint`, on both `SnapshotDescriptor` and
+`SnapshotAuditEntry` (the latter is the object actually destined for a
+log). Closed with `unicodedata.category` rather than enumerating escape
+sequences by pattern — the same "checkable shape, not a guarantee about
+meaning" framing the rest of the function already uses: category `Cc` is
+the C0/C1 control bytes (`ESC` and the bytes every ANSI/OSC sequence is
+built from), `Cf` is the invisible format characters (bidi overrides,
+zero-width joiners) a spoofed or reordered-looking log line could be built
+from the same way. A round-32 review found the fix itself was correctly
+wired into every rendering path but undriven by any test — every existing
+rejected case in `test_a_fingerprint_is_an_opaque_token_and_not_a_rendered_record`
+was plain text, so a regression silently dropping the check would have
+passed unnoticed. Closed the same way earlier gaps in that same test were
+isolated: one case built from nothing but an ESC-led OSC sequence.
+
 ## Preflight (D7)
 
 Read-only **by construction**: it takes reports and returns a verdict. It has
