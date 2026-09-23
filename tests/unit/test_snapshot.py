@@ -2307,6 +2307,14 @@ def test_a_hand_built_verdict_does_not_authorise_a_migration() -> None:
     with pytest.raises(RecoveryRefused) as refused:
         ledger.may_migrate(forged, quarantine=judged_medium)
     assert refused.value.refusal is Refusal.VERDICT_NOT_MINTED_BY_A_PREFLIGHT
+    # **The first check's own detail, not the fallback's.** `_require_the_
+    # medium_now` — asked one line below — carries its own, independent
+    # "verdict this module minted judged a medium" refusal, over the SAME
+    # `Refusal` member. A verdict that answers `False` to the first check and
+    # would have answered `True` to the second is the only input that tells
+    # them apart; `test_the_mintedness_check_is_not_saved_by_the_medium_check`
+    # drives exactly that split.
+    assert "a value that merely has the right shape" in refused.value.detail
 
     with pytest.raises(RecoveryRefused):
         ledger.note_snapshot_written(
@@ -3583,15 +3591,24 @@ def _swallow(call, *args, **keywords):
 #: be replaced"] > 0` could not say which of the two had actually answered.
 #: Each fragment here is a prefix unique to one message.
 #:
-#: Two more `AttributeError` rules exist in `_sealed_assign` — the
-#: fence-since-the-clearance check and "a candidate is minted by a commit and
-#: by nothing else" — and are **not** listed: reaching either needs a real
-#: clearance already spent or partly spent, which the probes below build
-#: fresh workflows to avoid rather than arrange. Both are driven directly,
-#: with their own assertions, by `test_a_fence_raised_between_the_gates_and_
-#: the_stage_is_a_refusal` and `test_a_candidate_is_held_only_by_a_workflow_
-#: that_committed`; this drive's job is the input space around the calls it
-#: does make, not every shape the seal can raise.
+#: One more `AttributeError` rule exists in `_sealed_assign` — "a candidate
+#: is minted by a commit and by nothing else" — and is **not** listed:
+#: reaching it needs a real clearance already spent, which the probes below
+#: build fresh workflows to avoid rather than arrange. It is driven directly,
+#: with its own assertion, by
+#: `test_the_clearance_is_issued_by_the_gates_and_by_nothing_shorter`
+#: (`match="minted by a commit and by nothing else"`); this drive's job is
+#: the input space around the calls it does make, not every shape the seal
+#: can raise.
+#:
+#: The fence-since-the-clearance check used to be a second such rule and is
+#: not one any more: round 10 found that a caller reaching it through the
+#: legitimate path — `commit`, not a direct `_sealed_assign` call — met a
+#: bare `AttributeError` for a fact every other gate expresses through
+#: `RecoveryRefused`, so it now calls `_refuse_gate` instead and no longer
+#: raises `AttributeError` at all. `test_a_clearance_is_spent_over_the_
+#: medium_the_gates_read` and the R10 fence-landing-mid-commit test drive it
+#: through `RecoveryRefused`, not through this fragment list.
 _SEAL_RULES = (
     "a RecoveryWorkflow is sealed after construction",
     "only the stage, the snapshot's pinned fields",
@@ -7967,3 +7984,190 @@ def test_the_identity_index_does_not_answer_for_a_dead_or_different_object() -> 
     # And the entry keyed by its own, correct id is unaffected.
     assert index.get(first) == "value-for-first"
     assert first in index
+
+
+def test_the_mintedness_check_is_not_saved_by_the_medium_check() -> None:
+    """R10: `may_migrate`'s own two checks share one `Refusal` member.
+
+    `verdict_was_minted_here` and `_require_the_medium_now`'s own
+    `_a_medium_was_judged` check both refuse with
+    `VERDICT_NOT_MINTED_BY_A_PREFLIGHT`, with different detail text — so a
+    hand-built verdict that answers `False` to both, driven through
+    `may_migrate`, cannot tell you which one actually fired. Deleting the
+    first check alone left the whole suite green, because the second one
+    always caught the same forged verdicts the tests happened to use.
+
+    Isolated here by building a verdict that **is** judged by a medium —
+    added to the module's own judged-medium index directly, the way `_mint`
+    would — without ever being added to `_MINTED_HERE`. `_require_the_medium_
+    now` would accept it; only `verdict_was_minted_here` still refuses it,
+    so this is the one input that answers "which check fired" unambiguously.
+    """
+
+    from azazel_boot import snapshot as module
+
+    medium = a_quarantine(quarantined=False)
+    half_forged = PreflightVerdict(None)
+    assert verdict_was_minted_here(half_forged) is False
+
+    # Judged by the medium, the way a real `_mint` call would record it —
+    # without ever passing through `_mint` itself, so `_MINTED_HERE` never
+    # learns about this verdict.
+    module._remember_the_medium(half_forged, medium)
+    assert module._a_medium_was_judged(half_forged) is True
+    assert verdict_was_minted_here(half_forged) is False
+
+    with pytest.raises(RecoveryRefused) as refused:
+        MigrationLedger().may_migrate(half_forged, quarantine=medium)
+    assert refused.value.refusal is Refusal.VERDICT_NOT_MINTED_BY_A_PREFLIGHT
+    assert "a value that merely has the right shape" in refused.value.detail
+
+
+def test_both_value_types_hash_by_the_same_fields_their_eq_compares() -> None:
+    """R10: `__hash__` was written and never driven.
+
+    `hash((SnapshotDescriptor, *_fields_of(self)))` names the type as well as
+    the fields, for the same reason `__eq__` pins the exact type: two exact
+    types whose fields happen to coincide must not collide with each other
+    the way two field-equal instances of the **same** type must. Dropping the
+    type discriminator from either class's `__hash__` left the whole suite
+    green — nothing had ever called `hash()` on either.
+    """
+
+    one = descriptor(fingerprint="snapshot-fingerprint-hash-a")
+    same_fields = descriptor(fingerprint="snapshot-fingerprint-hash-a")
+    different = descriptor(fingerprint="snapshot-fingerprint-hash-b")
+    assert one == same_fields
+    assert hash(one) == hash(same_fields)
+    assert hash(one) != hash(different)
+    # The type discriminator, isolated: two objects whose *fields* collide
+    # under `hash(fields)` alone must not necessarily collide once the type
+    # is folded in. Driven directly against the implementation's own shape
+    # rather than searched for, since a natural hash collision is not
+    # something a test should have to go looking for.
+    from azazel_boot import snapshot as module
+
+    assert hash(one) == hash((module.SnapshotDescriptor, *module._fields_of(one)))
+
+    a_entry = SnapshotAuditEntry(event=SnapshotAuditEvent.RECOVERY_STARTED, schema_version=1)
+    same_entry = SnapshotAuditEntry(event=SnapshotAuditEvent.RECOVERY_STARTED, schema_version=1)
+    other_entry = SnapshotAuditEntry(event=SnapshotAuditEvent.RECOVERY_STARTED, schema_version=2)
+    assert a_entry == same_entry
+    assert hash(a_entry) == hash(same_entry)
+    assert hash(a_entry) != hash(other_entry)
+    assert hash(a_entry) == hash((SnapshotAuditEntry, *a_entry._fields()))
+
+
+def test_a_snapshot_audit_entry_subclass_is_refused_the_same_way_the_descriptor_is() -> None:
+    """R10: the subclass-eq drive existed for `SnapshotDescriptor` and not
+    for `SnapshotAuditEntry`, though both classes carry the identical risk.
+
+    Weakening `SnapshotAuditEntry.__eq__`'s `type(other) is not
+    SnapshotAuditEntry` to `isinstance` is exactly the round-four attack
+    `_require_a_real_snapshot`'s own docstring narrates for the descriptor,
+    replayed on the sibling class nothing drove it against.
+    """
+
+    class LiarEntry(SnapshotAuditEntry):
+        def __eq__(self, other: object) -> bool:
+            return True
+
+        def __hash__(self) -> int:
+            return 0
+
+    real = SnapshotAuditEntry(event=SnapshotAuditEvent.RECOVERY_COMPLETED, schema_version=1)
+    liar = LiarEntry(event=SnapshotAuditEvent.RECOVERY_REFUSED, schema_version=99)
+    assert liar == liar  # the subclass answering for itself, on its own terms
+    # The real class's own `__eq__`, asked directly on either side, refuses
+    # rather than delegates — what a hostile subclass's *own* overridden
+    # `__eq__` separately claims about itself is not this class's to control,
+    # the same limit `_require_a_real_snapshot`'s docstring states for the
+    # exact-type pin generally: the point is that *this* method does not
+    # answer on the subclass's behalf, which both directions show.
+    assert SnapshotAuditEntry.__eq__(real, liar) is NotImplemented
+    assert SnapshotAuditEntry.__eq__(liar, real) is NotImplemented
+
+
+def test_the_audit_entrys_fields_are_derived_and_total() -> None:
+    """R10: `SnapshotDescriptor` has this test; `SnapshotAuditEntry` did not.
+
+    `_fields()` is what `__eq__` and `__hash__` both compare over, so a field
+    silently dropped from its return tuple is a field two otherwise-different
+    entries could stop being distinguished by — an audit entry whose
+    `schema_version` differs comparing equal, say. Derived from the source
+    rather than hand-checked, the way `_fields_of` is for the descriptor, so a
+    sixth field added to the class is a field this test notices was left out.
+    """
+
+    source = inspect.getsource(SnapshotAuditEntry._fields)
+    tree = ast.parse(textwrap.dedent(source))
+    returned = {
+        node.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+    }
+    declared = {name.lstrip("_") for name in SnapshotAuditEntry.__slots__}
+    assert returned == declared, (
+        "_fields must return every field of SnapshotAuditEntry; "
+        f"missing {sorted(declared - returned)}, unknown {sorted(returned - declared)}"
+    )
+
+    # And it is total in practice, not only in the source: two entries that
+    # differ in exactly one field are unequal, for every field in turn.
+    base = {
+        "event": SnapshotAuditEvent.RECOVERY_STARTED,
+        "check": PreflightCheck.MEDIUM_FENCED,
+        "gate": RecoveryGate.MEDIUM_FENCED,
+        "schema_version": 1,
+        "fingerprint": "snapshot-fingerprint-total-a",
+    }
+    reference = SnapshotAuditEntry(**base)
+    overrides = {
+        "event": SnapshotAuditEvent.RECOVERY_REFUSED,
+        "check": PreflightCheck.VOLUME_QUARANTINED,
+        "gate": RecoveryGate.NOTHING_TO_RECOVER,
+        "schema_version": 2,
+        "fingerprint": "snapshot-fingerprint-total-b",
+    }
+    for name, changed in overrides.items():
+        varied = dict(base)
+        varied[name] = changed
+        assert SnapshotAuditEntry(**varied) != reference, name
+
+
+def test_delattr_is_refused_on_every_class_that_defines_it_not_only_the_sealed_ones() -> None:
+    """R10: only the three `_sealed`-gated classes were driven with `del`.
+
+    `test_the_seals_other_door_is_shut_on_every_class_that_has_one` derives
+    the *list* of classes with `__delattr__` from the source, and only drives
+    `del target._sealed` — which exists on three of the eight. The other
+    five refuse **unconditionally**, and nothing had ever called `del` on one
+    of them: `SnapshotDescriptor.__delattr__` turned into `pass` left the
+    whole suite green.
+    """
+
+    snapshot = descriptor(fingerprint="snapshot-fingerprint-delattr")
+    with pytest.raises(AttributeError, match="fixed when it is built"):
+        del snapshot.fingerprint
+    with pytest.raises(AttributeError, match="fixed when it is built"):
+        del snapshot._fingerprint
+
+    entry = SnapshotAuditEntry(event=SnapshotAuditEvent.RECOVERY_STARTED)
+    with pytest.raises(AttributeError, match="fixed when it is built"):
+        del entry.event
+    with pytest.raises(AttributeError, match="fixed when it is built"):
+        del entry._event
+
+    report = capacity()
+    with pytest.raises(AttributeError, match="fixed when it is built"):
+        del report._required
+
+    verdict = PreflightVerdict(None)
+    with pytest.raises(AttributeError, match="fixed when it is minted"):
+        del verdict._refused_by
+
+    candidate = RecoveryCandidate(1, FINGERPRINT)
+    with pytest.raises(AttributeError, match="fixed when it is minted"):
+        del candidate._schema_version
