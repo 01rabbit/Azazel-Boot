@@ -5464,6 +5464,70 @@ def test_two_real_threads_preflighting_the_same_medium_both_stay_judged() -> Non
         assert ledger.may_migrate(verdict, quarantine=quarantine) is True
 
 
+def test_the_judged_lock_never_releases_between_the_read_and_the_record() -> None:
+    """R30 (test-suite review): the sibling gap, for `_JUDGED_LOCK`.
+
+    Same finding as `test_the_write_lock_never_releases_between_the_read_
+    and_the_record`, for the sibling lock: the two-thread race test above
+    proves a full removal of `_JUDGED_LOCK` is caught, but a narrower
+    mutant that releases it right after `_JUDGED_BY.get(quarantine)` and
+    lets `_JUDGED_BY[quarantine] = judged` run unprotected reopens the
+    identical race one statement later, and the race test's own thread
+    "b" stays blocked on the (still-present, just narrower) lock for its
+    whole grace period, never interleaving with "a"'s now-unprotected
+    tail. Asked directly instead of raced for, the same way, with the
+    same technique.
+    """
+
+    import azazel_boot.snapshot as module
+
+    quarantine = a_quarantine(quarantined=False)
+    snap = descriptor()
+
+    counting_lock = _CountingRLock()
+    original_lock = module._JUDGED_LOCK
+    release_count_at: dict[str, int] = {}
+    original_get = module._WeakIdentityIndex.get
+    original_setitem = module._WeakIdentityIndex.__setitem__
+
+    def recording_get(self, obj: object) -> object | None:
+        result = original_get(self, obj)
+        if self is module._JUDGED_BY and "read" not in release_count_at:
+            release_count_at["read"] = counting_lock.full_release_count
+        return result
+
+    def recording_setitem(self, obj: object, value: object) -> None:
+        original_setitem(self, obj, value)
+        if self is module._JUDGED_BY and "write" not in release_count_at:
+            release_count_at["write"] = counting_lock.full_release_count
+
+    module._JUDGED_LOCK = counting_lock
+    module._WeakIdentityIndex.get = recording_get
+    module._WeakIdentityIndex.__setitem__ = recording_setitem
+    try:
+        preflight(
+            quarantine,
+            snapshot=snap,
+            capacity=capacity(),
+            current_schema=1,
+            target_schema=2,
+            binding_holds=True,
+            generation_holds=True,
+            image_digest_holds=True,
+        )
+    finally:
+        module._JUDGED_LOCK = original_lock
+        module._WeakIdentityIndex.get = original_get
+        module._WeakIdentityIndex.__setitem__ = original_setitem
+
+    assert "read" in release_count_at
+    assert "write" in release_count_at
+    # The actual claim: not one full release of `_JUDGED_LOCK` happened
+    # between reading which medium this verdict already judged and
+    # recording this one against it.
+    assert release_count_at["read"] == release_count_at["write"]
+
+
 def test_one_preflight_records_one_write_in_any_ledger() -> None:
     """R4: nothing marked a verdict spent.
 
@@ -5623,6 +5687,82 @@ def test_two_real_threads_recording_the_same_write_record_it_once() -> None:
     assert refused["refusal"] is Refusal.VERDICT_ALREADY_SPENT
     recorded = next(outcome for outcome in outcomes.values() if outcome["kind"] == "recorded")
     assert len(recorded["ledger"].audit()) == 1
+
+
+def test_the_write_lock_never_releases_between_the_read_and_the_record() -> None:
+    """R30 (test-suite review): a coverage gap the two-thread race test
+    above could not see.
+
+    `test_two_real_threads_recording_the_same_write_record_it_once` proves
+    a full removal of `_WRITE_LOCK` is caught — but a *narrower* mutant,
+    one that keeps `_WRITE_LOCK` around only the `.get()` read and
+    releases it before the `if written is None: ...`/`.append(...)` write
+    that follows, reopens the identical TOCTOU one statement later and
+    passed that race test 10/10 times: thread "b" stays blocked acquiring
+    the (still-present, just narrower) lock for the whole grace period and
+    never gets a chance to interleave with "a"'s now-unprotected tail, so
+    the outcome-based assertion never sees the difference — exactly the
+    class of gap `test_commits_candidate_and_stage_writes_share_one_
+    uninterrupted_lock_hold` already closed once for `RecoveryWorkflow._lock`
+    (round 21), never extended to this module-level lock.
+
+    This asks the question directly instead of racing for it: swap
+    `_WRITE_LOCK` for a wrapper that counts genuine full releases, record
+    that count immediately after the read and again immediately after the
+    write, and assert they are equal — proving no full release happened
+    anywhere in between, structurally, on every run, with no dependence
+    on thread scheduling at all.
+    """
+
+    import azazel_boot.snapshot as module
+
+    quarantine = a_quarantine(quarantined=False)
+    snapshot = descriptor(fingerprint="snapshot-fingerprint-structural")
+    verdict = preflight(
+        quarantine,
+        snapshot=snapshot,
+        capacity=capacity(),
+        current_schema=1,
+        target_schema=2,
+        binding_holds=True,
+        generation_holds=True,
+        image_digest_holds=True,
+    )
+
+    counting_lock = _CountingRLock()
+    original_lock = module._WRITE_LOCK
+    release_count_at: dict[str, int] = {}
+    original_get = module._WeakIdentityIndex.get
+    original_setitem = module._WeakIdentityIndex.__setitem__
+
+    def recording_get(self, obj: object) -> object | None:
+        result = original_get(self, obj)
+        if self is module._SNAPSHOTS_RECORDED and "read" not in release_count_at:
+            release_count_at["read"] = counting_lock.full_release_count
+        return result
+
+    def recording_setitem(self, obj: object, value: object) -> None:
+        original_setitem(self, obj, value)
+        if self is module._SNAPSHOTS_RECORDED and "write" not in release_count_at:
+            release_count_at["write"] = counting_lock.full_release_count
+
+    module._WRITE_LOCK = counting_lock
+    module._WeakIdentityIndex.get = recording_get
+    module._WeakIdentityIndex.__setitem__ = recording_setitem
+    try:
+        ledger = MigrationLedger()
+        ledger.note_snapshot_written(verdict, snapshot, quarantine=quarantine)
+    finally:
+        module._WRITE_LOCK = original_lock
+        module._WeakIdentityIndex.get = original_get
+        module._WeakIdentityIndex.__setitem__ = original_setitem
+
+    assert "read" in release_count_at
+    assert "write" in release_count_at
+    # The actual claim: not one full release of `_WRITE_LOCK` happened
+    # between reading whether this write was already recorded and
+    # recording it.
+    assert release_count_at["read"] == release_count_at["write"]
 
 
 def test_the_write_record_asks_whether_the_verdict_passed() -> None:

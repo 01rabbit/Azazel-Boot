@@ -568,6 +568,22 @@ same way: `_JUDGED_LOCK`, a lock of its own rather than sharing
 independent call paths and sharing one lock would serialise two unrelated
 operations against each other for no reason this module's state needs.
 
+**Both locks' own two-thread race tests had a coverage gap only found in
+round 30, and closed the same way round 21 closed the identical gap for
+`RecoveryWorkflow._lock`.** A mutant that keeps the lock but narrows it —
+covering only the `.get()` read, releasing before the write that
+follows — reopens the exact TOCTOU each lock exists to close, one
+statement later. The two-thread race tests could not see it: their second
+thread stays blocked acquiring the still-present (just narrower) lock for
+its whole grace period, never getting the chance to interleave with the
+first thread's now-unprotected tail, so the outcome the race test checks
+comes out identical either way. Closed by asking the question directly
+instead of racing for it — the `_CountingRLock` technique — swapping each
+module-level lock for a release-counting wrapper, recording the count
+immediately after the read and again immediately after the write, and
+asserting they are equal: proving no full release happens in between,
+structurally, on every run, independent of thread scheduling.
+
 **One pair cannot be contested, and saying so is better than a test that looks
 like it proves it.** D8 orders key acquisition before integrity, but at the
 commit the snapshot is pinned to the one the workflow started on — so a
