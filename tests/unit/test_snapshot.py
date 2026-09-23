@@ -9504,6 +9504,45 @@ def test_a_fingerprint_is_an_opaque_token_and_not_a_rendered_record() -> None:
         # space" character: category `So` (not `Zs`), NFKC/NFD-stable, no
         # decomposition relationship to " " at all.
         "capacity⠀17179869184⠀medium⠀usb-SN-AA11BB22",
+        # R41 (security review): the denylist added one half of a pair and
+        # left the other out. R39 named BIG SOLIDUS (U+29F8, confusable with
+        # "/"); its own block defines BIG REVERSE SOLIDUS (U+29F9) right next
+        # to it, the same "Big" undecorated family the VERY HEAVY
+        # SOLIDUS/VERY HEAVY REVERSE SOLIDUS pair above was listed for in
+        # R40 -- but only the forward-slash half of the "Big" pair was ever
+        # added. This reconstructs a Windows-style path with the reverse
+        # solidus half alone.
+        "C:⧹Users⧹admin⧹.ssh⧹id_rsa",
+    ):
+        with pytest.raises(TypeError, match="opaque"):
+            descriptor(fingerprint=rejected)
+
+    # R41 (test-suite review): `_CONFUSABLE_DELIMITERS` holds twelve named
+    # entries (eleven plus round 41's own BIG REVERSE SOLIDUS above), and
+    # the loop above -- the only one that exercises the set at all -- left
+    # four of them, at the time, with no driving case anywhere in this
+    # file: FRACTION SLASH, SET MINUS, MATHEMATICAL RISING DIAGONAL and
+    # MATHEMATICAL FALLING DIAGONAL. Deleting all four from the set
+    # (confirmed by removing them directly and re-running this file) left
+    # `tests/unit` fully green: a regression dropping any of the four from
+    # the denylist would have shipped undetected. Each is driven on its own
+    # below, isolated from the entries already covered above rather than
+    # combined with them, the same isolation discipline R11's
+    # `"generation=17"` case and R35's OGHAM SPACE MARK case already use.
+    for rejected in (
+        # FRACTION SLASH (U+2044) -- confusable with "/", the same family
+        # as DIVISION SLASH above but a distinct, unrelated codepoint with
+        # no decomposition relationship to it or to "/".
+        "usb-SN-AA11BB22⁄dev⁄nvme0n1p3",
+        # MATHEMATICAL RISING DIAGONAL (U+27CB) -- confusable with "/",
+        # from the Miscellaneous Mathematical Symbols-B block.
+        "usb-SN-AA11BB22⟋dev⟋nvme0n1p3",
+        # SET MINUS (U+2216) -- confusable with "\", the backslash-shaped
+        # half of the same mechanism.
+        "host∖Administrator∖Desktop",
+        # MATHEMATICAL FALLING DIAGONAL (U+27CD) -- confusable with "\",
+        # from the same block as MATHEMATICAL RISING DIAGONAL.
+        "host⟍Administrator⟍Desktop",
     ):
         with pytest.raises(TypeError, match="opaque"):
             descriptor(fingerprint=rejected)

@@ -981,6 +981,7 @@ _CONFUSABLE_DELIMITERS = frozenset(
         "∕",  # DIVISION SLASH — confusable with "/"
         "⁄",  # FRACTION SLASH — confusable with "/"
         "⧸",  # BIG SOLIDUS — confusable with "/"
+        "⧹",  # BIG REVERSE SOLIDUS — confusable with "\"
         "⟋",  # MATHEMATICAL RISING DIAGONAL — confusable with "/"
         "\U0001f67c",  # VERY HEAVY SOLIDUS — confusable with "/"
         "∖",  # SET MINUS — confusable with "\"
@@ -1143,6 +1144,26 @@ def _require_an_opaque_value(name: str, value: str) -> None:
     the same way: named entries added to `_CONFUSABLE_DELIMITERS`, not a
     new mechanism. See that set's own comment for the specific codepoints
     and reasoning.
+
+    **A round-41 security review found the denylist had added one half of a
+    pair and left the other out.** Round 39 named BIG SOLIDUS (U+29F8, "⧸")
+    a confusable for "/"; its own block defines a BIG REVERSE SOLIDUS
+    (U+29F9, "⧹") immediately next to it, the identical "Big" undecorated
+    family VERY HEAVY SOLIDUS/VERY HEAVY REVERSE SOLIDUS were both listed
+    for in round 40 — but only the forward-slash half of the "Big" pair was
+    ever added. `"C:⧹Users⧹admin⧹.ssh⧹id_rsa"` passed every check above
+    unchanged and reconstructed the same Windows-path disclosure this
+    function exists to refuse. Closed the same way as every entry before
+    it: the missing half of the pair, added to `_CONFUSABLE_DELIMITERS`.
+
+    **A round-41 test-suite review found the same set was under-tested,
+    independent of the security finding above.** `_CONFUSABLE_DELIMITERS`
+    held eleven named entries and the one test exercising it drove only
+    five — FRACTION SLASH, SET MINUS, MATHEMATICAL RISING DIAGONAL and
+    MATHEMATICAL FALLING DIAGONAL had no case anywhere in the test file.
+    Deleting all four from the set left the whole suite green: a regression
+    dropping any of them would have shipped undetected. Each now has its
+    own isolated case.
     """
 
     if len(value) > 128:

@@ -265,6 +265,26 @@ NFKC/NFD-stable and decomposition-unrelated as every other confusable in
 this set. Both closed the same way: named entries added to
 `_CONFUSABLE_DELIMITERS`, not a new mechanism.
 
+**Round 41 found the denylist itself had a gap — a pair added half-complete
+— and a coverage gap in what tested it, independently of each other.** A
+round-41 security review noticed round 39 had named BIG SOLIDUS (U+29F8,
+confusable with `/`) but never its immediate sibling in the same block, BIG
+REVERSE SOLIDUS (U+29F9, confusable with `\`) — even though round 40 had
+added the analogous VERY HEAVY SOLIDUS/VERY HEAVY REVERSE SOLIDUS pair
+*complete*. `"C:⧹Users⧹admin⧹.ssh⧹id_rsa"` reconstructed a Windows-style
+path with the missing half alone. Closed the same way as every entry
+before it: the missing half added to `_CONFUSABLE_DELIMITERS`. A
+round-41 test-suite review, working independently on its own copy, found
+that the set — twelve entries after the security fix above — had only ever
+been exercised by five of them; FRACTION SLASH, SET MINUS, MATHEMATICAL
+RISING DIAGONAL and MATHEMATICAL FALLING DIAGONAL had no driving test
+anywhere in the file, and deleting all four from the set left the whole
+suite green. Both fixes were produced independently in separate isolated
+copies, verified not to conflict, and merged together; each was
+mutation-tested on its own after merging (deleting the newly-added entry
+or the newly-tested entries and confirming the corresponding new test
+case, and only that case, fails).
+
 ## Preflight (D7)
 
 Read-only **by construction**: it takes reports and returns a verdict. It has
