@@ -43,7 +43,7 @@ PINNED = {
 }
 
 
-def _configuration(*, inputs=None, pins=None, policy="quarantine.v1") -> Configuration:
+def _configuration(*, inputs=None, pins=None, policy="quarantine.v2") -> Configuration:
     names = list(PINNED) if inputs is None else list(inputs)
     return Configuration(
         profiles={
@@ -65,6 +65,18 @@ def test_the_shipped_configuration_resolves_nothing() -> None:
     with pytest.raises(ClosureRefused) as refused:
         resolve(configuration, "responder-eval")
     assert refused.value.refusal is Refusal.UNPINNED_INPUT
+
+
+def test_a_non_utf8_configuration_is_refused_not_crashed(tmp_path: Path) -> None:
+    (tmp_path / "profiles.json").write_bytes(b"\xff")
+    (tmp_path / "pins.json").write_text(
+        json.dumps({"schema": "azazel-boot/build-pins@1", "pins": {}}), encoding="utf-8"
+    )
+
+    with pytest.raises(ClosureRefused) as refused:
+        load_configuration(tmp_path)
+
+    assert refused.value.refusal is Refusal.BAD_SCHEMA
 
 
 def test_the_shipped_pins_file_is_empty() -> None:
@@ -153,7 +165,7 @@ def test_a_profile_that_does_not_pin_a_quarantine_policy_is_refused(policy) -> N
 def test_a_resolved_closure_is_ordered_and_complete() -> None:
     closure = resolve(_configuration(), "responder-eval")
     assert closure.inputs == tuple(sorted(PINNED.items()))
-    assert closure.quarantine_policy == "quarantine.v1"
+    assert closure.quarantine_policy == "quarantine.v2"
 
 
 def test_the_digest_does_not_depend_on_the_order_the_inputs_were_written_in() -> None:

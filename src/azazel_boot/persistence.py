@@ -229,14 +229,11 @@ class UnlockOutcome(Enum):
 class OrdinaryAct(Enum):
     """The three things ordinary operation does with an open volume.
 
-    "Ordinary" is the load-bearing word.
-    [Quarantine policy](../../docs/quarantine-policy.md) §4 offers an export of
-    a quarantined volume **unmodified** for offline examination, under an
-    operator approval that names one target, and ADR-0010 D5 leaves that path
-    untouched. `EXPORT` here is the *ordinary* export — the one a session does
-    because it is running normally — and refusing it does not close the
-    examination path, which lives on the quarantine and is not reached through
-    this module at all.
+    "Ordinary" is the load-bearing word. Host-storage export from a healthy
+    session requires an operator approval naming one target. A volume quarantine
+    withdraws that approval and blocks every ordinary action, including export.
+    Boot implements no separate offline-examination export procedure; refusing
+    ordinary export is not an implicit promise that one exists.
     """
 
     READ = "read"
@@ -1298,11 +1295,10 @@ class PersistenceSession:
         the sentence wrong. A captured tuple replayed elsewhere still passes;
         the strength of the check is the strength of whoever collected it.
 
-        **This does not close the offline-examination export** of
-        [quarantine policy](../../docs/quarantine-policy.md) §4. That export is
-        an approved, unmodified copy taken *because* the volume is not
-        trustworthy, it is granted on the quarantine rather than here, and this
-        module cannot reach it.
+        There is no separate offline-examination export of a quarantined volume
+        in the current software. The quarantine policy refuses ordinary export
+        alongside ordinary reads and writes until a separately reviewed
+        examination procedure exists.
         """
 
         self._require_open_session(observations)
@@ -1509,7 +1505,6 @@ RECOVERY_OPTIONS = MappingProxyType({
     PersistenceState.OPEN: (),
     PersistenceState.QUARANTINED: (
         "continue without persistence, at CORE",
-        "export the quarantined volume for offline examination, unmodified",
         "rewrite the medium from a verified image on another machine",
     ),
     PersistenceState.FENCED: ("reboot; the session cannot continue",),

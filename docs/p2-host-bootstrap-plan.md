@@ -1,7 +1,9 @@
 # P2 host bootstrap: the plan, shown before anything is created
 
-Status: **a plan, and nothing more.** No VM exists. No image has been
-downloaded, no package installed, no build run, and no C5 measurement taken.
+Status: **a plan, and nothing more for the P2 host-bootstrap workflow.**
+Separate disposable builder VMs were used for prototype evidence, but this
+workflow's host bootstrap actions were not run. No image was downloaded by
+this plan, and it installed no package or selected a builder.
 This page and `tools/builder/host_bootstrap.py` are what `doctor` shows; they
 perform nothing, and the module imports no means of performing anything.
 
@@ -20,7 +22,7 @@ Related: [Builder CLI](p2-builder-cli.md) Â· [C5 evaluation](c5-evaluation.md) Â
 ## Why this page exists
 
 [ADR-0009](adr/0009-builder-and-writer-contract.md) D1 makes `doctor` the verb
-that "reports whether this host can drive the other five verbs, and what is
+that "reports whether this host can drive the other six verbs, and what is
 missing. Changes nothing." The owner added a rule for P2 on top of it: **any
 operation that creates a build host, downloads something external, or needs
 privilege is shown as a `doctor` plan before it runs.**

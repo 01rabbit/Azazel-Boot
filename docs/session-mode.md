@@ -66,13 +66,29 @@ session is ephemeral**.
 
 ## D2 — Five attempts, and what that is not
 
-`ATTEMPT_BUDGET` is `5`. Only `REJECTED` spends it: something was verified and
-did not open. `INTERRUPTED` spends nothing and decides nothing — the operator
-stopped, so nothing was learned, and the session is left with no mode at all,
-which is the fail-closed state. The two `NO_…` outcomes do not retry, because
-asking again asks the same question of the same absent thing.
+`ATTEMPT_BUDGET` is `5`. `REJECTED` and `OPENED` each spend one because each is
+one passphrase attempt. `INTERRUPTED` spends nothing and decides nothing — the
+operator stopped before trying anything, and the session is left with no mode
+at all, which is the fail-closed state. The two `NO_…` outcomes do not retry,
+because asking again asks the same question of the same absent thing. A
+provider exception or invalid response is charged conservatively: without an
+explicit non-attempt outcome, the caller cannot know whether verification
+already ran.
 
 On the fifth rejection the mode is fixed to ephemeral for this boot.
+
+`BootSession` owns the shared budget for commissioning and recovery. Creating
+another `RecoveryWorkflow` does not reset it **when the same `BootSession`
+owner is retained and supplied**. The prototype `azazel_boot.runtime` service
+retains one owner for the running boot and selects ephemeral mode because no
+safe persistence/key path exists; it does not expose key acquisition. A
+per-owner lock admits only
+one commissioning/recovery acquisition at a time and refuses overlapping
+requests, so concurrent callers cannot both consume the same last attempt. If
+commissioning already fixed the mode as persistent, a later fifth attempt
+stops further prompts but does not mutate that fixed mode; the volume remains
+quarantined and ordinary use continues to be refused. Recovery cannot prompt
+from an undecided or ephemeral session.
 
 **This is not brute-force resistance, and is not claimed as any.** An attacker
 holding the medium reboots and gets five more. What the limit buys is that a
@@ -171,7 +187,7 @@ Three classifications, and nothing else:
 | --- | --- |
 | `mode_selected` | a mode was fixed; carries the mode, which the operator is told anyway |
 | `persistence_unavailable` | no key material, or no local input channel |
-| `attempt_budget_exhausted` | the fifth rejection |
+| `attempt_budget_exhausted` | the fifth passphrase attempt |
 
 `AuditEntry` has two fields and no third. There is no `detail`, `message`,
 `reason`, `attempts`, `remaining`, `identity`, `error` or `passphrase` field —

@@ -25,14 +25,17 @@ writer must refuse. Those are answerable now, they constrain the selection
 rather than pre-empt it, and writing them down first is what keeps the eventual
 evaluation from being conducted against a moving target.
 
-## 2. The six verbs
+## 2. The seven verbs
 
-The operator-facing surface is exactly these six. There is no seventh verb, and
-no verb has a mode that turns it into another one.
+The operator-facing surface is exactly these seven. No verb has a mode that
+turns it into another one. `prepare-host` is intentionally separate from
+`build`: it can show and, only through an approved executor, prepare the
+isolated Debian build host; it cannot build an image or select a source.
 
 | Verb | What it does | Privilege | Touches a block device |
 | --- | --- | --- | --- |
-| `doctor` | Reports whether this host can drive the other five verbs, and what is missing. Changes nothing. | unprivileged | no |
+| `doctor` | Reports whether this host can drive the other six verbs, and what is missing. Changes nothing. | unprivileged | no |
+| `prepare-host` | Shows the isolated build-host plan and performs no act without a separate approval. Without an available executor it refuses with `host_backend_unavailable` or `no_executor_available`; any approved act is confined to the VM executor. | unprivileged | no |
 | `build` | Produces an unsigned payload and its artifact record from pinned inputs, inside an isolated build environment. | build environment only | no |
 | `verify` | Checks an artifact against its record and, when one exists, its signature. Answers about a file, never about a medium. | unprivileged | no |
 | `list-media` | Enumerates removable candidates and issues a per-session target code for each. Read-only. | unprivileged | read-only enumeration |

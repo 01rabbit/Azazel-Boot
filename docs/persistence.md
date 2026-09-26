@@ -336,12 +336,11 @@ this paragraph claimed more than the test did:
   stop those bugs recurring, and a proximity heuristic would stop meaning
   anything. The boundary is stated here rather than left to be discovered.
 
-The offline-examination export of [quarantine
-policy](quarantine-policy.md) §4 is **unchanged**: an approved, unmodified copy
-taken *because* the volume is not trustworthy. It is granted on the quarantine,
-not here, and a test drives it on a quarantined volume rather than asserting
-that it is a different path — "it is a different path" being the kind of claim
-that stops being true quietly.
+Boot has no offline-examination export of a quarantined volume. The
+[quarantine policy](quarantine-policy.md) blocks ordinary export as part of the
+whole-volume state, including an export that was approved before the suspected
+torn write. A future examination procedure needs its own reviewed boundary;
+this implementation does not claim one.
 
 ### The screen says the rule, the audit says which condition
 
@@ -411,9 +410,9 @@ medium was pulled, and "may this happen now" did.
 
 Every option offered from every state acts on the medium or on the session:
 continue at `CORE`, examine a medium nothing has looked at, attempt an unlock
-with an operator-carried passphrase or recovery procedure, where the site has established one, export a quarantined
-volume **unmodified** for offline examination, rewrite the medium from a
-verified image on another machine, or reboot.
+with an operator-carried passphrase or recovery procedure where the site has
+established one, rewrite the medium from a verified image on another machine,
+or reboot. It offers no export of a quarantined volume.
 
 The test asserts the **exact tuple** for each state. It used to be a denylist of
 four nouns, and a review added "mount it read-write to salvage the session" and

@@ -1,11 +1,15 @@
 # `azazel-boot-builder` — what it checks, what it asks, and what it will not do
 
-Status: **`doctor` works; `prepare-host` plans and refuses.** The two verbs
-exist, the checks run, the refusal vocabulary is complete and the evidence
-schema is enforced. The three acts — downloading, creating a VM, installing a
-package inside one — have **no implementation in this repository**, so
-`prepare-host` shows the plan and then refuses with `no_executor_available`
-unless `--dry-run` is given. Nothing has been downloaded, created or installed.
+Status: **`doctor` works; `prepare-host` plans and refuses; `build` resolves
+only a pinned profile and refuses; `verify` reads a local artifact and
+record.** The four implemented console boundaries are
+deliberately narrow. `verify` measures an artifact digest, parses the record,
+and reports digest and signature results separately; it ships no signing key
+and never authorizes a write. The three preparation acts — downloading,
+creating a VM, installing a package inside one — have **no implementation in
+this repository**, so `prepare-host` shows the plan and then refuses with
+`no_executor_available` unless `--dry-run` is given. Nothing has been
+downloaded, created or installed.
 
 Related: [P2 host bootstrap plan](p2-host-bootstrap-plan.md) ·
 [C5 evaluation](c5-evaluation.md) ·
@@ -14,12 +18,14 @@ Related: [P2 host bootstrap plan](p2-host-bootstrap-plan.md) ·
 ```
 azazel-boot-builder doctor
 azazel-boot-builder prepare-host [--dry-run]
+azazel-boot-builder build --profile responder-eval
+azazel-boot-builder verify --record RECORD --artifact ARTIFACT
 ```
 
 ## `doctor` — read-only, and read-only by construction
 
 [ADR-0009](adr/0009-builder-and-writer-contract.md) D1 defines the verb:
-"reports whether this host can drive the other five verbs, and what is missing.
+"reports whether this host can drive the other six verbs, and what is missing.
 Changes nothing."
 
 That is enforced by the **type it depends on**, not by the code inside it.

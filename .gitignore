@@ -18,3 +18,10 @@ out/
 secrets/
 *.img
 *.iso
+
+# Historical prototype workspaces migrated from the Azazel umbrella repository.
+# These contain disposable VM overlays, extracted root filesystems, and raw logs;
+# compact reports and the current R11 evidence remain tracked separately.
+/artifacts/prototype/2026-09-25/
+/artifacts/prototype/2026-09-26/boot-runtime-final/
+/artifacts/prototype/2026-09-26/bytepin-next11-r10/

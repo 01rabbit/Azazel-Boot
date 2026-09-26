@@ -40,14 +40,16 @@ answering them first is what gives the eventual C1–C9 evaluation a fixed targe
 
 ## Decision
 
-### D1 — Six verbs, and `build` and `write` are never one verb
+### D1 — Seven verbs, and `build` and `write` are never one verb
 
-`doctor`, `build`, `verify`, `list-media`, `write`, `inspect`. No seventh verb,
-and no mode that turns one into another: no `--write` on `build`, no `--build`
-on `write`, no combined verb, no configuration where one implies the other. The
-two are separated by an artifact, not by a flag, so that the confirmation that
-authorises a destructive act is adjacent to the act, and so that re-verifying an
-artifact before writing it is the only path rather than the diligent one.
+`doctor`, `prepare-host`, `build`, `verify`, `list-media`, `write`, `inspect`.
+No mode turns one verb into another: no `--write` on `build`, no `--build` on
+`write`, no combined verb, and no configuration where one implies the other.
+`prepare-host` is limited to the isolated build-host preparation boundary and
+cannot select an image source or build an artifact. The two destructive domains
+are separated by an artifact, not by a flag, so that the confirmation that
+authorises a destructive act is adjacent to the act, and so that re-verifying
+an artifact before writing it is the only path rather than the diligent one.
 
 Details in [the contract](../builder-writer-contract.md) §2.
 

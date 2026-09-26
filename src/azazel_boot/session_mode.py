@@ -55,10 +55,11 @@ exist (D1).
 
 ## What cannot be reached from here
 
-Host storage, a USB write, a VM, the network, an export, a snapshot and a
-recovery are all unreachable: this module imports nothing that could reach them
-and names none of them. `tests/unit/test_session_mode.py` asserts that
-statically and drives the quarantine before and after to show its verdicts do
+Host storage, a USB write, a VM, the network, an export and a snapshot are all
+unreachable. Recovery may request one outcome-only attempt through this
+session's budget, but this module does not implement or perform recovery.
+`tests/unit/test_session_mode.py` asserts that the module has no I/O path and
+drives the quarantine before and after commissioning to show its verdicts do
 not move.
 
 Nothing here has run on hardware. No passphrase has been attempted, no volume
@@ -67,6 +68,7 @@ opened, sealed or created on any device.
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from enum import Enum
 from typing import Protocol
@@ -120,11 +122,10 @@ class AttemptOutcome(Enum):
     count. One member of this enum, which is a value this module defines and the
     acquisition selects.
 
-    `REJECTED` is the only outcome that spends budget. An outcome that verified
-    nothing gained an attacker nothing, so it costs nothing:
-    `INTERRUPTED` returns without a mode and the operator may start again, and
-    the two `NO_…` outcomes settle straight to ephemeral because they say a key
-    is not obtainable at all.
+    `REJECTED` and `OPENED` each represent a passphrase attempt and spend one
+    slot. `INTERRUPTED` means no passphrase was tried, so it spends nothing and
+    leaves commissioning undecided. The two `NO_…` outcomes settle straight to
+    ephemeral because they say a key is not obtainable at all.
     """
 
     #: The volume opened. The acquisition verified it; this module did not.
@@ -174,7 +175,7 @@ class AuditEntry:
 
 
 class Refusal(Enum):
-    """Why no mode was decided. Five, and every one of them is raised.
+    """Why an operation was refused. Every member is raised.
 
     A member nothing raises is vocabulary a reader will assume is reachable and
     a caller will branch on. The set is pinned by a test against the refusals
@@ -187,6 +188,7 @@ class Refusal(Enum):
     MEDIUM_FENCED = "medium_fenced"
     INPUT_INTERRUPTED = "input_interrupted"
     CHANNEL_NOT_A_LOCAL_HIDDEN_PROMPT = "channel_not_a_local_hidden_prompt"
+    ATTEMPT_IN_PROGRESS = "attempt_in_progress"
 
 
 class ModeRefused(Refused):
@@ -349,10 +351,22 @@ class BootSession:
     a careless caller, not a seal.
     """
 
-    __slots__ = ("_boot_id", "_quarantine", "_binding", "_spent", "_mode", "_audit", "_sealed")
+    __slots__ = (
+        "_boot_id",
+        "_quarantine",
+        "_binding",
+        "_spent",
+        "_mode",
+        "_audit",
+        "_attempt_lock",
+        "_sealed",
+    )
 
     def __init__(
-        self, boot_id: str, quarantine: Quarantine, binding: SessionBinding
+        self,
+        boot_id: str,
+        quarantine: Quarantine,
+        binding: SessionBinding | None,
     ) -> None:
         object.__setattr__(self, "_sealed", False)
         if not boot_id.strip():
@@ -363,6 +377,7 @@ class BootSession:
         self._spent = 0
         self._mode: CommissionedMode | None = None
         self._audit: list[AuditEntry] = []
+        self._attempt_lock = threading.Lock()
         object.__setattr__(self, "_sealed", True)
 
     def __setattr__(self, name: str, value: object) -> None:
@@ -424,6 +439,16 @@ class BootSession:
     def audit(self) -> tuple[AuditEntry, ...]:
         return tuple(self._audit)
 
+    def owns(self, quarantine: Quarantine, binding: SessionBinding) -> bool:
+        """Whether a workflow carries this boot's exact bound objects."""
+
+        return (
+            type(quarantine) is Quarantine
+            and quarantine is self._quarantine
+            and type(binding) is SessionBinding
+            and binding is self._binding
+        )
+
     def holds(self, mode: CommissionedMode) -> bool:
         """Whether this is the object this boot decided. Checked by identity.
 
@@ -438,6 +463,54 @@ class BootSession:
         return self._mode is not None and self._mode is mode
 
     def commission(
+        self,
+        acquisition: KeyAcquisition,
+        observations: tuple[InterfaceObservation, ...],
+        *,
+        session_id: str,
+    ) -> CommissionedMode:
+        """Commission under the same serialized budget used by recovery."""
+
+        if not self._attempt_lock.acquire(blocking=False):
+            raise ModeRefused(
+                Refusal.ATTEMPT_IN_PROGRESS,
+                "a key acquisition is already in progress",
+            )
+        try:
+            return self._commission_with_budget(
+                acquisition, observations, session_id=session_id
+            )
+        finally:
+            self._attempt_lock.release()
+
+    def select_ephemeral(self) -> CommissionedMode:
+        """Fix this boot as ephemeral without requesting key material.
+
+        The prototype runtime has no safe persistence/key path. It therefore
+        creates its sole BootSession with no host binding and settles the mode
+        before any persistence workflow can be exposed. This method cannot
+        promote a session or spend an acquisition attempt.
+        """
+
+        if not self._attempt_lock.acquire(blocking=False):
+            raise ModeRefused(
+                Refusal.ATTEMPT_IN_PROGRESS,
+                "a key acquisition is already in progress",
+            )
+        try:
+            if self._mode is None:
+                self._record(AuditEvent.PERSISTENCE_UNAVAILABLE)
+                return self._fix(SessionMode.EPHEMERAL)
+            if self._mode.mode is SessionMode.EPHEMERAL:
+                return self._mode
+            raise ModeRefused(
+                Refusal.MODE_ALREADY_FIXED,
+                "a persistent mode cannot be replaced during this boot",
+            )
+        finally:
+            self._attempt_lock.release()
+
+    def _commission_with_budget(
         self,
         acquisition: KeyAcquisition,
         observations: tuple[InterfaceObservation, ...],
@@ -461,7 +534,17 @@ class BootSession:
         )
 
         while True:
-            outcome = acquisition.attempt()
+            try:
+                outcome = acquisition.attempt()
+            except Exception:
+                # The provider may have reached its verifier before failing to
+                # report an outcome. Charge conservatively so retrying a broken
+                # provider cannot bypass the per-boot ceiling.
+                self._spend()
+                if self._spent >= ATTEMPT_BUDGET:
+                    self._record(AuditEvent.ATTEMPT_BUDGET_EXHAUSTED)
+                    self._fix(SessionMode.EPHEMERAL)
+                raise
 
             # Re-checked every iteration, not only before the first prompt.
             # The loop spans an operator typing up to five passphrases, which
@@ -471,6 +554,9 @@ class BootSession:
             self._require_the_medium_is_not_fenced()
 
             if outcome is AttemptOutcome.OPENED:
+                self._spend()
+                if self._spent == ATTEMPT_BUDGET:
+                    self._record(AuditEvent.ATTEMPT_BUDGET_EXHAUSTED)
                 return self._fix(SessionMode.PERSISTENT)
             if outcome in SETTLES_TO_EPHEMERAL:
                 self._record(AuditEvent.PERSISTENCE_UNAVAILABLE)
@@ -489,6 +575,84 @@ class BootSession:
             if self._spent >= ATTEMPT_BUDGET:
                 self._record(AuditEvent.ATTEMPT_BUDGET_EXHAUSTED)
                 return self._fix(SessionMode.EPHEMERAL)
+
+    def attempt_with_budget(
+        self,
+        acquisition: KeyAcquisition,
+        *,
+        session_id: str,
+    ) -> AttemptOutcome | None:
+        """Serialize acquisition with commissioning and other recovery calls."""
+
+        if not self._attempt_lock.acquire(blocking=False):
+            return None
+        try:
+            return self._attempt_with_budget_locked(acquisition, session_id=session_id)
+        finally:
+            self._attempt_lock.release()
+
+    def _attempt_with_budget_locked(
+        self,
+        acquisition: KeyAcquisition,
+        *,
+        session_id: str,
+    ) -> AttemptOutcome | None:
+        """Ask for one recovery key under this boot's commissioning budget.
+
+        `RecoveryWorkflow` does not own a counter: new workflows over this
+        same session cannot buy more guesses. The recovery only exists for an
+        already-quarantined volume, and it can use a persistent session's
+        remaining budget but never reopen a session fixed ephemeral. Exhaustion
+        leaves the commissioned mode untouched (D3); the quarantined volume
+        remains unavailable for this boot (D4).
+        """
+
+        channel = getattr(acquisition, "channel", None)
+        acquire = getattr(acquisition, "attempt", None)
+        if type(channel) is not PassphraseChannel or not callable(acquire):
+            raise TypeError("acquisition must implement KeyAcquisition")
+        if (
+            type(session_id) is not str
+            or self._binding is None
+            or type(self._binding.session_id) is not str
+            or type(self._quarantine.session_id) is not str
+            or session_id != self._binding.session_id
+            or session_id != self._quarantine.session_id
+        ):
+            return None
+        if self._mode is None or self._mode.mode is SessionMode.EPHEMERAL:
+            return None
+        if self._quarantine.is_fenced:
+            return None
+        if not self._quarantine.volume_is_quarantined:
+            return None
+        if channel is not PassphraseChannel.LOCAL_HIDDEN_PROMPT:
+            return None
+        if self._spent >= ATTEMPT_BUDGET:
+            return None
+
+        try:
+            outcome = acquire()
+        except Exception:
+            # A provider error does not prove that no verification was tried.
+            self._spend()
+            if self._spent >= ATTEMPT_BUDGET:
+                self._record(AuditEvent.ATTEMPT_BUDGET_EXHAUSTED)
+            raise
+        if type(outcome) is not AttemptOutcome:
+            # Likewise, an invalid response cannot establish that the provider
+            # did no work, so do not let a retry get a free invocation.
+            self._spend()
+            if self._spent >= ATTEMPT_BUDGET:
+                self._record(AuditEvent.ATTEMPT_BUDGET_EXHAUSTED)
+            raise TypeError("acquisition must return an exact AttemptOutcome value")
+        if outcome in (AttemptOutcome.REJECTED, AttemptOutcome.OPENED):
+            self._spend()
+            if self._spent == ATTEMPT_BUDGET:
+                self._record(AuditEvent.ATTEMPT_BUDGET_EXHAUSTED)
+        if self._quarantine.is_fenced:
+            return None
+        return outcome
 
     # -- internals ---------------------------------------------------------
 
@@ -509,7 +673,10 @@ class BootSession:
         # they were handed them — see `_require_local_hidden_prompt` for why
         # that limit is stated rather than claimed away.
         _refuse_foreign_record(
-            applies=binding_applies(self._binding, observations, session_id=session_id)
+            applies=(
+                self._binding is not None
+                and binding_applies(self._binding, observations, session_id=session_id)
+            )
         )
 
     def _require_the_medium_is_not_fenced(self) -> None:

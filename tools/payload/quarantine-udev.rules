@@ -1,0 +1,2 @@
+SUBSYSTEM=="block", ACTION=="add", RUN+="/usr/libexec/azazel-quarantine-block %k udev"
+SUBSYSTEM=="block", ACTION=="add", KERNEL=="vdb", ATTR{serial}=="AZC5-VDB-FILE-01", TAG+="systemd", ENV{SYSTEMD_WANTS}+="azazel-c5-hotplug-write-probe@vdbseq%E{SEQNUM}.service"

@@ -1,0 +1,13 @@
+[Unit]
+Description=Azazel-Nexus disposable QEMU prototype E2E
+ConditionKernelCommandLine=azazel.nexus_e2e=1
+After=live-config.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/azazel-nexus-prototype-e2e
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

@@ -12,9 +12,12 @@ Related: [ADR-0003](0003-immutable-ab-update.md) · [Release policy](../release-
 ## Context
 
 Azazel-Boot ships as removable media. Something has to produce that media. This
-repository contains no builder, no image definition, and no build script;
-`tools/` holds a single standard-library documentation link checker. No image
-has ever been built.
+repository contains no selected production builder or release image
+definition. An unsigned R11 prototype was constructed for evaluation with a
+remaster workflow after a clean live-build attempt stalled; see the
+[prototype evidence](../prototype-evidence-boot-runtime-r11.md). This does not
+select a builder or implement the production build contract. No physical
+medium was opened or written.
 
 The program plan is unusually specific about what the build must *achieve* and
 completely silent about what performs it. It contains no build-tool name at all

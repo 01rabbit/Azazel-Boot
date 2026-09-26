@@ -1,0 +1,84 @@
+[
+  {
+    "data": {
+      "QMP": {
+        "capabilities": [
+          "oob"
+        ],
+        "version": {
+          "package": "",
+          "qemu": {
+            "major": 10,
+            "micro": 2,
+            "minor": 0
+          }
+        }
+      }
+    },
+    "elapsed_seconds": 0.000218,
+    "kind": "greeting"
+  },
+  {
+    "data": {
+      "arguments": {},
+      "execute": "qmp_capabilities",
+      "id": 1
+    },
+    "elapsed_seconds": 0.000228,
+    "kind": "command"
+  },
+  {
+    "data": {
+      "id": 1,
+      "return": {}
+    },
+    "elapsed_seconds": 0.000448,
+    "kind": "response"
+  },
+  {
+    "data": {
+      "arguments": {
+        "driver": "file",
+        "filename": "/Users/mao/Developer/GitHub/Azazel/artifacts/prototype/2026-09-26/boot-runtime-r11/output/c5-qemu/quarantine-fixture-vdb.raw",
+        "node-name": "c5hotplug_file",
+        "read-only": false
+      },
+      "execute": "blockdev-add",
+      "id": 2
+    },
+    "elapsed_seconds": 0.000453,
+    "kind": "command"
+  },
+  {
+    "data": {
+      "id": 2,
+      "return": {}
+    },
+    "elapsed_seconds": 0.003221,
+    "kind": "response"
+  },
+  {
+    "data": {
+      "arguments": {
+        "addr": "0x0",
+        "bus": "azazel_c5_hotplug_port",
+        "drive": "c5hotplug_file",
+        "driver": "virtio-blk-pci",
+        "id": "c5hotplug",
+        "serial": "AZC5-VDB-FILE-01"
+      },
+      "execute": "device_add",
+      "id": 3
+    },
+    "elapsed_seconds": 0.003546,
+    "kind": "command"
+  },
+  {
+    "data": {
+      "id": 3,
+      "return": {}
+    },
+    "elapsed_seconds": 0.005423,
+    "kind": "response"
+  }
+]

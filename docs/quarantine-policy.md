@@ -1,9 +1,12 @@
-# Host-storage quarantine policy `quarantine.v1`
+# Host-storage quarantine policy `quarantine.v2`
 
-Status: **decision logic and a pinned policy artifact. Nothing has run.** No
-initramfs has been built, no device has been quarantined, no write has been
-prevented, and no machine has booted anything. The no-host-write property is
-**not** verified and may not be described as verified.
+Status: **decision logic, pinned `quarantine.v2` policy, and R11 prototype
+measurement.** R11 statically inspected the required hook ordering/content and
+reconciled the static persistence fault with measured QEMU userspace handoff.
+Regular-file write probes were denied after device registration and backing
+file digests remained unchanged. The initial scan still observed zero devices;
+pre-registration quarantine and real-device/host-storage behavior remain
+unverified. See the [R11 evidence](prototype-evidence-boot-runtime-r11.md).
 
 Related: [Threat model](threat-model.md) section 3 ·
 [Builder and writer contract](builder-writer-contract.md) ·
@@ -12,14 +15,18 @@ Related: [Threat model](threat-model.md) section 3 ·
 
 ## 1. What the policy is
 
-`config/quarantine/policy-v1.json` is the versioned artifact a build pins, and
-`quarantine.v1` is the value the artifact record carries as
+`config/quarantine/policy-v2.json` is the versioned artifact a build pins, and
+`quarantine.v2` is the value the artifact record carries as
 `quarantine_policy_version`. `azazel_boot.quarantine` implements it, and a test
-asserts **every field** of the file against the module: the version, the hook
-list, the full action set, the actions refused everywhere, the one action an
-approval can unblock, the NVRAM exclusions and the initramfs requirements. An
-earlier version of that test checked three fields, and the file had already
-drifted from the module on a fourth.
+asserts **every field** of the file: the closed JSON schema, artifact comment,
+version, hook list, full action set, the all-actions quarantine rule, actions
+refused everywhere, the one action an approval can unblock, NVRAM exclusions,
+and initramfs requirements. Fields represented by the module are compared
+against it; artifact-only fields are asserted as exact policy invariants. An
+earlier version checked only selected fields, and the file had already drifted.
+`policy-v1.json` is retained as the predecessor contract used by r10. R11
+uses the v2-bound runtime hooks described in its report; its QEMU evidence must
+not be attributed to physical host-storage enforcement.
 
 The policy has two halves: what a built initramfs must look like, and how the
 running rule decides.
@@ -33,6 +40,8 @@ running rule decides.
 | `az-disable-automount` | 3 |
 | `az-disable-volume-assembly` | 4 |
 | `az-mark-boot-medium` | 5 |
+| `az-start-udev` | 6 |
+| `az-handoff-udev` (init-bottom) | 7 |
 
 `verify_initramfs` refuses an image whose hooks are reordered, whose first hook
 is not the quarantine, which is missing one, which carries a hook Boot did not
@@ -45,11 +54,62 @@ build gate that crashes past every `except` is worse than one that reports in an
 odd order — and a refusal with no faults at all is refused outright.
 
 This is [ADR-0002](adr/0002-image-builder.md) C5 written as a condition an image
-either meets or does not. It is **not yet a check performed on a built
-initramfs**: nothing in this repository produces a manifest from a real one, so
-today a builder satisfies it by filling in a structure. Producing the manifest
-from the artifact is what would turn this from a contract into evidence, and
-that work has not been done. By the time a general-purpose
+either meets or does not. The following bytepin-next4 record is historical;
+bytepin-next11-r8 is also superseded by the r10 measurement recorded below. Its frozen
+[input manifest](../artifacts/prototype/2026-09-25/bytepin-next11-r8/build-a/output/build-input-manifest.json)
+has SHA-256
+`9f01979e8dd7e107cbaa88481bd7c96eb40ab13214bd4865f5cca51297d55c098`. The
+[C5 manifest](../artifacts/prototype/2026-09-25/bytepin-next11-r8/build-a/output/c5-manifest.json)
+records seven ordered, individually digested hooks, each with
+`pinned_by_boot` provenance: quarantine, disable-resume, disable-automount,
+disable-volume-assembly, mark-boot-medium, start-udev, and init-bottom
+handoff-udev. The [static result](../artifacts/prototype/2026-09-25/bytepin-next11-r8/build-a/output/c5-result.json)
+is **pass** with no faults. Static manifest persistence is null and explicitly
+requires runtime persistence evidence.
+
+The [r8 QEMU fixture result](../artifacts/prototype/2026-09-25/bytepin-next11-r8/qemu/c5-build-b/result.json)
+is **fail**. The q35 TCG guest reached `multi-user.target`; initramfs `/dev/vda`
+and userspace handoff probes observed read-only write denial, including the
+userspace persistence marker. The hotplug `/dev/vdb` path reached read-only
+state but has no write-probe result: the helper rejected origin/mode arguments
+(`quarantine/probe origin and mode do not match`), and the runner timed out
+waiting for the probe. The initial quarantine marker recorded `devices=0`, so
+pre-registration quarantine was **NOT_OBSERVED**; quarantine was observed only
+after kernel device registration. The source-level fail-closed fix rejecting
+missing (`None`) persistence evidence was made after r8 inputs were frozen and
+tested separately; it is not in the r8 payload. Runtime C5 therefore remains
+failed; hardware and Secure Boot remain unverified.
+
+The historical bytepin-next4 prototype inspector checked
+a real initramfs and produced machine-readable evidence, but that evidence
+**fails** the contract. The [input manifest](../artifacts/prototype/2026-09-25/bytepin-next4/input/prepared/build-input-manifest.json)
+SHA-256 is
+`75c72c1061507b6aca8f70a04e894cec79622340388bb26254de1d12a81ccef4`. The
+[Build A C5 manifest](../artifacts/prototype/2026-09-25/bytepin-next4/build-a/c5-manifest.json)
+records initramfs SHA-256
+`97f4f96021fe6cafd8c5922d79f30e005b8581913e76eac0aeba5bcfb3cb4469`. The
+[static result](../artifacts/prototype/2026-09-25/bytepin-next4/build-a/c5-result.json)
+faults are `hook_order_changed`, `order_changed`,
+`quarantine_not_persistent`, and `unpinned_hook`. The inspected init-top
+sequence is `00-az-quarantine-block-devices` (pinned), `10-resume`,
+`20-automount`, `30-volume assembly`, `40-mark-medium`, then builder-default
+`all_generic_ide`, `blacklist`, `keymap`, and `udev`. The quarantine hook's
+presence and position among pinned hooks do not establish that the full initrd
+ordering is controlled, nor that quarantine persists into userspace.
+
+The separate [QEMU fixture result](../artifacts/prototype/2026-09-25/bytepin-next4/qemu/c5-a/result.json)
+is also `fail`. The q35 TCG guest reached `multi-user.target`, but the serial
+log says “C5 fixture write failed for an unverified reason”. There is no
+structured event or persistence marker, and read-only state/write denial were
+not established in the report. The explicitly created 32 MiB regular-file
+fixture was attached as `/dev/vda`; the fixture hook loads `virtio_blk` and
+waits for that device before applying `blockdev --setro`, so pre-registration
+quarantine is not established. Its unchanged digest does not prove writes
+were denied. No host block device passthrough, USB, or NIC was used. This is
+prototype evidence only: `hardware_verified` and `secure_boot_verified` are
+false. The earlier bytepin-next3 evidence remains historical and unchanged.
+
+By the time a general-purpose
 userspace is running, udev has automounted, LVM and md have scanned, systemd has
 resumed and a filesystem driver has replayed a dirty journal — each of those is
 a write, and each happens before any Boot policy code would run
@@ -191,6 +251,19 @@ after a refusal the previous approval is still live even though the audit's last
 approval entry reads as a refusal. The audit records the grant, any
 supersession, the withdrawal, and a withdrawal that had nothing to withdraw.
 
+When a volume is quarantined after a suspected torn write, the state belongs to
+the sitting's `Quarantine` and takes precedence over every device disposition,
+including the boot-medium allowance. `evaluate()` blocks every action submitted
+to that same instance for every device, including read, export, repair, mount,
+and activation actions. It withdraws a standing export approval and refuses a
+new one. This all-device/all-action scope is the versioned `quarantine.v2`
+contract. Exporting the quarantined volume for offline examination is not
+implemented and is not an exception.
+The caller must retain and reuse the canonical `Quarantine` instance for this
+sitting. Constructing a fresh instance resets this in-memory flag; the current
+API does not prevent that reset, so such replacement is an unresolved lifecycle
+boundary, not a recovery mechanism.
+
 **The audit is unbounded and RAM-resident.** Every evaluated attempt appends an
 entry, and a flapping device appends one per re-appearance. Threat model
 section 4 treats devices arriving and leaving as expected, so a long session with
@@ -303,14 +376,19 @@ never announced itself, and every writing action against each of them. The
 assertion is that the set of allowed writes to anything that is not the medium
 is **empty**.
 
-That is simulation. It is deliberately kept apart from hardware evidence:
+That is simulation. The current Azazel QEMU fixture is separately recorded at
+[`qemu/c5-build-b/result.json`](../artifacts/prototype/2026-09-25/bytepin-next11-r8/qemu/c5-build-b/result.json): it used explicit regular-file backing targets and direct kernel/initramfs arguments, reached `multi-user.target`, and observed userspace persistence, but **failed** the runtime C5 gate because the hotplug write-probe was missing and pre-registration quarantine was not observed. This measured prototype result does not modify an ADR or the normative C5 criteria. It is not hardware evidence:
 
-- **no QEMU run is part of this**, and none has been performed;
 - no laptop's internal storage has been touched, observed, or measured;
+- no physical writer target, Secure Boot path, or hardware quarantine has been verified;
 - the program gate needs a hardware-in-the-loop record of zero content writes
   across a full session, including power loss, USB removal, persistence
   corruption and an internal disk present ([threat model](threat-model.md)
   section 3.3). **That record does not exist.**
 
-Until it does, this document describes a design that behaves correctly in a
-simulation, and nothing more.
+Until it does, the policy remains a design/test contract. The current r8
+prototype evidence records a passing static inspection and a failed QEMU
+runtime gate. Quarantine must be the first initramfs action and persist through
+userspace; initramfs presence alone is not success. Passing unit tests for the
+policy logic do not override the missing runtime evidence or the open hardware
+gate.

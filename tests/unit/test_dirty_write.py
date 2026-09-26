@@ -390,10 +390,9 @@ def test_quarantine_is_a_capability_change_and_never_an_authority(observations) 
 def test_no_rendered_string_says_the_volume_was_erased(observations) -> None:
     """Over the status, the refusal, the audit, and the module's own prose.
 
-    The data is on the medium and the [quarantine
-    policy](../../docs/quarantine-policy.md) still offers an export of it
-    unmodified. Saying "wiped" would be false, and what an operator may later
-    tell someone about the evidence depends on it.
+    The data remains on the medium, but Boot does not offer an offline export
+    of the quarantined volume. Saying "wiped" would be false, and what an
+    operator may later tell someone about the evidence depends on it.
     """
 
     live = session(observations)
@@ -466,24 +465,15 @@ def test_the_wording_says_boot_will_not_use_it(observations) -> None:
     assert "does not repair" in joined
 
 
-def test_the_quarantined_volume_may_still_be_exported_unmodified(observations) -> None:
-    """ADR-0010 D5 leaves the offline-examination export where it was.
+def test_the_quarantined_volume_refuses_export_on_every_public_path(observations) -> None:
+    """D4's whole-volume rule includes an existing or a new export approval."""
 
-    That export is granted on the `Quarantine` under an operator approval, and
-    this module cannot reach it — so refusing the *ordinary* export here does
-    not close it. Driven rather than asserted about, because "it is a different
-    path" is the kind of claim that stops being true quietly.
-    """
-
-    from azazel_boot.quarantine import Action, ExportApproval, Verdict
+    from azazel_boot.quarantine import Action, ExportApproval, ExportRefused, Verdict
 
     quarantine = Quarantine(session_id=SESSION, boot_medium_identity=MEDIUM.identity)
     host_disk = Device(identity="host-nvme-SN-1", device_class=DeviceClass.HOST_STORAGE)
     quarantine.observe(MEDIUM)
     quarantine.observe(host_disk)
-
-    live = session(observations, quarantine=quarantine)
-    live.report_write(torn(), observations)
 
     quarantine.approve_export(
         ExportApproval(
@@ -493,10 +483,40 @@ def test_the_quarantined_volume_may_still_be_exported_unmodified(observations) -
             confirmed=True,
         )
     )
-    assert quarantine.evaluate(host_disk, Action.EXPORT_WRITE) is Verdict.ALLOWED
+    live = session(observations, quarantine=quarantine)
+    live.report_write(torn(), observations)
+    assert quarantine.evaluate(host_disk, Action.EXPORT_WRITE) is Verdict.BLOCKED
+
+    with pytest.raises(ExportRefused) as refused:
+        quarantine.approve_export(
+            ExportApproval(
+                session_id=SESSION,
+                target_identity=host_disk.identity,
+                reason="offline examination",
+                confirmed=True,
+            )
+        )
+    assert refused.value.refusal.value == "volume_quarantined"
 
     with pytest.raises(PersistenceRefused):
         live.require_ordinary(OrdinaryAct.EXPORT, observations)
+
+
+def test_volume_quarantine_blocks_every_device_action_not_only_persistence_actions() -> None:
+    """#48: D4 reaches the device-action boundary before its medium shortcut."""
+
+    from azazel_boot.quarantine import Action, Verdict
+
+    quarantine = Quarantine(session_id=SESSION, boot_medium_identity=MEDIUM.identity)
+    host_disk = Device(identity="host-nvme-SN-1", device_class=DeviceClass.HOST_STORAGE)
+    unobserved = Device(identity="unobserved-usb", device_class=DeviceClass.UNKNOWN)
+    quarantine.observe(MEDIUM)
+    quarantine.observe(host_disk)
+    quarantine.quarantine_volume()
+
+    for device in (MEDIUM, host_disk, unobserved):
+        for action in Action:
+            assert quarantine.evaluate(device, action) is Verdict.BLOCKED
 
 
 def test_there_is_no_per_record_continuation_anywhere_in_the_surface(observations) -> None:
@@ -916,15 +936,10 @@ def test_clearing_the_flag_on_the_session_does_not_clear_the_quarantine(observat
     assert quarantine.volume_is_quarantined
 
 
-def test_quarantining_the_volume_neither_fences_nor_withdraws_an_approval(
+def test_quarantining_the_volume_does_not_fence_but_withdraws_an_approval(
     observations,
 ) -> None:
-    """The trap in C2's fix: reusing `_fenced` would close the §4 export.
-
-    A fence withdraws a standing approval and refuses new ones. The
-    offline-examination export exists *because* the volume is untrustworthy, so
-    the two flags are separate and this asserts they stay separate.
-    """
+    """D4 blocks the whole volume without changing the medium-removal fact."""
 
     from azazel_boot.quarantine import Action, ExportApproval, Verdict
 
@@ -948,7 +963,10 @@ def test_quarantining_the_volume_neither_fences_nor_withdraws_an_approval(
     live.report_write(torn(), observations)
 
     assert not quarantine.is_fenced
-    assert quarantine.evaluate(host_disk, Action.EXPORT_WRITE) is Verdict.ALLOWED
+    assert quarantine.evaluate(host_disk, Action.EXPORT_WRITE) is Verdict.BLOCKED
+    assert any(
+        entry.verdict == "withdrawn_on_volume_quarantine" for entry in quarantine.audit()
+    )
 
 
 @pytest.mark.parametrize(

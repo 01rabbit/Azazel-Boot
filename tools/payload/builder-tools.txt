@@ -1,0 +1,14 @@
+# Host tools installed from the declared snapshot before the builder lock is captured.
+live-build
+debootstrap
+initramfs-tools-core
+cpio
+gzip
+xz-utils
+zstd
+squashfs-tools
+xorriso
+mtools
+dosfstools
+grub-efi-amd64-bin
+grub-pc-bin

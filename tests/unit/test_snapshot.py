@@ -46,7 +46,12 @@ from azazel_boot.dirty_write import (
 from azazel_boot.inventory import InterfaceObservation, collect_interfaces
 from azazel_boot.persistence import OrdinaryAct, PersistenceRefused, PersistenceState
 from azazel_boot.quarantine import Device, DeviceClass, Quarantine
-from azazel_boot.session_mode import AttemptOutcome, PassphraseChannel
+from azazel_boot.session_mode import (
+    ATTEMPT_BUDGET,
+    AttemptOutcome,
+    BootSession,
+    PassphraseChannel,
+)
 from azazel_boot.snapshot import (
     KNOWN_CONTAINER_VERSIONS,
     PREFLIGHT_ORDER,
@@ -72,6 +77,8 @@ from azazel_boot.snapshot import (
     schema_is_compatible,
     verdict_was_minted_here,
 )
+
+BOOT_SESSION_ID = "boot-session-1"
 
 MODULE = Path(__file__).resolve().parents[2] / "src" / "azazel_boot" / "snapshot.py"
 TREE = ast.parse(MODULE.read_text(encoding="utf-8"))
@@ -178,6 +185,17 @@ class Opens:
         return self._outcome
 
 
+class SequenceAcquisition:
+    def __init__(self, *outcomes: AttemptOutcome) -> None:
+        self.outcomes = list(outcomes)
+        self.attempts = 0
+        self.channel = PassphraseChannel.LOCAL_HIDDEN_PROMPT
+
+    def attempt(self) -> AttemptOutcome:
+        self.attempts += 1
+        return self.outcomes.pop(0)
+
+
 def _a_quarantine_that_never_saw_the_medium() -> Quarantine:
     """Volume-quarantined, so `NOTHING_TO_RECOVER` passes, and blind.
 
@@ -225,11 +243,34 @@ def a_quarantine(*, fenced: bool = False, quarantined: bool = True) -> Quarantin
     return rule
 
 
-def workflow(observations, *, quarantine=None) -> RecoveryWorkflow:
-    return RecoveryWorkflow(
-        quarantine if quarantine is not None else a_quarantine(),
-        SessionBinding(host_fingerprint=host_fingerprint(observations), session_id=SESSION),
+def commissioned_boot_session(observations, quarantine, binding, *outcomes) -> BootSession:
+    owner = BootSession(BOOT_SESSION_ID, quarantine, binding)
+    if (
+        quarantine.is_fenced
+        or binding.session_id != SESSION
+        or binding.host_fingerprint != host_fingerprint(observations)
+    ):
+        return owner
+    owner.commission(
+        Opens(*(outcomes or (AttemptOutcome.OPENED,))),
+        observations,
         session_id=SESSION,
+    )
+    return owner
+
+
+def workflow(observations, *, quarantine=None, binding=None, boot_session=None) -> RecoveryWorkflow:
+    rule = quarantine if quarantine is not None else a_quarantine()
+    sitting = binding or SessionBinding(
+        host_fingerprint=host_fingerprint(observations), session_id=SESSION
+    )
+    if boot_session is None:
+        boot_session = commissioned_boot_session(observations, rule, sitting)
+    return RecoveryWorkflow(
+        rule,
+        sitting,
+        session_id=SESSION,
+        boot_session=boot_session,
     )
 
 
@@ -356,6 +397,107 @@ def test_a_gate_refused_recovery_leaves_the_volume_quarantined(observations) -> 
         with pytest.raises(PersistenceRefused) as refused_ordinary:
             live.require_ordinary(act, observations)
         assert refused_ordinary.value.refusal.value == "volume_quarantined"
+
+
+def test_recovery_and_commission_share_one_boot_attempt_budget(observations) -> None:
+    quarantine = a_quarantine()
+    binding = SessionBinding(host_fingerprint=host_fingerprint(observations), session_id=SESSION)
+    owner = BootSession(BOOT_SESSION_ID, quarantine, binding)
+    commissioning = SequenceAcquisition(
+        *([AttemptOutcome.REJECTED] * (ATTEMPT_BUDGET - 2)),
+        AttemptOutcome.OPENED,
+    )
+    decided = owner.commission(commissioning, observations, session_id=SESSION)
+    assert decided.mode.value == "persistent"
+
+    rejected = Opens(AttemptOutcome.REJECTED)
+    first = workflow(
+        observations, quarantine=quarantine, binding=binding, boot_session=owner
+    )
+    with pytest.raises(RecoveryRefused):
+        run_to_commit(first, observations, acquisition=rejected)
+    assert rejected.attempts == 1
+    assert owner.decided is decided
+    assert sum(
+        entry.event.value == "attempt_budget_exhausted" for entry in owner.audit()
+    ) == 1
+
+    # A new workflow uses the same owner. The successful response is never
+    # requested after the fifth rejected acquisition of this boot.
+    would_open = Opens(AttemptOutcome.OPENED)
+    second = workflow(
+        observations, quarantine=quarantine, binding=binding, boot_session=owner
+    )
+    with pytest.raises(RecoveryRefused):
+        run_to_commit(second, observations, acquisition=would_open)
+    assert would_open.attempts == 0
+    assert owner.decided is decided
+    assert sum(
+        entry.event.value == "attempt_budget_exhausted" for entry in owner.audit()
+    ) == 1
+
+
+def test_successful_recovery_attempt_also_consumes_the_shared_budget(observations) -> None:
+    quarantine = a_quarantine()
+    binding = SessionBinding(host_fingerprint=host_fingerprint(observations), session_id=SESSION)
+    owner = BootSession(BOOT_SESSION_ID, quarantine, binding)
+    decided = owner.commission(
+        SequenceAcquisition(
+            *([AttemptOutcome.REJECTED] * (ATTEMPT_BUDGET - 2)),
+            AttemptOutcome.OPENED,
+        ),
+        observations,
+        session_id=SESSION,
+    )
+    assert decided.mode.value == "persistent"
+
+    last_allowed = Opens(AttemptOutcome.OPENED)
+    candidate = run_to_commit(
+        workflow(
+            observations,
+            quarantine=quarantine,
+            binding=binding,
+            boot_session=owner,
+        ),
+        observations,
+        acquisition=last_allowed,
+    )
+    assert isinstance(candidate, RecoveryCandidate)
+    assert last_allowed.attempts == 1
+    assert owner.decided is decided
+
+    after_exhaustion = Opens(AttemptOutcome.OPENED)
+    with pytest.raises(RecoveryRefused):
+        run_to_commit(
+            workflow(
+                observations,
+                quarantine=quarantine,
+                binding=binding,
+                boot_session=owner,
+            ),
+            observations,
+            acquisition=after_exhaustion,
+        )
+    assert after_exhaustion.attempts == 0
+    assert owner.decided is decided
+
+
+def test_ephemeral_commission_cannot_prompt_again_through_recovery(observations) -> None:
+    quarantine = a_quarantine()
+    binding = SessionBinding(host_fingerprint=host_fingerprint(observations), session_id=SESSION)
+    owner = BootSession(BOOT_SESSION_ID, quarantine, binding)
+    commissioning = SequenceAcquisition(*([AttemptOutcome.REJECTED] * ATTEMPT_BUDGET))
+    decided = owner.commission(commissioning, observations, session_id=SESSION)
+    assert decided.mode.value == "ephemeral"
+
+    acquisition = Opens(AttemptOutcome.OPENED)
+    flow = workflow(
+        observations, quarantine=quarantine, binding=binding, boot_session=owner
+    )
+    with pytest.raises(RecoveryRefused):
+        run_to_commit(flow, observations, acquisition=acquisition)
+    assert acquisition.attempts == 0
+    assert owner.decided is decided
 
 
 def test_a_candidate_is_not_a_volume_and_grants_nothing(observations) -> None:
@@ -600,6 +742,31 @@ def test_this_module_never_calls_anything_that_would_change_a_quarantine() -> No
                 and outer.func.attr == "_require_the_medium_now"
                 and any(argument is node for argument in outer.args)
             ]
+            owner_calls = [
+                outer
+                for outer in ast.walk(TREE)
+                if isinstance(outer, ast.Call)
+                and isinstance(outer.func, ast.Attribute)
+                and outer.func.attr in {"attempt_with_budget", "owns"}
+                and isinstance(outer.func.value, ast.Attribute)
+                and isinstance(outer.func.value.value, ast.Name)
+                and outer.func.value.value.id == "self"
+                and outer.func.value.attr == "_boot_session"
+                and (
+                    (
+                        outer.func.attr == "owns"
+                        and outer.args
+                        and outer.args[0] is node
+                    )
+                    or (
+                        outer.func.attr == "attempt_with_budget"
+                        and any(
+                            keyword.arg == "quarantine" and keyword.value is node
+                            for keyword in outer.keywords
+                        )
+                    )
+                )
+            ]
             assigned_to_the_slot = [
                 outer
                 for outer in ast.walk(TREE)
@@ -688,6 +855,7 @@ def test_this_module_never_calls_anything_that_would_change_a_quarantine() -> No
             assert (
                 passed_to
                 or method_calls
+                or owner_calls
                 or assigned_to_the_slot
                 or sealed_assigned_to_the_slot
                 or compared
@@ -1041,6 +1209,7 @@ def test_preflight_is_read_only_by_construction() -> None:
         "Quarantine",
         "Refused",
         "AttemptOutcome",
+        "BootSession",
         "KeyAcquisition",
         "PassphraseChannel",
         # `_WeakIdentityIndex` holds a weak reference purely to verify
@@ -3556,12 +3725,33 @@ def test_a_stand_in_for_the_quarantine_is_refused(observations) -> None:
 
     binding = SessionBinding(host_fingerprint=host_fingerprint(observations), session_id=SESSION)
     with pytest.raises(TypeError, match="must be a Quarantine"):
-        RecoveryWorkflow(NotAQuarantine(), binding, session_id=SESSION)
+        RecoveryWorkflow(
+            NotAQuarantine(),
+            binding,
+            session_id=SESSION,
+            boot_session=commissioned_boot_session(
+                observations, a_quarantine(), binding
+            ),
+        )
     with pytest.raises(TypeError, match="must be a SessionBinding"):
-        RecoveryWorkflow(a_quarantine(), "not a SessionBinding", session_id=SESSION)
+        RecoveryWorkflow(
+            a_quarantine(),
+            "not a SessionBinding",
+            session_id=SESSION,
+            boot_session=commissioned_boot_session(
+                observations, a_quarantine(), binding
+            ),
+        )
     for bad_sitting in (1234, "", "   ", None):
         with pytest.raises(TypeError, match="session_id"):
-            RecoveryWorkflow(a_quarantine(), binding, session_id=bad_sitting)
+            RecoveryWorkflow(
+                a_quarantine(),
+                binding,
+                session_id=bad_sitting,
+                boot_session=commissioned_boot_session(
+                    observations, a_quarantine(), binding
+                ),
+            )
 
 
 def test_a_bindings_own_fields_are_pinned_not_only_its_container_type(observations) -> None:
@@ -3594,6 +3784,7 @@ def test_a_bindings_own_fields_are_pinned_not_only_its_container_type(observatio
             return 0
 
     real_fingerprint = host_fingerprint(observations)
+    owner_binding = SessionBinding(host_fingerprint=real_fingerprint, session_id=SESSION)
     for forged, expected_pattern in (
         (
             SessionBinding(host_fingerprint=AlwaysEqual("not the real host"), session_id=SESSION),
@@ -3611,26 +3802,19 @@ def test_a_bindings_own_fields_are_pinned_not_only_its_container_type(observatio
         # contained "binding.". Matching the exact expected field name
         # closes that.
         with pytest.raises(TypeError, match=expected_pattern):
-            RecoveryWorkflow(a_quarantine(), forged, session_id=SESSION)
+            quarantine = a_quarantine()
+            RecoveryWorkflow(
+                quarantine,
+                forged,
+                session_id=SESSION,
+                boot_session=commissioned_boot_session(
+                    observations, quarantine, owner_binding
+                ),
+            )
 
 
 def test_a_quarantines_own_session_id_is_pinned_not_only_the_container_type() -> None:
-    """R14 (security review): the same gap round 13 closed for `binding`,
-    one field over, on the quarantine itself.
-
-    `_require_a_real_quarantine` pins `type(quarantine) is Quarantine`, the
-    container, and `_require_the_gates` decides `MEDIUM_NOT_RECOGNISED` with
-    `self._quarantine.session_id != self._session_id` — the quarantine's own
-    field on the *left* of `!=`, asked first. `Quarantine.__init__`
-    (`azazel_boot.quarantine`, tracked separately as issue #51, out of this
-    file's ownership) performs no validation of its own on `session_id`, so
-    a genuine `Quarantine`, built only through its public constructor, can
-    hold a `str` subclass whose `__ne__` always answers `False`. Reached
-    `COMMITTED` and minted a real `RecoveryCandidate` for a quarantine whose
-    honest `session_id` was a different sitting entirely — the exact pairing
-    the comment above `MEDIUM_NOT_RECOGNISED`'s check says it exists to
-    refuse (`QUARANTINE_FROM_ANOTHER_SESSION`'s sibling check here).
-    """
+    """#51: a forged session is rejected by Quarantine before workflow entry."""
 
     class LyingStr(str):
         def __eq__(self, other: object) -> bool:
@@ -3642,16 +3826,10 @@ def test_a_quarantines_own_session_id_is_pinned_not_only_the_container_type() ->
         def __hash__(self) -> int:
             return str.__hash__(self)
 
-    lying = Quarantine(
-        session_id=LyingStr("session-elsewhere"), boot_medium_identity=MEDIUM.identity
-    )
-    lying.observe(MEDIUM)
-    lying.observe(Device(identity="host-nvme-SN-1", device_class=DeviceClass.HOST_STORAGE))
-    lying.quarantine_volume()
-
-    binding = SessionBinding(host_fingerprint="irrelevant-to-this-check", session_id=SESSION)
-    with pytest.raises(TypeError, match="quarantine\\.session_id"):
-        RecoveryWorkflow(lying, binding, session_id=SESSION)
+    with pytest.raises(TypeError, match="session_id and boot_medium_identity"):
+        Quarantine(
+            session_id=LyingStr("session-elsewhere"), boot_medium_identity=MEDIUM.identity
+        )
 
 
 def test_an_attempted_automatic_start_is_terminal_and_audited(observations) -> None:
@@ -3806,7 +3984,12 @@ def test_a_quarantine_subclass_that_lies_about_its_state_is_refused(observations
 
     binding = SessionBinding(host_fingerprint=host_fingerprint(observations), session_id=SESSION)
     with pytest.raises(TypeError, match="exactly"):
-        RecoveryWorkflow(lying, binding, session_id=SESSION)
+        RecoveryWorkflow(
+            lying,
+            binding,
+            session_id=SESSION,
+            boot_session=commissioned_boot_session(observations, lying, binding),
+        )
     with pytest.raises(TypeError, match="exactly"):
         preflight(
             lying,
@@ -3872,11 +4055,7 @@ def test_a_snapshot_stand_in_is_refused_by_the_type_before_its_eq_is_asked(
     assert flow.stage is RecoveryStage.PREFLIGHT_PASSED
 
     with pytest.raises(TypeError, match="exactly"):
-        RecoveryWorkflow(
-            a_quarantine(),
-            SessionBinding(host_fingerprint=host_fingerprint(observations), session_id=SESSION),
-            session_id=SESSION,
-        ).start(
+        workflow(observations).start(
             Substitute(),
             observations,
             media_binding_holds=True,
@@ -4148,6 +4327,11 @@ def test_a_sitting_id_cannot_answer_its_own_check(observations) -> None:
             a_quarantine(),
             SessionBinding(host_fingerprint=host_fingerprint(observations), session_id=SESSION),
             session_id=lying,
+            boot_session=commissioned_boot_session(
+                observations,
+                a_quarantine(),
+                SessionBinding(host_fingerprint=host_fingerprint(observations), session_id=SESSION),
+            ),
         )
 
 
@@ -4608,7 +4792,7 @@ def _a_workflow_at(stage, rule, binding, snap, observations):
     got there, and the caller counts which rule actually answered.
     """
 
-    flow = RecoveryWorkflow(rule, binding, session_id=SESSION)
+    flow = workflow(observations, quarantine=rule, binding=binding)
     if stage is RecoveryStage.NOT_STARTED:
         return flow
     _swallow(
@@ -4854,7 +5038,7 @@ def test_no_input_to_this_module_changes_anything_about_the_quarantine(
         # quarantine" is an input dimension too: a payload firing only on the
         # second would see a guard that always builds the first.
         for _sitting in (1, 2):
-            flow = RecoveryWorkflow(rule, binding, session_id=SESSION)
+            flow = workflow(observations, quarantine=rule, binding=binding)
             _swallow(
                 flow.start,
                 snap,
@@ -5092,7 +5276,7 @@ def test_this_module_performs_no_io_when_it_actually_runs() -> None:
         from azazel_boot.commissioning import SessionBinding, host_fingerprint
         from azazel_boot.inventory import InterfaceObservation
         from azazel_boot.quarantine import Device, DeviceClass, Quarantine
-        from azazel_boot.session_mode import AttemptOutcome, PassphraseChannel
+        from azazel_boot.session_mode import AttemptOutcome, BootSession, PassphraseChannel
         from azazel_boot.snapshot import (
             CapacityReport,
             MigrationLedger,
@@ -5163,6 +5347,21 @@ def test_this_module_performs_no_io_when_it_actually_runs() -> None:
         binding = SessionBinding(
             host_fingerprint=host_fingerprint(observations), session_id=SESSION
         )
+
+        def workflow(observations, *, quarantine=None, binding=None):
+            rule = quarantine if quarantine is not None else build()
+            sitting = binding if binding is not None else SessionBinding(
+                host_fingerprint=host_fingerprint(observations), session_id=SESSION
+            )
+            owner = BootSession("boot-io-check", rule, sitting)
+            if not rule.is_fenced:
+                owner.commission(Opens(), observations, session_id=SESSION)
+            return RecoveryWorkflow(
+                rule,
+                sitting,
+                session_id=SESSION,
+                boot_session=owner,
+            )
         snapshots = [
             SnapshotDescriptor(1, version, integrity, f"fingerprint-{version}")
             for version in (1, 2)
@@ -5196,7 +5395,7 @@ def test_this_module_performs_no_io_when_it_actually_runs() -> None:
 
         def at(stage, rule, snapshot):
             # A fresh workflow as far as `stage`, for one refusal probe.
-            flow = RecoveryWorkflow(rule, binding, session_id=SESSION)
+            flow = workflow(observations, quarantine=rule, binding=binding)
             if stage == "not_started":
                 return flow
             try:
@@ -5260,7 +5459,7 @@ def test_this_module_performs_no_io_when_it_actually_runs() -> None:
             repr(verdict)
             repr(snapshot)
 
-            flow = RecoveryWorkflow(rule, binding, session_id=SESSION)
+            flow = workflow(observations, quarantine=rule, binding=binding)
             for act in (
                 lambda: flow.start(
                     snapshot,
@@ -6201,6 +6400,11 @@ def test_the_repr_survives_an_instance_that_was_never_built(observations) -> Non
                 arguments["quarantine"],
                 arguments["binding"],
                 session_id=arguments["session_id"],
+                boot_session=commissioned_boot_session(
+                    observations,
+                    a_quarantine(),
+                    binding,
+                ),
             )
         rendered = "".join(
             traceback.TracebackException.from_exception(raised.value, capture_locals=True).format()
@@ -6241,6 +6445,7 @@ def test_a_half_built_recovery_workflow_is_sealed_and_refuses_every_write(observ
     """
 
     assert set(RecoveryWorkflow.__slots__) == {
+        "_boot_session",
         "_quarantine",
         "_binding",
         "_session_id",
@@ -6254,11 +6459,27 @@ def test_a_half_built_recovery_workflow_is_sealed_and_refuses_every_write(observ
     }
 
     binding = SessionBinding(host_fingerprint=host_fingerprint(observations), session_id=SESSION)
+    boot_session = commissioned_boot_session(observations, a_quarantine(), binding)
     placeholder = object()
     for arguments in (
-        {"quarantine": object(), "binding": binding, "session_id": SESSION},
-        {"quarantine": a_quarantine(), "binding": object(), "session_id": SESSION},
-        {"quarantine": a_quarantine(), "binding": binding, "session_id": b"bytes"},
+        {
+            "quarantine": object(),
+            "binding": binding,
+            "session_id": SESSION,
+            "boot_session": boot_session,
+        },
+        {
+            "quarantine": a_quarantine(),
+            "binding": object(),
+            "session_id": SESSION,
+            "boot_session": boot_session,
+        },
+        {
+            "quarantine": a_quarantine(),
+            "binding": binding,
+            "session_id": b"bytes",
+            "boot_session": boot_session,
+        },
     ):
         half = _half_built(RecoveryWorkflow, **arguments)
         for name in RecoveryWorkflow.__slots__:
@@ -9137,10 +9358,13 @@ def test_a_workflow_subclass_does_not_make_a_candidate_apply(observations) -> No
         def holds(self, candidate: RecoveryCandidate) -> bool:
             return True
 
+    quarantine = a_quarantine()
+    binding = SessionBinding(host_fingerprint=host_fingerprint(observations), session_id=SESSION)
     liar = Liar(
-        a_quarantine(),
-        SessionBinding(host_fingerprint=host_fingerprint(observations), session_id=SESSION),
+        quarantine,
+        binding,
         session_id=SESSION,
+        boot_session=commissioned_boot_session(observations, quarantine, binding),
     )
     assert liar.holds(RecoveryCandidate(99, "not-minted-by-anyone")) is True
     assert candidate_applies_to(liar, RecoveryCandidate(99, "not-minted-by-anyone")) is False
@@ -9723,7 +9947,7 @@ def test_a_fingerprint_is_an_opaque_token_and_not_a_rendered_record() -> None:
     assert descriptor(fingerprint="a" * 128).fingerprint == "a" * 128
 
 
-def test_the_seals_other_door_is_shut_on_every_class_that_has_one() -> None:
+def test_the_seals_other_door_is_shut_on_every_class_that_has_one(observations) -> None:
     """R9: `del x._sealed` cost less than everything built on top of it.
 
     Every seal in this package gates on `getattr(self, "_sealed", False)`, and
@@ -9757,10 +9981,10 @@ def test_the_seals_other_door_is_shut_on_every_class_that_has_one() -> None:
 
     # And it refuses, rather than merely existing.
     rule = a_quarantine()
-    flow = RecoveryWorkflow(
-        rule,
-        SessionBinding(host_fingerprint="0" * 64, session_id=SESSION),
-        session_id=SESSION,
+    flow = workflow(
+        observations,
+        quarantine=rule,
+        binding=SessionBinding(host_fingerprint="0" * 64, session_id=SESSION),
     )
     for target in (rule, flow, MigrationLedger()):
         with pytest.raises(AttributeError):

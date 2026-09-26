@@ -207,7 +207,7 @@ def resolve(configuration: Configuration, profile_id: str) -> Closure:
 def _read_json(path: Path) -> dict:
     try:
         text = path.read_text(encoding="utf-8")
-    except OSError as error:
+    except (OSError, UnicodeError) as error:
         raise ClosureRefused(Refusal.BAD_SCHEMA, f"{path.name} is unreadable: {error}") from None
     try:
         document = json.loads(text)

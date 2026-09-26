@@ -66,7 +66,14 @@ from .commissioning import SessionBinding, binding_applies
 from .inventory import InterfaceObservation
 from .quarantine import Quarantine
 from .refusals import Refused
-from .session_mode import AttemptOutcome, KeyAcquisition, PassphraseChannel
+from .session_mode import (
+    AttemptOutcome,
+    KeyAcquisition,
+    PassphraseChannel,
+)
+from .session_mode import (
+    BootSession as _BootSession,
+)
 
 #: The snapshot container formats this module can read. An unknown version is
 #: refused, never guessed at: a snapshot whose layout nobody here knows is a
@@ -2242,6 +2249,7 @@ class RecoveryWorkflow:
     """
 
     __slots__ = (
+        "_boot_session",
         "_quarantine",
         "_binding",
         "_session_id",
@@ -2255,7 +2263,12 @@ class RecoveryWorkflow:
     )
 
     def __init__(
-        self, quarantine: Quarantine, binding: SessionBinding, *, session_id: str
+        self,
+        quarantine: Quarantine,
+        binding: SessionBinding,
+        *,
+        session_id: str,
+        boot_session: _BootSession,
     ) -> None:
         # **Sealed from the instant this method starts, not once validation
         # has passed.** A round-24 security review pointed out that every
@@ -2286,6 +2299,8 @@ class RecoveryWorkflow:
         # leaves any of this module's other sealed classes.
         object.__setattr__(self, "_sealed", True)
         _require_a_real_quarantine(quarantine)
+        if type(boot_session) is not _BootSession:
+            raise TypeError("boot_session must be a BootSession")
         if type(binding) is not SessionBinding:
             raise TypeError("binding must be a SessionBinding")
         # **The container's type is not its fields' types.** `SessionBinding`
@@ -2304,24 +2319,10 @@ class RecoveryWorkflow:
         # constructor's caller.
         _require_an_exact_str("binding.host_fingerprint", binding.host_fingerprint)
         _require_an_exact_str("binding.session_id", binding.session_id)
-        # **The same gap, one field over.** `_require_a_real_quarantine`
-        # pins `type(quarantine) is Quarantine`, the container, and
-        # `_require_the_gates` later decides `MEDIUM_NOT_RECOGNISED` with
-        # `self._quarantine.session_id != self._session_id` — the
-        # quarantine's own field on the *left* of `!=`, where its `__ne__`
-        # is asked first. `Quarantine.__init__` performs no validation of
-        # its own on `session_id` (`azazel_boot.quarantine`, tracked
-        # separately as issue #51, out of this file's ownership), so a
-        # genuine `Quarantine`, built only through its public constructor,
-        # can hold a `str` subclass whose `__ne__` always answers `False` —
-        # a round-fourteen review built exactly that, reached `COMMITTED`
-        # and minted a real `RecoveryCandidate` for a quarantine whose
-        # honest `session_id` was a different sitting entirely, defeating
-        # the gate `MEDIUM_NOT_RECOGNISED`'s own comment says exists
-        # precisely to catch that pairing. This module does not have to
-        # wait on `quarantine.py`'s own fix to close its end: pinned here,
-        # on the value this class is about to compare, the same way
-        # `binding`'s fields are pinned two lines up.
+        # `Quarantine` now pins its identity fields at construction too
+        # (issue #51). Keep this consumer-side check as defense in depth:
+        # this workflow compares the quarantine's sitting below, so pin the
+        # exact value it is about to trust just as we do for the binding.
         _require_an_exact_str("quarantine.session_id", quarantine.session_id)
         _require_an_exact_str("session_id", session_id)
         if not session_id.strip():
@@ -2331,6 +2332,7 @@ class RecoveryWorkflow:
         # `_sealed` is already `True` by this point (set above, before any
         # of the validation that could raise), and the sealed `__setattr__`
         # refuses ordinary assignment unconditionally once it is.
+        object.__setattr__(self, "_boot_session", boot_session)
         object.__setattr__(self, "_quarantine", quarantine)
         object.__setattr__(self, "_binding", binding)
         object.__setattr__(self, "_session_id", session_id)
@@ -3008,7 +3010,17 @@ class RecoveryWorkflow:
         if acquisition is not None:
             if acquisition.channel is not PassphraseChannel.LOCAL_HIDDEN_PROMPT:
                 self._refuse_gate(RecoveryGate.KEY_ACQUISITION)
-            if acquisition.attempt() is not AttemptOutcome.OPENED:
+            if not self._boot_session.owns(self._quarantine, self._binding):
+                self._refuse_gate(RecoveryGate.KEY_ACQUISITION)
+            outcome = self._boot_session.attempt_with_budget(
+                acquisition,
+                session_id=self._session_id,
+            )
+            if outcome is None:
+                if self._quarantine.is_fenced:
+                    self._refuse_gate(RecoveryGate.MEDIUM_FENCED)
+                self._refuse_gate(RecoveryGate.KEY_ACQUISITION)
+            if outcome is not AttemptOutcome.OPENED:
                 # D1's sources under D2's limit, reused rather than
                 # reimplemented: the acquisition is the same Protocol
                 # `session_mode` defines, and what crosses back is the same

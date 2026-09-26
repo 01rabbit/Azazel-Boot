@@ -1,0 +1,9 @@
+# Debian package requests for the live image. The pinned snapshot resolves
+# these names; the resolved dpkg package/version closure is recorded per build.
+live-boot
+live-config
+initramfs-tools-core
+strace
+linux-image-amd64
+python3
+openssl

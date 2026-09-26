@@ -32,10 +32,10 @@ Related: [Release policy](release-policy.md) · [Recovery](recovery.md) ·
 | An encrypted offline bundle | **none** |
 | An updater, slot layout, or boot-metadata format | **none** — layout and format are open ([ADR-0003](adr/0003-immutable-ab-update.md) D4) |
 | A definition of "health-confirmed" for a trial boot | **not decided anywhere**, upstream or here ([ADR-0003](adr/0003-immutable-ab-update.md) D4) |
-| Any media on which an update could be installed | **none** — no image has been built and no builder is selected ([ADR-0002](adr/0002-image-builder.md)) |
+| Any released media on which an update could be installed | **none** — an unsigned prototype ISO exists, but it is not released and no production builder or update mechanism is selected ([R11 evidence](prototype-evidence-boot-runtime-r11.md), [ADR-0002](adr/0002-image-builder.md)) |
 
-An operator reading this today has nothing to update, from nowhere, with
-nothing to verify it against. That is the whole state.
+An operator has no released media to update and no update channel or trust
+material. The local R11 prototype does not change that state.
 
 ## 2. An update to Boot is not a service update
 

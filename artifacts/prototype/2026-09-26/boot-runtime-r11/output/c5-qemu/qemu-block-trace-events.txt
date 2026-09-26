@@ -1,0 +1,5 @@
+bdrv_open_common
+blk_co_pwritev
+bdrv_co_pwritev_part
+virtio_blk_handle_write
+bdrv_co_pwrite_zeroes

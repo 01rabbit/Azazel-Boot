@@ -1,0 +1,48 @@
+xorriso 1.5.6 : RockRidge filesystem manipulator, libburnia project.
+
+xorriso : NOTE : ISO image bears MBR with  -boot_image any partition_offset=16
+xorriso : NOTE : Loading ISO image tree from LBA 0
+xorriso : UPDATE :     305 nodes read in 1 seconds
+xorriso : NOTE : Detected El-Torito boot information which currently is set to be discarded
+Drive current: -indev '/tmp/base-prototype.iso'
+Media current: stdio file, overwriteable
+Media status : is written , is appendable
+Boot record  : El Torito , MBR isohybrid cyl-align-on GPT APM
+Media summary: 1 session, 191488 data blocks,  374m data, 1942m free
+Volume id    : 'Debian trixie 20260914-12:00'
+Drive current: -outdev '/tmp/r11-remaster/final.iso'
+Media current: stdio file, overwriteable
+Media status : is blank
+Media summary: 0 sessions, 0 data blocks, 0 data, 1942m free
+xorriso : UPDATE :       1 files added in 1 seconds
+Added to ISO image: file '/live/filesystem.squashfs'='/tmp/r11-remaster/tree/live/filesystem.squashfs'
+xorriso : UPDATE :       1 files added in 1 seconds
+Added to ISO image: file '/live/initrd.img'='/tmp/r11-remaster/tree/live/initrd.img'
+xorriso : UPDATE :       1 files added in 1 seconds
+Added to ISO image: file '/live/initrd.img-6.12.107+deb13-amd64'='/tmp/r11-remaster/tree/live/initrd.img-6.12.107+deb13-amd64'
+xorriso : UPDATE :       1 files added in 1 seconds
+Added to ISO image: file '/sha256sum.txt'='/tmp/r11-remaster/tree/sha256sum.txt'
+xorriso : WARNING : -volid text problematic as automatic mount point name
+xorriso : WARNING : -volid text does not comply to ISO 9660 / ECMA 119 rules
+xorriso : NOTE : Replayed 23 boot related commands
+xorriso : NOTE : Copying to System Area: 32768 bytes from file '--interval:imported_iso:0s-15s:zero_mbrpt,zero_gpt,zero_apm:/tmp/base-prototype.iso'
+libisofs: NOTE : Aligned image size to cylinder size by 324 blocks
+xorriso : UPDATE : Writing:       4944s    2.6%   fifo  99%  buf  50%
+xorriso : UPDATE : Writing:      59984s   31.0%   fifo  99%  buf  50%   89.2xD 
+xorriso : UPDATE : Writing:     123040s   63.5%   fifo  99%  buf  50%   91.9xD 
+xorriso : UPDATE : Writing:     186368s   96.2%   fifo  99%  buf  50%   92.3xD 
+ISO image produced: 193488 sectors
+Written to medium : 193648 sectors at LBA 48
+Writing to '/tmp/r11-remaster/final.iso' completed successfully.
+
+xorriso : NOTE : Re-assessing -outdev '/tmp/r11-remaster/final.iso'
+xorriso : NOTE : ISO image bears MBR with  -boot_image any partition_offset=16
+xorriso : NOTE : Loading ISO image tree from LBA 0
+xorriso : UPDATE :     305 nodes read in 1 seconds
+xorriso : NOTE : Detected El-Torito boot information which currently is set to be discarded
+Drive current: -dev '/tmp/r11-remaster/final.iso'
+Media current: stdio file, overwriteable
+Media status : is written , is appendable
+Boot record  : El Torito , MBR isohybrid cyl-align-on GPT APM
+Media summary: 1 session, 193488 data blocks,  378m data, 1564m free
+Volume id    : 'Debian trixie 20260914-12:00'

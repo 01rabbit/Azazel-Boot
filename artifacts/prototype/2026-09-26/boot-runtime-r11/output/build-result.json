@@ -1,0 +1,26 @@
+{
+  "architecture": "amd64",
+  "build_input_manifest_digest": "sha256:e36d116ccec45750b84c7d2765094128b8a724e45b91273172cf96a2ae8eeb9a",
+  "build_method": "replaced only the frozen Boot runtime module, C5 userspace probe, and C5 initramfs entry hook in the prior verified ISO; regenerated SquashFS/initramfs and replayed ISO boot metadata",
+  "builder": "derived-remaster-of-verified-live-build-prototype; production builder not selected",
+  "builder_tool_versions": {
+    "cpio": "2.15+dfsg-2",
+    "gzip": "1.13-1+deb13u1",
+    "live-build": "20250505+deb13u1 (clean build attempted, not completed)",
+    "qemu_guest_architecture": "amd64 emulated by QEMU TCG",
+    "squashfs-tools": "4.6.1-1",
+    "xorriso": "1.5.6-1.2+b1"
+  },
+  "c5_manifest_digest": "sha256:efec2f0b2f5161b700f21f094d3e80200a37421301481b3e05350bede05b549d",
+  "c5_result_digest": "sha256:f9a7afd7f19635c08fd39c162ba5bfe24381cc5cbe276cf219704253396a6c04",
+  "clean_live_build_attempt": "stopped during chroot apt-get update after >20 minutes without package-index progress; no second build was started",
+  "hardware_verified": false,
+  "initramfs_digest": "sha256:de900b74a4fece5395cc1522ac48c012894ee23299c921769e9a37ff4e8a7c4c",
+  "kernel_digest": "sha256:2b2358b37674d2505350528875bb17afae2a36522a9e8a9417eaca65a7da0e08",
+  "parent_payload_sha256": "13afbd43a2efdfef2792d2b3807267ddb2079d3a7b9fb60a21fd31edd90c7fae",
+  "payload_digest": "sha256:3aa21d1c9c97dd74a5d981d17216738e16c2c066cb01dba454cd30e76a297dfa",
+  "production_builder_selected": false,
+  "release_disposition": "UNSIGNED PROTOTYPE / NON-RELEASEABLE",
+  "schema": "azazel-payload/build-result@prototype-remaster",
+  "source_date_epoch": 1789387200
+}

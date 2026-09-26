@@ -1,0 +1,22 @@
+[Unit]
+Description=Azazel-Boot ephemeral per-boot policy runtime (prototype)
+After=local-fs.target systemd-udevd.service
+Before=azazel-c5-persistence-probe.service
+ConditionPathExists=/run/azazel/host-storage-quarantined
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -m azazel_boot.runtime
+ExecStartPost=/bin/sh -c 'i=0; while [ ! -s /run/azazel/boot-runtime.json ]; do i=$((i+1)); [ "$i" -lt 100 ] || exit 1; sleep 0.1; done'
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/run/azazel
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

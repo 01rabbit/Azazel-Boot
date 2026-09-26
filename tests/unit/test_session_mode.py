@@ -20,6 +20,7 @@ import ast
 import copy
 import dataclasses
 import pickle
+import threading
 import traceback
 from enum import Enum
 from pathlib import Path
@@ -383,6 +384,34 @@ def test_the_default_acquisition_reads_nothing_and_says_so(observations) -> None
     assert decided.mode is SessionMode.EPHEMERAL
 
 
+def test_runtime_ephemeral_owner_never_prompts_without_host_binding(observations) -> None:
+    """The prototype runtime starts safely before a persistence binding exists."""
+
+    session = BootSession(BOOT, a_quarantine(), None)
+    decided = session.select_ephemeral()
+    acquisition = Scripted(AttemptOutcome.OPENED)
+
+    assert decided.mode is SessionMode.EPHEMERAL
+    assert session.holds(decided)
+    with pytest.raises(ModeRefused):
+        session.commission(acquisition, observations, session_id=SESSION)
+    assert acquisition.prompts == 0
+    assert session.attempt_with_budget(acquisition, session_id=SESSION) is None
+    assert acquisition.prompts == 0
+
+
+def test_ephemeral_selection_cannot_change_a_persistent_mode(observations) -> None:
+    session = a_session(observations)
+    persistent = session.commission(
+        Scripted(AttemptOutcome.OPENED), observations, session_id=SESSION
+    )
+
+    with pytest.raises(ModeRefused):
+        session.select_ephemeral()
+    assert session.holds(persistent)
+    assert persistent.mode is SessionMode.PERSISTENT
+
+
 def test_there_is_no_unprotected_volume_and_no_fallback_key() -> None:
     """Asserted as an absence: there is nothing to refuse, so nothing to permit.
 
@@ -432,6 +461,143 @@ def test_the_budget_is_five_and_the_fifth_failure_fixes_ephemeral(observations) 
         AuditEvent.ATTEMPT_BUDGET_EXHAUSTED,
         AuditEvent.MODE_SELECTED,
     ]
+
+
+def test_parallel_recovery_calls_cannot_spend_past_the_shared_budget(observations) -> None:
+    """Concurrent workflows serialize the final remaining acquisition."""
+
+    quarantine = a_quarantine()
+    session = a_session(observations, quarantine=quarantine)
+    session.commission(Scripted(AttemptOutcome.OPENED), observations, session_id=SESSION)
+    quarantine.quarantine_volume()
+
+    for _ in range(ATTEMPT_BUDGET - 2):
+        assert session.attempt_with_budget(
+            Scripted(AttemptOutcome.REJECTED), session_id=SESSION
+        ) is AttemptOutcome.REJECTED
+
+    entered = threading.Event()
+    release = threading.Event()
+    prompt_count_lock = threading.Lock()
+    prompts = 0
+
+    class ProbedLock:
+        """Signal that the competing call reached the owner's admission lock."""
+
+        def __init__(self):
+            self._inner = threading.Lock()
+            self._calls_lock = threading.Lock()
+            self._calls = 0
+            self.second_acquire = threading.Event()
+
+        def acquire(self, blocking=True):
+            with self._calls_lock:
+                self._calls += 1
+                if self._calls == 2:
+                    self.second_acquire.set()
+            return self._inner.acquire(blocking=blocking)
+
+        def release(self):
+            self._inner.release()
+
+    admission_lock = ProbedLock()
+    object.__setattr__(session, "_attempt_lock", admission_lock)
+
+    class PausingAcquisition:
+        channel = PassphraseChannel.LOCAL_HIDDEN_PROMPT
+
+        def attempt(self):
+            nonlocal prompts
+            with prompt_count_lock:
+                prompts += 1
+            entered.set()
+            assert release.wait(timeout=2)
+            return AttemptOutcome.REJECTED
+
+    acquisition = PausingAcquisition()
+
+    def ask_once():
+        return session.attempt_with_budget(acquisition, session_id=SESSION)
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        first = workers.submit(ask_once)
+        second = workers.submit(ask_once)
+        assert entered.wait(timeout=2)
+        assert admission_lock.second_acquire.wait(timeout=2)
+        release.set()
+        outcomes = (first.result(timeout=2), second.result(timeout=2))
+
+    assert prompts == 1
+    assert outcomes.count(AttemptOutcome.REJECTED) == 1
+    assert outcomes.count(None) == 1
+    assert sum(
+        entry.event is AuditEvent.ATTEMPT_BUDGET_EXHAUSTED for entry in session.audit()
+    ) == 1
+
+
+def test_provider_exception_cannot_buy_a_free_commissioning_retry(observations) -> None:
+    class RaisesAfterRejections:
+        channel = PassphraseChannel.LOCAL_HIDDEN_PROMPT
+
+        def __init__(self):
+            self.prompts = 0
+
+        def attempt(self):
+            self.prompts += 1
+            if self.prompts <= ATTEMPT_BUDGET - 1:
+                return AttemptOutcome.REJECTED
+            raise RuntimeError("provider did not return an outcome")
+
+    session = a_session(observations)
+    provider = RaisesAfterRejections()
+    with pytest.raises(RuntimeError, match="did not return an outcome"):
+        session.commission(provider, observations, session_id=SESSION)
+
+    assert provider.prompts == ATTEMPT_BUDGET
+    assert session.decided.mode is SessionMode.EPHEMERAL
+    final = Scripted(AttemptOutcome.OPENED)
+    with pytest.raises(ModeRefused) as refused:
+        session.commission(final, observations, session_id=SESSION)
+    assert refused.value.refusal is Refusal.MODE_ALREADY_FIXED
+    assert final.prompts == 0
+    assert sum(
+        entry.event is AuditEvent.ATTEMPT_BUDGET_EXHAUSTED for entry in session.audit()
+    ) == 1
+
+
+def test_provider_exception_cannot_buy_a_free_recovery_retry(observations) -> None:
+    class Raises:
+        channel = PassphraseChannel.LOCAL_HIDDEN_PROMPT
+
+        def __init__(self):
+            self.prompts = 0
+
+        def attempt(self):
+            self.prompts += 1
+            raise RuntimeError("provider did not return an outcome")
+
+    quarantine = a_quarantine()
+    session = a_session(observations, quarantine=quarantine)
+    session.commission(Scripted(AttemptOutcome.OPENED), observations, session_id=SESSION)
+    quarantine.quarantine_volume()
+    for _ in range(ATTEMPT_BUDGET - 2):
+        assert session.attempt_with_budget(
+            Scripted(AttemptOutcome.REJECTED), session_id=SESSION
+        ) is AttemptOutcome.REJECTED
+
+    provider = Raises()
+    with pytest.raises(RuntimeError, match="did not return an outcome"):
+        session.attempt_with_budget(provider, session_id=SESSION)
+    assert provider.prompts == 1
+    assert sum(
+        entry.event is AuditEvent.ATTEMPT_BUDGET_EXHAUSTED for entry in session.audit()
+    ) == 1
+
+    final = Scripted(AttemptOutcome.OPENED)
+    assert session.attempt_with_budget(final, session_id=SESSION) is None
+    assert final.prompts == 0
 
 
 def test_a_success_before_the_budget_runs_out_fixes_persistent(observations) -> None:
@@ -689,7 +855,15 @@ def test_the_session_refuses_reassignment_and_serialisation(observations) -> Non
 
     # `_audit` included: the seal refuses *assignment*, and leaving the one
     # mutable slot out of this list is how it would quietly stop being checked.
-    for name in ("_spent", "_mode", "_quarantine", "_binding", "_boot_id", "_audit"):
+    for name in (
+        "_spent",
+        "_mode",
+        "_quarantine",
+        "_binding",
+        "_boot_id",
+        "_audit",
+        "_attempt_lock",
+    ):
         with pytest.raises(AttributeError):
             setattr(session, name, None)
 
@@ -769,7 +943,14 @@ def test_this_module_cannot_reach_a_disk_a_device_a_network_or_a_vm() -> None:
             # too, and skipping it made relative imports invisible.
             imported.add((node.module or "").split(".")[0] or ".")
 
-    assert imported == {"__future__", "dataclasses", "enum", "typing", "azazel_boot"}
+    assert imported == {
+        "__future__",
+        "dataclasses",
+        "enum",
+        "threading",
+        "typing",
+        "azazel_boot",
+    }
 
     # Attribute calls as well as name calls, and the names that make a call
     # unnecessary. A review added a function to this module with **no import
@@ -946,6 +1127,7 @@ def test_every_refusal_is_one_this_module_actually_raises() -> None:
         "MEDIUM_FENCED",
         "INPUT_INTERRUPTED",
         "CHANNEL_NOT_A_LOCAL_HIDDEN_PROMPT",
+        "ATTEMPT_IN_PROGRESS",
     }
 
 
@@ -1075,6 +1257,13 @@ def test_no_refusal_message_carries_a_host_a_session_or_a_device(observations, e
     fixed = a_session(observations, binding=binding)
     fixed.commission(Scripted(AttemptOutcome.OPENED), observations, session_id=SESSION)
     collect(fixed, Scripted(AttemptOutcome.OPENED), observations)
+
+    busy = a_session(observations, binding=binding)
+    assert busy._attempt_lock.acquire(blocking=False)
+    try:
+        collect(busy, Scripted(AttemptOutcome.OPENED), observations)
+    finally:
+        busy._attempt_lock.release()
 
     assert {refusal.refusal for refusal in refusals} == set(Refusal), (
         "every refusal path must be exercised, or this test guards only some of them"
