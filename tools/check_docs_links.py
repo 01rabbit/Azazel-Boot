@@ -19,7 +19,9 @@ import re
 import sys
 import unicodedata
 
-SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__"}
+# Artifact trees are local evidence bundles and may contain upstream package
+# Markdown or generated build files; they are not repository documentation.
+SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", "artifacts"}
 
 # [text](target "optional title") -- target may not contain spaces or parens.
 INLINE_LINK = re.compile(r"\[(?:[^\]]*)\]\(\s*<?([^()<>\s]+)>?(?:\s+\"[^\"]*\")?\s*\)")
@@ -128,6 +130,11 @@ def check(root: str) -> list[str]:
                 )
             else:
                 resolved = path
+
+            # Prototype artifact links can target ignored local measurements
+            # intentionally omitted from source-control history.
+            if os.path.relpath(resolved, root).startswith("artifacts"):
+                continue
 
             if not os.path.exists(resolved):
                 problems.append(

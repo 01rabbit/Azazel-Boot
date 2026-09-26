@@ -20,12 +20,21 @@ from __future__ import annotations
 
 import ast
 import copy
+import hashlib
+import json
 import pickle
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from tools.builder.cli import NO_EXECUTOR_AVAILABLE, main, run_doctor, run_prepare_host
+from tools.builder.cli import (
+    NO_EXECUTOR_AVAILABLE,
+    main,
+    run_build,
+    run_doctor,
+    run_prepare_host,
+    run_verify,
+)
 from tools.builder.doctor import (
     MINIMUM_FREE_BYTES,
     VM_NAME,
@@ -146,6 +155,34 @@ def ready_session(**overrides) -> PrepareSession:
     )
     session.show_plan(plan_lines(session.backend, session.execution))
     return session
+
+
+def artifact_record(digest: str, **overrides) -> dict[str, object]:
+    record: dict[str, object] = {
+        "image_version": "0.0.0",
+        "git_revision": "0" * 40,
+        "builder_version": "0.0.0",
+        "debian_snapshot": "snapshot:20260101T000000Z",
+        "package_manifest_ref": "manifests/packages.json",
+        "package_manifest_digest": "sha256:" + "2" * 64,
+        "firmware_manifest_ref": "manifests/firmware.json",
+        "firmware_manifest_digest": "sha256:" + "3" * 64,
+        "sbom_ref": "sbom/payload.spdx.json",
+        "sbom_digest": "sha256:" + "4" * 64,
+        "source_date_epoch": 1735689600,
+        "build_input_digest": "sha256:" + "5" * 64,
+        "partition_layout_digest": "sha256:" + "6" * 64,
+        "root_filesystem_digest": "sha256:" + "7" * 64,
+        "boot_chain_identity": "shim+grub",
+        "unsigned_payload_digest": digest,
+        "signed_artifact_digest": None,
+        "signature": None,
+        "build_time": "2026-09-22T00:00:00Z",
+        "compatibility_claim": "candidate",
+        "quarantine_policy_version": "quarantine.v1",
+    }
+    record.update(overrides)
+    return record
 
 
 # --------------------------------------------------------------------------
@@ -695,3 +732,138 @@ def test_main_wires_the_verbs_without_touching_a_machine() -> None:
     assert main(["doctor"], probe=FakeProbe(available_backends=())) == 1
     assert main(["prepare-host", "--dry-run"], probe=FakeProbe()) == 0
     assert main(["prepare-host"], probe=FakeProbe()) == 2
+
+
+def test_build_refuses_the_shipped_unpinned_profile_without_a_host_probe() -> None:
+    rendered: list[str] = []
+    probe = FakeProbe()
+    assert main(["build", "--profile", "responder-eval"], probe=probe) == 2
+    assert probe.calls == 0
+    root = Path(__file__).resolve().parents[2]
+    assert run_build("responder-eval", rendered.append, config_dir=root / "config" / "builder") == 2
+    assert rendered == ["build: refused (unpinned_input)"]
+
+
+def test_build_refuses_an_operator_supplied_url_as_a_profile(tmp_path: Path) -> None:
+    rendered: list[str] = []
+    (tmp_path / "profiles.json").write_text(
+        json.dumps({"schema": "azazel-boot/build-profiles@1", "profiles": {}}),
+        encoding="utf-8",
+    )
+    (tmp_path / "pins.json").write_text(
+        json.dumps({"schema": "azazel-boot/build-pins@1", "pins": {}}), encoding="utf-8"
+    )
+
+    assert run_build("https://example.invalid", rendered.append, config_dir=tmp_path) == 2
+    assert rendered == ["build: refused (not_symbolic)"]
+
+
+# --------------------------------------------------------------------------
+# Local verification never authorizes a write without an injected signer
+# --------------------------------------------------------------------------
+
+
+def test_verify_reports_digest_and_unsigned_signature_separately(tmp_path: Path) -> None:
+    payload = tmp_path / "artifact.img"
+    payload.write_bytes(b"evaluation artifact")
+    digest = "sha256:" + hashlib.sha256(payload.read_bytes()).hexdigest()
+    record = tmp_path / "record.json"
+    record.write_text(json.dumps(artifact_record(digest)), encoding="utf-8")
+
+    code, rendered = lines_from(run_verify, record, payload)
+
+    assert code == 2
+    assert rendered == (
+        "verify: digest=matched",
+        "verify: signature=not_attempted",
+        "verify: write_authorized=False",
+        "verify: refusal=unsigned",
+    )
+
+
+def test_verify_refuses_a_digest_mismatch_before_signature(tmp_path: Path) -> None:
+    payload = tmp_path / "artifact.img"
+    payload.write_bytes(b"wrong bytes")
+    record = tmp_path / "record.json"
+    record.write_text(
+        json.dumps(
+            artifact_record(
+                "sha256:" + "0" * 64,
+                signed_artifact_digest="sha256:" + "8" * 64,
+                signature="not-a-real-signature",
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    code, rendered = lines_from(run_verify, record, payload)
+
+    assert code == 2
+    assert rendered[0:3] == (
+        "verify: digest=mismatched",
+        "verify: signature=not_attempted",
+        "verify: write_authorized=False",
+    )
+    assert rendered[-1] == "verify: refusal=digest_mismatch"
+
+
+def test_verify_reports_a_signed_record_without_a_verifier_separately(tmp_path: Path) -> None:
+    payload = tmp_path / "artifact.img"
+    payload.write_bytes(b"matching bytes")
+    digest = "sha256:" + hashlib.sha256(payload.read_bytes()).hexdigest()
+    record = tmp_path / "record.json"
+    record.write_text(
+        json.dumps(
+            artifact_record(
+                digest,
+                signed_artifact_digest="sha256:" + "8" * 64,
+                signature="untrusted-signature",
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    code, rendered = lines_from(run_verify, record, payload)
+
+    assert code == 2
+    assert rendered == (
+        "verify: digest=matched",
+        "verify: signature=not_verified_no_verifier",
+        "verify: write_authorized=False",
+        "verify: refusal=no_verifier",
+    )
+
+
+def test_verify_refuses_unreadable_inputs_without_echoing_paths(tmp_path: Path) -> None:
+    secret_named_record = tmp_path / "record-secret-name.json"
+    secret_named_artifact = tmp_path / "artifact-secret-name.img"
+
+    code, rendered = lines_from(run_verify, secret_named_record, secret_named_artifact)
+
+    assert code == 2
+    assert rendered == ("verify: refused (record_unreadable)",)
+    assert "secret" not in "\n".join(rendered)
+
+
+def test_verify_refuses_a_non_utf8_record_without_a_traceback(tmp_path: Path) -> None:
+    payload = tmp_path / "artifact.img"
+    payload.write_bytes(b"x")
+    record = tmp_path / "record.bin"
+    record.write_bytes(b"\xff")
+
+    code, rendered = lines_from(run_verify, record, payload)
+
+    assert code == 2
+    assert rendered == ("verify: refused (record_unreadable)",)
+
+
+def test_main_runs_verify_without_constructing_a_host_probe(tmp_path: Path) -> None:
+    payload = tmp_path / "artifact.img"
+    payload.write_bytes(b"x")
+    record = tmp_path / "record.json"
+    digest = "sha256:" + hashlib.sha256(b"x").hexdigest()
+    record.write_text(json.dumps(artifact_record(digest)), encoding="utf-8")
+
+    probe = FakeProbe()
+    assert main(["verify", "--record", str(record), "--artifact", str(payload)], probe=probe) == 2
+    assert probe.calls == 0

@@ -1,0 +1,20 @@
+{
+  "boot_image_policy_result": {
+    "faults": [
+      {
+        "code": "quarantine_not_persistent",
+        "detail": "persistence into userspace is false or unverified; a quarantine re-established in userspace starts after udev, LVM and the filesystem drivers have already written"
+      }
+    ],
+    "verdict": "fail"
+  },
+  "build_host_count": 1,
+  "candidate": "live-build-evaluation-only",
+  "detail": "one build host; C5 is a property of this build, and C1 is untouched",
+  "evaluator_faults": [],
+  "evidence_type": "measured_on_a_built_initramfs",
+  "faults": [
+    "quarantine_not_persistent"
+  ],
+  "verdict": "pass"
+}

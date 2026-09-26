@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+case "${1:-start}" in
+  prereqs) exit 0 ;;
+  start)
+    mkdir -p /run/azazel
+    printf '%s\n' 'az-disable-volume-assembly' >> /run/azazel/quarantine-hook-order
+    printf 'AZAZEL_C5_HOOK=%s\n' 'az-disable-volume-assembly' >/dev/console 2>/dev/null || true
+    ;;
+esac

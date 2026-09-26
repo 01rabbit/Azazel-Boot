@@ -671,7 +671,6 @@ def test_the_offered_options_are_exactly_these_and_no_others(state: PersistenceS
         PersistenceState.OPEN: (),
         PersistenceState.QUARANTINED: (
             "continue without persistence, at CORE",
-            "export the quarantined volume for offline examination, unmodified",
             "rewrite the medium from a verified image on another machine",
         ),
         PersistenceState.FENCED: ("reboot; the session cannot continue",),

@@ -98,6 +98,12 @@ a bare `super().__init__`.
 
 ## The snapshot (D6)
 
+Recovery key acquisition is routed through the `BootSession` that owns the
+commissioning attempt budget. Recreating a workflow does not create a new
+budget; the same boot's remaining prompt allowance applies, and an exhausted or
+ephemeral session refuses before prompting. This does not unquarantine the
+volume or change a mode already fixed as persistent.
+
 Inside the single existing encrypted persistence partition. **No second
 partition**, so [ADR-0008](adr/0008-debian-13-live-baseline.md) D4.1's
 three-partition layout is not revised — and `check_layout` still refuses a
@@ -628,14 +634,12 @@ four that precede them:
    all three inputs and compared none of them. The comparison itself
    (`self._quarantine.session_id != self._session_id`) puts the quarantine's
    own field on the left, where its `__ne__` decides first; a round-fourteen
-   review built a genuine `Quarantine`, through its own public constructor,
-   whose `session_id` was a `str` subclass answering `False` to every
-   `!=`, and reached `COMMITTED` over a quarantine whose honest sitting was
-   someone else's. `RecoveryWorkflow.__init__` now pins `quarantine.
-   session_id` to exactly `str` where it takes the quarantine, the same way
-   it pins `binding`'s two fields — `Quarantine.__init__` itself performs no
-   such validation and is tracked separately, out of this file's ownership,
-   as [#51](https://github.com/01rabbit/Azazel-Boot/issues/51).
+   review built a genuine `Quarantine` with a `str`-subclass sitting id and
+   reached `COMMITTED` for a different sitting. Both the `Quarantine`
+   constructor ([#51](https://github.com/01rabbit/Azazel-Boot/issues/51)) and
+   `RecoveryWorkflow.__init__` now pin the relevant identity fields to exact
+   `str` values. These checks guard public construction and do not claim to
+   resist arbitrary mutation or introspection inside the process.
 4. **host binding** (`HOST_BINDING`) — `commissioning.binding_applies`,
    re-derived from the supplied inventory rather than re-compared against a
    stored answer, now named for what it answers. `binding_applies` decides it

@@ -42,10 +42,12 @@ This is a statement of fact about the checks, not a revision of what D9 and D10
 decide.
 
 **Four further facts about this record, none of them a revision.** (1) D8
-gate 2 says "under D2's limit"; `azazel_boot.snapshot` imports neither
-`BootSession` nor `ATTEMPT_BUDGET`, so a recovery's key acquisition is **not**
-under that limit as shipped, and a review drove 26 prompts in one boot with 21
-of them after persistence had been sealed. (2) D8 gate 1 names ADR-0008
+gate 2 says "under D2's limit". The earlier implementation imported neither
+`BootSession` nor `ATTEMPT_BUDGET`, and a review drove 26 prompts in one boot
+with 21 of them after persistence had been sealed. The current local change
+routes those prompts through a supplied `BootSession`; its tests and canonical
+local unit suite pass, but canonical boot-owner integration remains unverified
+and the changes are unmerged. (2) D8 gate 1 names ADR-0008
 D4.1.1's key-protected media binding; the workflow takes the caller's
 **report** of it as a `bool`, because a `BindingKey` inside a decision module
 is the secret arriving where `session_mode` decided it must not. (3) D4 says
@@ -146,10 +148,41 @@ is the documented portable passphrase, not a softer failure mode.
 
 ## D2 — Five attempts per boot, then sealed for that boot
 
-A passphrase may be attempted at most **five times in the current boot**. After
-the fifth failure persistence is **sealed for that boot** and the session is
-**fixed in ephemeral mode**. There is no sixth attempt, no unlock later in the
-same boot, and no operator override.
+A passphrase may be attempted at most **five times in the current boot**, across
+commissioning and explicit D8 recovery. After the fifth failed commissioning
+attempt, persistence is **sealed for that boot** and the session is **fixed in
+ephemeral mode**. There is no sixth attempt and no operator override. An
+ephemeral session cannot unlock persistence later; an already-persistent
+session may only enter D8 recovery under its remaining shared budget, and that
+workflow does not unquarantine the volume or grant ordinary use.
+
+The same five-attempt budget is owned by `BootSession` and applies to key
+acquisition during commissioning and recovery; creating another recovery
+workflow does not reset it. `OPENED` consumes an attempt just as `REJECTED`
+does, while `INTERRUPTED` and unavailable acquisition channels do not represent
+a passphrase attempt. Provider exceptions and invalid return values are charged
+conservatively because they do not establish that no verification ran. If
+commissioning has already fixed the mode as
+persistent and recovery later consumes the fifth attempt, the mode does not
+change (D3): the volume remains quarantined, further prompts stop for this boot,
+and ordinary persistence operations remain refused (D4). The fifth failure
+fixes ephemeral mode only when commissioning has not already fixed a mode.
+The owner admits one commissioning/recovery acquisition at a time and refuses
+overlapping requests, so concurrent workflows cannot consume the same
+remaining attempt twice. The prototype runtime entrypoint is
+`azazel_boot.runtime`, installed and started once by
+`azazel-boot-runtime.service` after the initramfs handoff. It requires the
+initramfs marker to match the kernel boot id, constructs one `Quarantine` and
+one `BootSession` in that long-lived process, and records device policy
+decisions as block devices appear. This composition is ephemeral-only:
+because the image has no safe persistence/key path or operator acquisition,
+it fixes the mode to ephemeral before any acquisition path is exposed.
+`BootSession.select_ephemeral()` does not prompt, consume an attempt, or permit
+a later mode change. A missing or foreign initramfs handoff prevents runtime
+startup. The service and its Python decisions are prototype composition
+evidence, not process-tamper resistance or proof of kernel I/O enforcement;
+initramfs/udev read-only enforcement remains separately measured under
+ADR-0002 C5.
 
 **The attempt count, the passphrase and any user identifier never reach a
 journal, an audit entry or a screen.** The screen says persistence is sealed
@@ -201,6 +234,13 @@ decides is what happens next: quarantine, not repair, not partial use.
 Leaving quarantine is possible **only** through the explicit recovery workflow
 in D8.
 
+The quarantine state applies to every device and every action evaluated by
+the same `Quarantine` instance for this sitting, including the boot medium.
+This is deliberately fail-closed: read, write, export, repair, filesystem
+mount, and activation paths cannot escape through a different device or action
+name. The versioned quarantine policy records this as `quarantine.v2`. A
+separate offline-examination export is not implemented and is not an exception.
+
 ## D5 — No record-level continuation, and nothing is called erased
 
 Records written before the suspected fault are **not used in ordinary
@@ -214,9 +254,10 @@ The distinction matters for what an operator may later tell someone about what
 happened to the evidence.
 
 Whether a quarantined volume can be examined offline elsewhere is outside this
-record: [quarantine policy](../quarantine-policy.md) already offers export of a
-quarantined volume **unmodified** for offline examination, and that path is
-unchanged.
+record. Boot currently implements no such export: the quarantine policy blocks
+ordinary export alongside read and write after the volume is quarantined. A
+future examination procedure needs its own reviewed boundary and may not reuse
+an ordinary export approval.
 
 ## D6 — The migration snapshot lives inside the existing partition
 

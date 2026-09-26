@@ -1,0 +1,212 @@
+#!/bin/sh
+set -eu
+
+case "${1:-start}" in
+  prereqs) exit 0 ;;
+  start)
+    helper=/usr/libexec/azazel-quarantine-block
+    rules=/etc/udev/rules.d/00-azazel-quarantine.rules
+    [ -x "$helper" ] || { echo 'C5 quarantine helper is missing' >/dev/console 2>/dev/null || true; exit 1; }
+    [ -s "$rules" ] || { echo 'C5 persistent udev rule is missing' >/dev/console 2>/dev/null || true; exit 1; }
+
+    fixture_mode=no
+    hotplug_mode=no
+    for argument in $(cat /proc/cmdline); do
+      case "$argument" in
+        azazel.c5_fixture=QEMU-regular-file) fixture_mode=yes ;;
+        azazel.c5_fixture_hotplug=QEMU-regular-file) hotplug_mode=yes ;;
+      esac
+    done
+
+    mkdir -p /run/azazel
+    device_count=0
+    if [ "$fixture_mode" = yes ]; then
+      # Quarantine all currently registered storage before the fixture-only
+      # driver load. The newly registered fixture is quarantined immediately
+      # after it appears, before the fixture write probe below.
+      for sys_device in /sys/class/block/*; do
+        [ -e "$sys_device" ] || continue
+        name=${sys_device##*/}
+        case "$name" in ram*|zram*) continue ;; esac
+        "$helper" "$name" initramfs || exit 1
+        device_count=$((device_count + 1))
+      done
+
+      : > /run/azazel/host-storage-quarantined
+      initial_session_id=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || printf NOT_OBSERVED)
+      printf 'schema=azazel-c5-handoff-v1\nsession_id=%s\ndevice_scope=currently-registered\nphase=initial_quarantine\n' \
+        "$initial_session_id" > /run/azazel/host-storage-quarantined
+      printf 'AZAZEL_C5_INITRAMFS_QUARANTINE state=active devices=%s udev_rule=present scope=currently-registered-before-fixture-driver\n' \
+        "$device_count" >/dev/console 2>/dev/null || true
+      printf 'AZAZEL_C5_PHASE phase=initial_quarantine status=PASS stage=initramfs marker=/run/azazel/host-storage-quarantined devices=%s fixture_device=not-yet-registered\n' \
+        "$device_count" >/dev/console 2>/dev/null || true
+
+      # Test-only driver activation: the runner attached /dev/vda to a newly
+      # created regular file and declares that fact in its machine report.
+      /sbin/modprobe virtio_blk
+      attempts=0
+      while [ ! -b /dev/vda ]; do
+        attempts=$((attempts + 1))
+        [ "$attempts" -lt 50 ] || {
+          echo 'C5 regular-file fixture did not appear' >/dev/console 2>/dev/null || true
+          exit 1
+        }
+        sleep 0.1
+      done
+
+      "$helper" vda initramfs || exit 1
+      fixture_device_sysfs_ro=$(cat /sys/class/block/vda/ro 2>/dev/null || printf NOT_OBSERVED)
+      fixture_device_blockdev_ro=$(/usr/sbin/blockdev --getro /dev/vda 2>/dev/null || printf NOT_OBSERVED)
+      if [ "$fixture_device_sysfs_ro" = 1 ] && [ "$fixture_device_blockdev_ro" = 1 ]; then
+        fixture_device_status=PASS
+      else
+        fixture_device_status=FAIL
+      fi
+      printf 'AZAZEL_C5_PHASE phase=fixture_device_quarantined status=%s stage=initramfs target=/dev/vda helper_invoked=PASS sysfs_ro=%s blockdev_ro=%s\n' \
+        "$fixture_device_status" "$fixture_device_sysfs_ro" "$fixture_device_blockdev_ro" \
+        >/dev/console 2>/dev/null || true
+      [ "$fixture_device_status" = PASS ] || exit 1
+      device_count=$((device_count + 1))
+    else
+      # Production path: quarantine the devices already present, without
+      # loading fixture-specific drivers or changing its discovery policy.
+      for sys_device in /sys/class/block/*; do
+        [ -e "$sys_device" ] || continue
+        name=${sys_device##*/}
+        case "$name" in ram*|zram*) continue ;; esac
+        "$helper" "$name" initramfs || exit 1
+        device_count=$((device_count + 1))
+      done
+      : > /run/azazel/host-storage-quarantined
+      initial_session_id=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || printf NOT_OBSERVED)
+      printf 'schema=azazel-c5-handoff-v1\nsession_id=%s\ndevice_scope=currently-registered\nphase=initial_quarantine\n' \
+        "$initial_session_id" > /run/azazel/host-storage-quarantined
+      printf 'AZAZEL_C5_INITRAMFS_QUARANTINE state=active devices=%s udev_rule=present\n' \
+        "$device_count" >/dev/console 2>/dev/null || true
+    fi
+
+    if [ "$fixture_mode" = yes ]; then
+      guest_uptime=$(cut -d' ' -f1 /proc/uptime 2>/dev/null || printf NOT_OBSERVED)
+      blockdev_ro=$(/usr/sbin/blockdev --getro /dev/vda)
+      sysfs_ro=$(cat /sys/class/block/vda/ro)
+      cat /proc/sys/kernel/random/boot_id > /run/azazel/c5-session-id
+      printf 'schema=azazel-c5-handoff-v1\nsession_id=%s\nphase=device_quarantined\ndevice=/dev/vda\n' \
+        "$(cat /run/azazel/c5-session-id)" > /run/azazel/host-storage-quarantined
+      printf 'AZAZEL_C5_PHASE phase=discovered status=PASS stage=initramfs target=/dev/vda sysfs_ro=%s blockdev_ro=%s guest_uptime_seconds=%s\n' \
+        "$sysfs_ro" "$blockdev_ro" "$guest_uptime" >/dev/console 2>/dev/null || true
+      if [ "$sysfs_ro" = 1 ] && [ "$blockdev_ro" = 1 ]; then
+        ro_status=PASS
+      else
+        ro_status=FAIL
+      fi
+      printf 'AZAZEL_C5_PHASE phase=quarantine status=%s stage=initramfs target=/dev/vda sysfs_ro=%s blockdev_ro=%s guest_uptime_seconds=%s\n' \
+        "$ro_status" "$sysfs_ro" "$blockdev_ro" "$guest_uptime" \
+        >/dev/console 2>/dev/null || true
+      trace=/run/azazel/c5-initramfs-strace.log
+      target_trace=/run/azazel/c5-initramfs-target.strace
+      probe_exit=NOT_OBSERVED
+      target_write_count=0
+      target_syscall_count=0
+      devno=$(cat /sys/class/block/vda/dev 2>/dev/null || true)
+      if [ -n "$devno" ] && awk -v wanted="$devno" '$3 == wanted { found=1 } END { exit found ? 0 : 1 }' /proc/self/mountinfo; then
+        mount_state=mounted
+      else
+        mount_state=not_mounted
+      fi
+      probe_sysfs_ro=$(cat /sys/class/block/vda/ro 2>/dev/null || printf NOT_OBSERVED)
+      probe_blockdev_ro=$(/usr/sbin/blockdev --getro /dev/vda 2>/dev/null || printf NOT_OBSERVED)
+      if [ "$mount_state" = not_mounted ] && [ "$probe_sysfs_ro" = 1 ] && \
+         [ "$probe_blockdev_ro" = 1 ] && [ -x /usr/bin/strace ]; then
+        dmesg > /run/azazel/c5-initramfs-kernel-before.log 2>/dev/null || :
+        capture_kernel_lines() {
+          kernel_log_path=$1
+          kernel_phase=$2
+          kernel_uptime=${3:-$(cut -d' ' -f1 /proc/uptime 2>/dev/null || printf NOT_OBSERVED)}
+          grep -E 'vda|virtio|read.only|readonly|I/O error|block' "$kernel_log_path" 2>/dev/null \
+            | tail -n 40 > /run/azazel/c5-initramfs-kernel-relevant.log || :
+          while IFS= read -r kernel_line || [ -n "$kernel_line" ]; do
+            printf 'AZAZEL_C5_KERNEL_LOG stage=initramfs target=/dev/vda phase=%s guest_uptime_seconds=%s raw=%s\n' \
+              "$kernel_phase" "$kernel_uptime" "$kernel_line" >/dev/console 2>/dev/null || true
+          done < /run/azazel/c5-initramfs-kernel-relevant.log
+        }
+        capture_kernel_lines /run/azazel/c5-initramfs-kernel-before.log before_probe
+        if /usr/bin/strace -qq -yy -e trace=openat,open,dup2,dup3,close,write,pwrite64,writev,pwritev -o "$trace" \
+          /bin/sh -c 'exec 3>/dev/vda && printf "\\000" >&3' \
+          azazel-c5-write-probe 2>/run/azazel/c5-initramfs-dd.stderr; then
+          probe_result=write_succeeded
+          probe_exit=0
+        else
+          probe_exit=$?
+        fi
+        # Snapshot the kernel immediately after the probe, but defer emitting
+        # its records until after the syscall records so serial evidence follows
+        # the measured event order.
+        dmesg > /run/azazel/c5-initramfs-kernel-after.log 2>/dev/null || :
+        after_probe_uptime=$(cut -d' ' -f1 /proc/uptime 2>/dev/null || printf NOT_OBSERVED)
+        awk '
+          /^(open|openat)\(/ && index($0, "\"/dev/vda\"") { print; next }
+          /^(write|pwrite64|writev|pwritev)\(/ && \
+            (index($0, "</dev/vda>") || index($0, "</dev/vda<block ")) { print }
+        ' "$trace" > "$target_trace"
+        probe_status=NOT_OBSERVED
+        probe_result=target_write_not_observed
+        while IFS= read -r syscall_event || [ -n "$syscall_event" ]; do
+          [ -n "$syscall_event" ] || continue
+          syscall_name=${syscall_event%%(*}
+          syscall_tail=${syscall_event##* = }
+          syscall_value=${syscall_tail%% *}
+          target_syscall_count=$((target_syscall_count + 1))
+          case "$syscall_name" in write|pwrite64|writev|pwritev) target_write_count=$((target_write_count + 1));; esac
+          syscall_errno=NOT_OBSERVED
+          if [ "$syscall_value" = -1 ]; then
+            syscall_errno=$(printf '%s\n' "$syscall_tail" | awk '{print $2}')
+            [ -n "$syscall_errno" ] || syscall_errno=NOT_OBSERVED
+          fi
+          if [ "$syscall_value" = -1 ] && [ "$syscall_errno" != NOT_OBSERVED ]; then
+            syscall_errno_name=$(printf '%s\n' "$syscall_tail" | awk '{print $2}')
+            case "$syscall_name:$syscall_errno_name" in
+              open:EROFS|openat:EROFS)
+                probe_status=PASS; probe_result=target_open_denied_by_read_only_policy ;;
+              write:EROFS|write:EPERM|pwrite64:EROFS|pwrite64:EPERM|writev:EROFS|writev:EPERM|pwritev:EROFS|pwritev:EPERM)
+                probe_status=PASS; probe_result=target_write_denied_by_read_only_policy ;;
+              open:*|openat:*) probe_status=FAIL; probe_result=target_open_failed_causality_unproven ;;
+              *) probe_status=FAIL; probe_result=target_write_failed_causality_unproven ;;
+            esac
+          elif [ "$syscall_name" != open ] && [ "$syscall_name" != openat ] && [ "$syscall_value" != '?' ]; then
+            probe_status=FAIL
+            probe_result=target_write_succeeded
+          fi
+          printf 'AZAZEL_C5_WRITE_SYSCALL stage=initramfs target=/dev/vda %s\n' \
+            "$syscall_event" >/dev/console 2>/dev/null || true
+      done < "$target_trace"
+      capture_kernel_lines /run/azazel/c5-initramfs-kernel-after.log after_probe "$after_probe_uptime"
+      [ "$target_syscall_count" -gt 0 ] || {
+        probe_status=NOT_OBSERVED
+        probe_result=target_write_or_open_not_observed
+      }
+      else
+        : > "$trace"
+        probe_result=guard_not_satisfied
+        probe_status=NOT_OBSERVED
+      fi
+      probe_sysfs_ro_after=$(cat /sys/class/block/vda/ro 2>/dev/null || printf NOT_OBSERVED)
+      probe_blockdev_ro_after=$(/usr/sbin/blockdev --getro /dev/vda 2>/dev/null || printf NOT_OBSERVED)
+      probe_devno=$(cat /sys/class/block/vda/dev 2>/dev/null || true)
+      if [ -n "$probe_devno" ] && awk -v wanted="$probe_devno" '$3 == wanted { found=1 } END { exit found ? 0 : 1 }' /proc/self/mountinfo; then
+        probe_mount_after=mounted
+      else
+        probe_mount_after=not_mounted
+      fi
+      printf 'AZAZEL_C5_PHASE phase=target_write status=%s stage=initramfs target=/dev/vda syscall_scope=explicit-fixture syscall_count=%s target_syscall_count=%s probe_exit=%s sysfs_ro_before=%s blockdev_ro_before=%s sysfs_ro_after=%s blockdev_ro_after=%s mount_state=%s mount_state_after=%s observation=%s guest_uptime_seconds=%s\n' \
+        "$probe_status" "$target_write_count" "$target_syscall_count" "$probe_exit" \
+        "$probe_sysfs_ro" "$probe_blockdev_ro" "$probe_sysfs_ro_after" \
+        "$probe_blockdev_ro_after" "$mount_state" "$probe_mount_after" "$probe_result" \
+        "$(cut -d' ' -f1 /proc/uptime 2>/dev/null || printf NOT_OBSERVED)" \
+        >/dev/console 2>/dev/null || true
+    fi
+
+    if [ "$hotplug_mode" = yes ]; then
+      : > /run/azazel/c5-hotplug-fixture-enabled
+    fi
+    ;;
+esac

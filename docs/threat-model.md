@@ -1,8 +1,9 @@
 # Threat Model
 
-Status: **target contract**. Nothing in this document is implemented or
-verified. No hardware test, no boot test, and no host-storage test has ever
-been run. Every mitigation below states an intended design, not an observed
+Status: **target contract**. The R11 prototype has QEMU-only initramfs and
+regular-file fixture evidence; no hardware, firmware, physical host-storage,
+or no-host-write property has been verified. Unless a section explicitly cites
+that evidence, mitigations below state intended design, not an observed
 property.
 
 Related: [Architecture](architecture.md) · [Compatibility](compatibility.md) ·

@@ -1,13 +1,15 @@
 {
   "schema": "azazel-boot/quarantine-policy@1",
   "version": "quarantine.v1",
-  "comment": "The host-storage quarantine, as a versioned artifact. A build pins this by its version; the payload carries that version in its artifact record. Nothing here has ever run.",
+  "comment": "The host-storage quarantine, as a versioned artifact. A build pins this by its version; the payload carries that version in its artifact record. az-start-udev starts udev after the first quarantine hook; az-handoff-udev is the explicitly pinned final init-bottom hook. Nothing here has ever run.",
   "early_hooks": [
     "az-quarantine-block-devices",
     "az-disable-resume",
     "az-disable-automount",
     "az-disable-volume-assembly",
-    "az-mark-boot-medium"
+    "az-mark-boot-medium",
+    "az-start-udev",
+    "az-handoff-udev"
   ],
   "actions": [
     "read",

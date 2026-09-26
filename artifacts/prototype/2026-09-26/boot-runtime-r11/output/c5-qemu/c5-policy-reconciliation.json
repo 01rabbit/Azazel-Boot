@@ -1,0 +1,24 @@
+{
+  "build_input_manifest_sha256": "e36d116ccec45750b84c7d2765094128b8a724e45b91273172cf96a2ae8eeb9a",
+  "build_result_sha256": "3bb23a56365c76413ab4de40ce49fce306a62d0f74236198d4ed850320480179",
+  "build_time_policy_faults": [
+    {
+      "code": "quarantine_not_persistent",
+      "detail": "persistence into userspace is false or unverified; a quarantine re-established in userspace starts after udev, LVM and the filesystem drivers have already written"
+    }
+  ],
+  "build_time_policy_verdict": "fail",
+  "c5_manifest_sha256": "efec2f0b2f5161b700f21f094d3e80200a37421301481b3e05350bede05b549d",
+  "c5_result_sha256": "f9a7afd7f19635c08fd39c162ba5bfe24381cc5cbe276cf219704253396a6c04",
+  "cold_boot_block_device_attached": true,
+  "effective_policy_verdict": "pass",
+  "evidence_type": "qemu_regular_file_backing_only",
+  "hardware_verified": false,
+  "policy_basis": "the pinned Boot image policy had only the exact quarantine_not_persistent pending-runtime fault; QEMU measured the same manifest-bound payload's handoff and read-only state through userspace",
+  "production_builder_selected": false,
+  "qemu_result_sha256": "37522da8fe831bd648809ce77c7278d343fe5060f7558d670e72cf552a70a41d",
+  "runtime_evidence_required": true,
+  "runtime_persistence_verdict": "PASS",
+  "schema": "azazel-payload/c5-policy-reconciliation@1",
+  "secure_boot_verified": false
+}

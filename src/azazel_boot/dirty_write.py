@@ -25,10 +25,10 @@ refuses it, so the unit is the volume.
 
 Boot **will not use** the volume in ordinary operation. It does not say the
 volume was wiped, cleared, erased, destroyed, shredded or deleted, because it
-was not — the data is on the medium, and
-[quarantine policy](../../docs/quarantine-policy.md) §4 still offers an export
-of it **unmodified** for offline examination. The distinction is what an
-operator may later truthfully tell someone about the evidence, so
+was not — the data remains on the medium. Boot currently refuses ordinary
+export of a quarantined volume; a separate offline-examination export procedure
+has not been implemented. The distinction is what an operator may later
+truthfully tell someone about the evidence, so
 `tests/unit/test_dirty_write.py` scans every rendered string for those six
 words.
 

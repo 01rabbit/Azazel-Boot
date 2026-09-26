@@ -1,0 +1,16 @@
+#!/bin/sh
+set -e
+
+PREREQ=""
+prereqs() { echo "$PREREQ"; }
+case "${1:-}" in
+  prereqs) prereqs; exit 0 ;;
+esac
+
+. /usr/share/initramfs-tools/hook-functions
+copy_exec /usr/libexec/azazel-quarantine-block /usr/libexec/azazel-quarantine-block
+copy_exec /usr/sbin/blockdev /usr/sbin
+copy_exec /bin/dd /bin
+copy_exec /usr/bin/strace /usr/bin/strace
+copy_file script /usr/libexec/azazel-quarantine-first /scripts/azazel-quarantine-first
+copy_file config /etc/udev/rules.d/00-azazel-quarantine.rules

@@ -1,12 +1,13 @@
 # Release, SBOM, and Provenance Policy
 
-Status: **target contract**. Azazel-Boot has **never produced a release**. There
-is no tag, no artifact, no signing key, no SBOM, no provenance attestation, and
-no operational code to release. This document states what a release will have to
-carry when one becomes possible, and marks what nobody has decided yet.
+Status: **target contract**. Azazel-Boot has **never produced a release**. An
+unsigned R11 prototype ISO exists, but there is no release tag, signing key,
+SBOM, provenance attestation, or production image. This document states what a
+release will have to carry when one becomes possible, and marks what nobody has
+decided yet.
 
-Nothing below may be cited as evidence that Azazel-Boot has been built, signed,
-attested, or released. None of those things has happened.
+Nothing below may be cited as evidence that Azazel-Boot has been signed,
+attested, or released. The prototype is expressly non-release evidence.
 
 Related: [ADR index](adr/README.md) · [ADR-0002 image builder](adr/0002-image-builder.md) ·
 [Builder and writer contract](builder-writer-contract.md) ·
@@ -21,7 +22,7 @@ Related: [ADR index](adr/README.md) · [ADR-0002 image builder](adr/0002-image-b
 | Thing | State |
 | --- | --- |
 | A released artifact of any kind | **none, ever** |
-| Boot media, signed or unsigned | **none** — no image has been built; no builder is selected ([ADR-0002](adr/0002-image-builder.md)) |
+| Boot media, signed or unsigned | **one unsigned R11 prototype ISO exists locally**; it is not a release artifact, and no production builder is selected ([R11 evidence](prototype-evidence-boot-runtime-r11.md), [ADR-0002](adr/0002-image-builder.md)) |
 | A signing key, root, or delegated role for Boot | **none** |
 | An SBOM for anything in this repository | **none** |
 | A provenance attestation | **none** |

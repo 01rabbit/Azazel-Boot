@@ -34,7 +34,7 @@ from azazel_boot.quarantine import (
     verify_initramfs,
 )
 
-POLICY_FILE = Path(__file__).resolve().parents[2] / "config" / "quarantine" / "policy-v1.json"
+POLICY_FILE = Path(__file__).resolve().parents[2] / "config" / "quarantine" / "policy-v2.json"
 
 
 @pytest.fixture(scope="module")
@@ -58,6 +58,32 @@ def manifest(**overrides) -> InitramfsManifest:
 
 
 def test_the_pinned_policy_file_and_the_module_agree_on_every_field(policy: dict) -> None:
+    # The JSON object is a versioned build input, not an illustrative sample.
+    # Keep its complete top-level schema closed: adding a field without a test
+    # must fail rather than silently create an unverified policy dimension.
+    assert set(policy) == {
+        "schema",
+        "version",
+        "comment",
+        "early_hooks",
+        "actions",
+        "blocked_while_volume_quarantined",
+        "never_allowed_anywhere",
+        "unblockable_by_approval",
+        "excluded_from_the_zero_write_claim",
+        "initramfs_requirements",
+    }
+    assert policy["schema"] == "azazel-boot/quarantine-policy@1"
+    assert policy["comment"] == (
+        "The host-storage quarantine, as a versioned artifact. A build pins this by its "
+        "version; the payload carries that version in its artifact record. az-start-udev starts "
+        "udev after the first quarantine hook; az-handoff-udev is the explicitly pinned final "
+        "init-bottom hook. Nothing here has ever run."
+    )
+    assert policy["blocked_while_volume_quarantined"] == (
+        "every action above on every device in the same Quarantine, including read "
+        "and the boot medium"
+    )
     assert policy["version"] == POLICY_VERSION
     assert tuple(policy["early_hooks"]) == EARLY_HOOKS
     assert tuple(policy["excluded_from_the_zero_write_claim"]) == (
@@ -153,6 +179,56 @@ def test_a_refusal_outside_the_severity_order_does_not_crash_the_gate() -> None:
 
 def test_the_quarantine_hook_is_the_first_one() -> None:
     assert EARLY_HOOKS[0] == "az-quarantine-block-devices"
+    assert EARLY_HOOKS[-2:] == ("az-start-udev", "az-handoff-udev")
+
+
+def test_udev_start_is_explicitly_pinned_after_all_quarantine_policy_hooks() -> None:
+    """udev must not start until the first hook has established quarantine."""
+
+    assert EARLY_HOOKS == (
+        "az-quarantine-block-devices",
+        "az-disable-resume",
+        "az-disable-automount",
+        "az-disable-volume-assembly",
+        "az-mark-boot-medium",
+        "az-start-udev",
+        "az-handoff-udev",
+    )
+    verify_initramfs(manifest())
+
+
+def test_omitting_the_final_pinned_udev_handoff_hook_is_refused() -> None:
+    hooks = EARLY_HOOKS[:-1]
+    with pytest.raises(ImageRefused) as refused:
+        verify_initramfs(manifest(hooks=hooks))
+    assert Refusal.HOOK_MISSING in {fault[0] for fault in refused.value.faults}
+
+
+def test_omitting_the_pinned_udev_start_hook_is_refused() -> None:
+    hooks = (*EARLY_HOOKS[:-2], EARLY_HOOKS[-1])
+    with pytest.raises(ImageRefused) as refused:
+        verify_initramfs(manifest(hooks=hooks))
+    assert Refusal.HOOK_MISSING in {fault[0] for fault in refused.value.faults}
+
+
+def test_starting_udev_before_the_remaining_policy_hooks_is_refused() -> None:
+    reordered = (*EARLY_HOOKS[:1], EARLY_HOOKS[-1], *EARLY_HOOKS[1:-1])
+    with pytest.raises(ImageRefused) as refused:
+        verify_initramfs(manifest(hooks=reordered))
+    assert Refusal.HOOK_ORDER_CHANGED in {fault[0] for fault in refused.value.faults}
+
+
+def test_udev_handoff_before_udev_start_is_refused() -> None:
+    reordered = (*EARLY_HOOKS[:-2], EARLY_HOOKS[-1], EARLY_HOOKS[-2])
+    with pytest.raises(ImageRefused) as refused:
+        verify_initramfs(manifest(hooks=reordered))
+    assert Refusal.HOOK_ORDER_CHANGED in {fault[0] for fault in refused.value.faults}
+
+
+def test_an_unknown_hook_after_the_pinned_udev_handoff_hook_is_refused() -> None:
+    with pytest.raises(ImageRefused) as refused:
+        verify_initramfs(manifest(hooks=(*EARLY_HOOKS, "vendor-extra-hook")))
+    assert Refusal.UNPINNED_HOOK in {fault[0] for fault in refused.value.faults}
 
 
 # --- what a built image must satisfy ---------------------------------------
@@ -160,6 +236,12 @@ def test_the_quarantine_hook_is_the_first_one() -> None:
 
 def test_a_conforming_manifest_is_accepted() -> None:
     verify_initramfs(manifest())
+
+
+def test_missing_persistence_evidence_is_refused() -> None:
+    with pytest.raises(ImageRefused) as refused:
+        verify_initramfs(manifest(quarantine_persists_into_userspace=None))
+    assert refused.value.refusal is Refusal.QUARANTINE_NOT_PERSISTENT
 
 
 def test_a_manifest_that_runs_something_before_the_quarantine_is_refused() -> None:

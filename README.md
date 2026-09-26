@@ -12,16 +12,16 @@ No codename is assigned to `AZ-03`. Use the formal name
 
 ## Status
 
-**This repository is target contract, with decision logic implemented for several phase-1 modules and hardware-unverified throughout.** No image has been built, no medium written, no device quarantined and no volume created, opened or restored — the table below states each module's status precisely rather than as a single blanket claim.
+**This repository now contains an unsigned, hardware-unverified runtime prototype as well as its target contract.** The current R11 Debian 13 / amd64 ISO reached userspace in QEMU with a regular-file block-device fixture, and the manifest-bound QEMU evidence reconciled the static quarantine policy result. The initial pre-registration scan still observed no devices; no physical medium was written, laptop booted, or real volume created, opened or restored. R11 was a remaster of a prior measured ISO after the clean live-build attempt stalled; it is not a clean rebuild or production-builder decision. See the [R11 evidence](docs/prototype-evidence-boot-runtime-r11.md).
 
 | Fact | State |
 | --- | --- |
-| Platform baseline | **Debian 13 Live / amd64**, fixed at program level ([§15 OF-07](https://github.com/01rabbit/Azazel/blob/main/docs/roadmaps/nexus-boot-program-plan.md), adopted in [ADR-0008](docs/adr/0008-debian-13-live-baseline.md)). **Nothing has been built from it** — no image, no medium, no boot |
-| Product code, installer, image builder | **does not exist**. No build tool is selected either: `live-build` is the builder the baseline is written against, and [ADR-0002](docs/adr/0002-image-builder.md)'s selection conditions are untouched |
-| Image builder and media writer | **contract, plus decision logic** — [ADR-0009](docs/adr/0009-builder-and-writer-contract.md) and [the builder/writer contract](docs/builder-writer-contract.md) fix six verbs (`build` and `write` never merged), the artifact record, the isolated build host, and a writer that names a target by per-session code rather than by device path. `azazel_boot.artifact`, `azazel_boot.media` and `azazel_boot.writer` decide whether an artifact may be written and which devices may be offered — they **open no device** ([docs/media-writer.md](docs/media-writer.md)). No medium has been written, and no builder is selected |
-| Python package and CLI | a **non-operational status scaffold only** — `azazel-boot status` reports what this repository is and does nothing else |
-| Host-storage quarantine | **decision logic and a pinned policy** (`azazel_boot.quarantine`, `config/quarantine/policy-v1.json`): classifies devices on appearance by stable identity, refuses every ordinary read, write and mount against anything that is not the medium (an operator-approved export is the one exception, and it never targets host storage), and checks a built image's initramfs manifest against the hook contract ([docs/quarantine-policy.md](docs/quarantine-policy.md), [ADR-0008 D4.1](docs/adr/0008-debian-13-live-baseline.md)). **Nothing has run**: no initramfs has been built, no device has been quarantined, and the no-host-write property is **not verified**. See [#28](https://github.com/01rabbit/Azazel-Boot/issues/28) |
-| Reproducibility evaluation | **tooling, no measurement** (`tools/builder/`, `config/builder/`): resolves a symbolic profile into a closed set of pinned inputs, runs a candidate builder as **non-releasable evidence**, and compares two records without ever selecting anything ([docs/build-environment.md](docs/build-environment.md)). The shipped configuration pins nothing, so every profile refuses; no build has been run and no digest has been measured. See [#26](https://github.com/01rabbit/Azazel-Boot/issues/26) |
+| Platform baseline | **Debian 13 Live / amd64**, fixed at program level ([§15 OF-07](https://github.com/01rabbit/Azazel/blob/main/docs/roadmaps/nexus-boot-program-plan.md), adopted in [ADR-0008](docs/adr/0008-debian-13-live-baseline.md)). An unsigned prototype ISO exists and boots to userspace in QEMU; production image, medium write, and hardware boot are unverified |
+| Runtime and image pipeline | Prototype runtime composition, initramfs quarantine hooks, and live-build construction/remaster tooling exist. `live-build` is evaluation-only; no production builder is selected and no released image exists |
+| Image builder and media writer | **contract, plus decision logic** — [ADR-0009](docs/adr/0009-builder-and-writer-contract.md) and [the builder/writer contract](docs/builder-writer-contract.md) fix seven verbs (including `prepare-host`; `build` and `write` never merge), the artifact record, the isolated build host, and a writer that names a target by per-session code rather than by device path. `azazel_boot.artifact`, `azazel_boot.media` and `azazel_boot.writer` decide whether an artifact may be written and which devices may be offered — they **open no device** ([docs/media-writer.md](docs/media-writer.md)). No medium has been written, and no builder is selected |
+| Python package and CLI | Host-side `azazel-boot status` remains a non-operational status scaffold. The image has a separate prototype systemd/runtime composition; neither is a released operational product |
+| Host-storage quarantine | **Decision logic, pinned `quarantine.v2` policy, and measured prototype hooks.** R11 static inspection and effective policy reconciliation passed for QEMU regular-file fixtures; the pre-registration scan observed zero devices, and no real device or host-storage no-write property has been verified ([C5 evidence](docs/c5-evaluation.md), [quarantine policy](docs/quarantine-policy.md)). See [#28](https://github.com/01rabbit/Azazel-Boot/issues/28) |
+| Reproducibility evaluation | Historical A/B runs exist, including byte-identical r10 results on two clean VMs on one host. R11 is a parent-ISO remaster, not a clean A/B build; current-source independent reproducibility is unverified. Production builder selection remains open. See [#26](https://github.com/01rabbit/Azazel-Boot/issues/26) |
 | Knowledge Lite admission | **decision logic only** (`azazel_boot.lite_cache`): decides whether an artifact may be read and what happens when it may not. It reads no artifact and writes no cache; verification is injected and **the default admits nothing**, because Knowledge signs with Ed25519 and this bootstrap is standard-library only. See [#16](https://github.com/01rabbit/Azazel-Boot/issues/16) |
 | Interface inventory and commissioning | **parsing and refusal logic only** (`azazel_boot.inventory`, `azazel_boot.commissioning`): reads a sysfs tree, builds composite identities, and reports what an operator would have to settle. It reads no real NIC — the permanent MAC needs an ioctl, which the bootstrap may not perform — assigns no role, and confirms nothing. See [#9](https://github.com/01rabbit/Azazel-Boot/issues/9) |
 | Persistence, session mode and dirty-write | **decision logic only** (`azazel_boot.persistence`, `azazel_boot.session_mode`, `azazel_boot.dirty_write`): decides whether persistence may open, fixes the session mode once at commissioning under a five-attempt budget, and stops the **whole volume** on a suspected torn write ([ADR-0010](docs/adr/0010-persistence-key-and-migration.md) D1–D5, [persistence](docs/persistence.md), [session mode](docs/session-mode.md)). No volume has been created, opened, sealed, torn or quarantined; no passphrase has been attempted. See [#40](https://github.com/01rabbit/Azazel-Boot/issues/40), [#41](https://github.com/01rabbit/Azazel-Boot/issues/41) |
@@ -30,12 +30,12 @@ No codename is assigned to `AZ-03`. Use the formal name
 | Architecture decision records | see [docs/adr/](docs/adr/) |
 | CI | documentation links, plus static checks, unit tests and a dependency-lock check on the declared Python matrix |
 | Laptop compatibility list | **empty** — see [compatibility](docs/compatibility.md) |
-| Hardware, boot, or no-host-write evidence | **none** |
+| Hardware, firmware, Secure Boot, writer, or no-host-write evidence | **none**; QEMU fixture evidence is not hardware evidence |
 
 Read [the series status vocabulary](https://github.com/01rabbit/Azazel/blob/main/docs/roadmaps/third-party-development-handoff.md)
-§7 and apply it strictly. Everything in `docs/` describes intended behavior.
-None of it is an operational claim, and none of it may be cited as evidence
-that Azazel-Boot does anything at all today.
+§7 and apply it strictly. Prototype artifacts and their evidence do not imply
+release readiness, hardware support, firmware-path verification, or permission
+to write physical media.
 
 ## The defining safety property
 
@@ -110,6 +110,8 @@ that is the correct outcome.
 - [Snapshot and recovery](docs/snapshot-and-recovery.md) — why a recovery ends
   in a **candidate** rather than a usable volume, and why the quarantine does
   not lift when one succeeds.
+- [Issue map and evidence policy](docs/issue-map.md) — implementation, HIL, and
+  live-issue reconciliation boundary.
 - [Session mode](docs/session-mode.md) — persistent or ephemeral, decided once
   per boot; why no key means ephemeral with no exception, why five attempts is
   not brute-force resistance, and why the passphrase never reaches the module

@@ -1,7 +1,7 @@
 """`azazel-boot-builder doctor` — can this host drive a P2 evaluation, and what is missing.
 
 [ADR-0009](../../docs/adr/0009-builder-and-writer-contract.md) D1 fixes what
-this verb is: it "reports whether this host can drive the other five verbs, and
+this verb is: it "reports whether this host can drive the other six verbs, and
 what is missing. Changes nothing."
 
 **Read-only is a property of the type, not of the code.** This module is given

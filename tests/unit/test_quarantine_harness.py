@@ -20,6 +20,7 @@ updater; and every check could be skipped through the generated constructor.
 from __future__ import annotations
 
 import inspect
+import sys
 
 import pytest
 
@@ -346,6 +347,106 @@ def test_the_running_state_is_not_a_constructor_argument() -> None:
             boot_medium_identity=MEDIUM_ID,
             _approval=approval(HOST_NVME.identity),
         )
+
+
+def test_the_constructor_refuses_str_subclasses_for_authority_fields() -> None:
+    """A hostile equality implementation must not enter an authority check."""
+
+    class AlwaysEqual(str):
+        def __eq__(self, other: object) -> bool:
+            return True
+
+        def __ne__(self, other: object) -> bool:
+            return False
+
+    for session_id, medium_identity in (
+        (AlwaysEqual("foreign-session"), MEDIUM_ID),
+        ("s1", AlwaysEqual("foreign-medium")),
+    ):
+        with pytest.raises(TypeError, match="exact str"):
+            Quarantine(session_id=session_id, boot_medium_identity=medium_identity)
+
+
+def test_device_and_approval_refuse_str_subclasses_before_authority_checks() -> None:
+    """Equality overrides must not promote a device or reuse a session."""
+
+    class AlwaysEqual(str):
+        __hash__ = str.__hash__
+
+        def __eq__(self, other: object) -> bool:
+            return True
+
+        def __ne__(self, other: object) -> bool:
+            return False
+
+    with pytest.raises(TypeError, match="device identity must be an exact str"):
+        Device(AlwaysEqual("foreign-host"), DeviceClass.HOST_STORAGE)
+    with pytest.raises(TypeError, match="approval session_id must be an exact str"):
+        ExportApproval(
+            session_id=AlwaysEqual("foreign-session"),
+            target_identity=HOST_NVME.identity,
+            reason="incident record",
+            confirmed=True,
+        )
+    with pytest.raises(TypeError, match="approval target_identity must be an exact str"):
+        ExportApproval(
+            session_id="s1",
+            target_identity=AlwaysEqual("foreign-host"),
+            reason="incident record",
+            confirmed=True,
+        )
+    with pytest.raises(TypeError, match="approval reason must be an exact str"):
+        ExportApproval(
+            session_id="s1",
+            target_identity=HOST_NVME.identity,
+            reason=AlwaysEqual("forged reason"),
+            confirmed=True,
+        )
+    with pytest.raises(TypeError, match="approval confirmed must be an exact bool"):
+        ExportApproval(
+            session_id="s1",
+            target_identity=HOST_NVME.identity,
+            reason="incident record",
+            confirmed=1,  # type: ignore[arg-type]
+        )
+
+
+def test_subclasses_cannot_bypass_device_or_approval_validation() -> None:
+    """A subclass can replace ``__post_init__``, so the API boundary pins it."""
+
+    class AlwaysEqual(str):
+        __hash__ = str.__hash__
+
+        def __eq__(self, other: object) -> bool:
+            return True
+
+        def __ne__(self, other: object) -> bool:
+            return False
+
+    class EvilDevice(Device):
+        def __post_init__(self) -> None:
+            pass
+
+    class EvilApproval(ExportApproval):
+        def __post_init__(self) -> None:
+            pass
+
+    quarantine = a_quarantine()
+    forged_device = EvilDevice(AlwaysEqual("foreign-host"), DeviceClass.HOST_STORAGE)
+    with pytest.raises(TypeError, match="exact Device"):
+        quarantine.observe(forged_device)
+    with pytest.raises(TypeError, match="exact Device"):
+        quarantine.evaluate(forged_device, Action.WRITABLE_MOUNT)
+
+    quarantine.observe(HOST_NVME)
+    forged_approval = EvilApproval(
+        session_id=AlwaysEqual("foreign-session"),
+        target_identity=HOST_NVME.identity,
+        reason="incident record",
+        confirmed=True,
+    )
+    with pytest.raises(TypeError, match="exact ExportApproval"):
+        quarantine.approve_export(forged_approval)
 
 
 def test_the_medium_identity_is_read_only() -> None:
@@ -718,6 +819,34 @@ def test_a_quarantine_refuses_to_be_serialised_or_copied() -> None:
 
     assert MEDIUM_ID not in repr(quarantine)
     assert HOST_NVME.identity not in repr(quarantine)
+
+
+@pytest.mark.skipif(
+    sys.version_info < (3, 11), reason="object.__getstate__ was added in Python 3.11"
+)
+def test_base_getstate_is_process_introspection_not_a_serialisation_guarantee() -> None:
+    """The documented base-method bypass is real, while the override refuses."""
+
+    quarantine = a_quarantine()
+    quarantine.observe(HOST_NVME)
+    with pytest.raises(TypeError):
+        quarantine.__getstate__()
+    # CPython adds ``__slotnames__`` lazily while extracting a slot state's
+    # base representation.  It is an interpreter cache, not a change made by
+    # Quarantine, but the snapshot suite deliberately detects *all* class
+    # mutations.  Restore the pre-test class dictionary after proving the
+    # documented bypass so this test does not leak interpreter state into it.
+    absent = object()
+    prior_slotnames = vars(Quarantine).get("__slotnames__", absent)
+    try:
+        raw_state = object.__getstate__(quarantine)
+        assert MEDIUM_ID in repr(raw_state)
+        assert HOST_NVME.identity in repr(raw_state)
+    finally:
+        if prior_slotnames is absent:
+            delattr(Quarantine, "__slotnames__")
+        else:
+            Quarantine.__slotnames__ = prior_slotnames
 
 
 def test_the_fence_withdraws_a_standing_export_approval() -> None:

@@ -26,7 +26,7 @@ ADR = DOCS / "adr" / "0009-builder-and-writer-contract.md"
 
 #: The operator surface, in the order the contract lists it. `build` and
 #: `write` appear once each and never together; see `test_no_verb_both_builds_and_writes`.
-VERBS = ("doctor", "build", "verify", "list-media", "write", "inspect")
+VERBS = ("doctor", "prepare-host", "build", "verify", "list-media", "write", "inspect")
 
 #: One field per fact that is gone if the build does not record it. Revised with
 #: ADR-0009 D2: the manifests and the SBOM are sidecars inside the artifact, so
@@ -127,7 +127,7 @@ def adr() -> str:
 
 @pytest.fixture(scope="module")
 def verb_rows(contract: str) -> list[list[str]]:
-    return _rows(_section(contract, "2. The six verbs"))
+    return _rows(_section(contract, "2. The seven verbs"))
 
 
 def _verb(cell: str) -> str:

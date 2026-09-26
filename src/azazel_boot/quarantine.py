@@ -48,8 +48,13 @@ refuse "a second claimant once the medium is bound"; it did not, and could not �
 nothing distinguishes a second device with one identity from the same device
 appearing twice. The claim is gone rather than dressed up.
 
-Nothing here has run. No initramfs has been built, no device has been
-quarantined, and no write has been prevented on any machine.
+No real-device enforcement has been run. A separate bytepin-next11-r10
+prototype built an initramfs with the predecessor `quarantine.v1`; its static
+hook/content inspection passed, while the userspace-persistence gate remained
+unverified and its bounded QEMU fixture did not observe a device before kernel
+registration. That image did not include this `quarantine.v2` policy or wire
+this Python `Quarantine` decision object to device operations. No real device
+has been quarantined and no hardware write has been prevented.
 """
 
 from __future__ import annotations
@@ -60,20 +65,24 @@ from enum import Enum
 from .refusals import Refused
 
 #: The version an artifact record carries as `quarantine_policy_version`.
-#: `config/quarantine/policy-v1.json` is the pinned artifact a build consumes;
+#: `config/quarantine/policy-v2.json` is the pinned artifact a build consumes;
 #: `tests/unit/test_quarantine_policy.py` asserts every field of it against the
 #: values below, so the two cannot drift.
-POLICY_VERSION = "quarantine.v1"
+POLICY_VERSION = "quarantine.v2"
 
-#: The order the early hooks must run in. The first establishes the quarantine;
-#: everything that could touch a disk comes after it, and a manifest that
-#: reorders them is refused rather than warned about.
+#: The exact order of pinned initramfs hooks across init-top and init-bottom.
+#: The first establishes quarantine; `az-start-udev` starts udev only after
+#: that first hook has run, and the final `az-handoff-udev` performs the pinned
+#: init-bottom handoff. A manifest that omits, adds, or reorders hooks is
+#: refused rather than warned about.
 EARLY_HOOKS = (
     "az-quarantine-block-devices",
     "az-disable-resume",
     "az-disable-automount",
     "az-disable-volume-assembly",
     "az-mark-boot-medium",
+    "az-start-udev",
+    "az-handoff-udev",
 )
 
 
@@ -186,6 +195,7 @@ class Refusal(Enum):
     NO_REASON_GIVEN = "no_reason_given"
     NOT_CONFIRMED = "not_confirmed"
     SESSION_FENCED = "session_fenced"
+    VOLUME_QUARANTINED = "volume_quarantined"
     BOOT_MEDIUM_IS_NOT_AN_EXPORT_TARGET = "boot_medium_is_not_an_export_target"
 
 
@@ -256,7 +266,7 @@ class InitramfsManifest:
     hooks: tuple[str, ...]
     resume_enabled: bool
     automount_rules: tuple[str, ...]
-    quarantine_persists_into_userspace: bool
+    quarantine_persists_into_userspace: bool | None
 
 
 @dataclass(frozen=True)
@@ -271,6 +281,22 @@ class Device:
 
     identity: str
     device_class: DeviceClass
+
+    def __post_init__(self) -> None:
+        """Reject values whose comparison behaviour can replace the policy.
+
+        ``identity`` crosses the quarantine boundary and is compared with the
+        boot-medium identity.  Accepting a ``str`` subclass here would let an
+        input replace that comparison with a forged ``__eq__`` method.
+        ``device_class`` is deliberately untrusted *data*, but it must still
+        be one of this module's exact enum values before it reaches the audit
+        mismatch check.
+        """
+
+        if type(self.identity) is not str:
+            raise TypeError("device identity must be an exact str value")
+        if type(self.device_class) is not DeviceClass:
+            raise TypeError("device class must be an exact DeviceClass value")
 
     def __repr__(self) -> str:
         """Redacted, for the reason `Quarantine.__repr__` is.
@@ -296,6 +322,18 @@ class ExportApproval:
     target_identity: str
     reason: str
     confirmed: bool
+
+    def __post_init__(self) -> None:
+        """Keep approval fields from replacing their authority comparisons."""
+
+        if type(self.session_id) is not str:
+            raise TypeError("approval session_id must be an exact str value")
+        if type(self.target_identity) is not str:
+            raise TypeError("approval target_identity must be an exact str value")
+        if type(self.reason) is not str:
+            raise TypeError("approval reason must be an exact str value")
+        if type(self.confirmed) is not bool:
+            raise TypeError("approval confirmed must be an exact bool value")
 
 
 @dataclass(frozen=True)
@@ -370,6 +408,13 @@ class Quarantine:
     )
 
     def __init__(self, session_id: str, boot_medium_identity: str) -> None:
+        # Identity and session comparisons are authority checks. A ``str``
+        # subclass can replace ``__eq__``/``__ne__`` and make a foreign sitting
+        # or medium compare equal, so accepting ``isinstance(value, str)`` is
+        # not sufficient here. This is a careless-caller guard, not a process
+        # security boundary; see the class docstring.
+        if type(session_id) is not str or type(boot_medium_identity) is not str:
+            raise TypeError("session_id and boot_medium_identity must be exact str values")
         object.__setattr__(self, "_sealed", False)
         self._session_id = session_id
         self._boot_medium_identity = boot_medium_identity
@@ -466,13 +511,13 @@ class Quarantine:
         )
 
     def __getstate__(self):
-        """The other door `__reduce__` closes, which was left open.
+        """Refuse normal pickle/copy state extraction.
 
-        `object.__getstate__` is a public method on every object since 3.11:
-        it hands back the instance state — `__dict__`, or the slots by name —
-        with no pickling involved, so `value.__getstate__()` read every field
-        the redacting `__repr__` above exists to keep out of a log. Refusing
-        one serialisation door and not the other is refusing neither.
+        This and :meth:`__reduce__` stop the ordinary pickle and copy protocols;
+        they do not hide fields from code already executing in this process.
+        In particular, direct ``object.__getstate__(value)`` bypasses this
+        override, as do ordinary attribute reads. The class is explicitly not
+        a capability boundary.
         """
 
         raise TypeError("a Quarantine does not hand back its fields")
@@ -495,6 +540,7 @@ class Quarantine:
         anything but can destroy the session's only writable volume.
         """
 
+        self._require_device(device)
         previous = self._dispositions.get(device.identity)
         is_medium = device.identity == self._boot_medium_identity
         disposition = Disposition.BOOT_MEDIUM if is_medium else Disposition.QUARANTINED
@@ -557,6 +603,7 @@ class Quarantine:
         return self._dispositions.get(self._boot_medium_identity) is Disposition.BOOT_MEDIUM
 
     def disposition(self, device: Device) -> Disposition | None:
+        self._require_device(device)
         return self._dispositions.get(device.identity)
 
     def fence(self) -> None:
@@ -627,13 +674,13 @@ class Quarantine:
 
         One-way, like the fence, and for the same reason.
 
-        **It deliberately does not withdraw a standing export approval, and
-        does not fence.** [Quarantine policy](../../docs/quarantine-policy.md)
-        §4 offers an export of a quarantined volume **unmodified** for offline
-        examination, and ADR-0010 D5 leaves that path open on purpose: the
-        volume is untrustworthy, which is the reason to copy it out, not a
-        reason to refuse. Reusing `_fenced` here would have closed it — the
-        obvious-looking implementation, and the wrong one.
+        **It does not fence, but it withdraws a standing export approval.**
+        ADR-0010 D4 says the whole volume refuses ordinary read, write and
+        export after a suspected torn write. Keeping an approval while
+        ``evaluate`` blocks it would leave the audit asserting an authority
+        that cannot be exercised. Boot currently implements no separate
+        offline-examination export mechanism; that future procedure must not
+        be smuggled through this ordinary export path.
         """
 
         already = self._volume_quarantined
@@ -643,6 +690,14 @@ class Quarantine:
             "volume_quarantined",
             "already_quarantined" if already else "quarantined",
         )
+        if self._approval is not None:
+            target = self._approval.target_identity
+            self._approval = None
+            self._record(
+                self._dispositions.get(target),
+                "export_approval",
+                "withdrawn_on_volume_quarantine",
+            )
 
     @property
     def volume_is_quarantined(self) -> bool:
@@ -656,6 +711,7 @@ class Quarantine:
         It replaces any previous approval; it never accumulates.
         """
 
+        self._require_approval(approval)
         try:
             self._check_approval(approval)
         except ExportRefused as refused:
@@ -690,6 +746,9 @@ class Quarantine:
     def evaluate(self, device: Device, action: Action) -> Verdict:
         """Decide one attempt, and record the decision in the audit."""
 
+        self._require_device(device)
+        if type(action) is not Action:
+            raise TypeError("action must be an exact Action value")
         verdict = self._decide(device, action)
         self._record(self._dispositions.get(device.identity), action.value, verdict.value)
         return verdict
@@ -698,6 +757,20 @@ class Quarantine:
         return tuple(self._audit)
 
     # -- internals ---------------------------------------------------------
+
+    @staticmethod
+    def _require_device(device: Device) -> None:
+        """Admit only the closed, validated device value at this boundary."""
+
+        if type(device) is not Device:
+            raise TypeError("device must be an exact Device value")
+
+    @staticmethod
+    def _require_approval(approval: ExportApproval) -> None:
+        """Admit only the closed, validated approval value at this boundary."""
+
+        if type(approval) is not ExportApproval:
+            raise TypeError("approval must be an exact ExportApproval value")
 
     def _check_approval(self, approval: ExportApproval) -> None:
         """Structural faults first, operator-input faults second.
@@ -738,6 +811,11 @@ class Quarantine:
                 Refusal.SESSION_FENCED,
                 "the medium was removed; the session cannot grant an authority "
                 "it can no longer exercise",
+            )
+        if self._volume_quarantined:
+            raise ExportRefused(
+                Refusal.VOLUME_QUARANTINED,
+                "a suspected torn write quarantined the volume; Boot grants no export",
             )
         if approval.session_id != self._session_id:
             raise ExportRefused(
@@ -819,6 +897,12 @@ class Quarantine:
             # question is "may this happen **now**", and now is after the
             # removal.
             return Verdict.BLOCKED
+        if self._volume_quarantined:
+            # ADR-0010 D4 is a volume state, not a persistence-session hint.
+            # It applies before the boot-medium shortcut so no ordinary read,
+            # write, mount, repair, or export remains available. There is no
+            # implemented offline-examination export path to exempt here.
+            return Verdict.BLOCKED
         disposition = self._dispositions.get(device.identity)
         if disposition is None:
             # An unobserved device is not a device with no rule. It is the one
@@ -837,10 +921,11 @@ def verify_initramfs(manifest: InitramfsManifest) -> None:
     """Check a manifest against the contract, or refuse the image.
 
     This is `ADR-0002` C5 written as a condition an image either meets or does
-    not. It is **not yet** a check performed on a built initramfs: nothing in
-    this repository produces a manifest from one, so today a builder satisfies
-    it by filling in a structure. Producing the manifest from the real artifact
-    is what turns this from a contract into evidence.
+    not. This function validates a supplied manifest; it is not the artifact
+    inspector. The bytepin-next11-r10 prototype has a separate measured
+    manifest, but it pins `quarantine.v1` and leaves userspace persistence
+    unverified. C5 requires evidence that quarantine persists into userspace;
+    a missing measurement does not satisfy the gate.
     """
 
     faults: list[tuple[Refusal, str]] = []
@@ -855,12 +940,13 @@ def verify_initramfs(manifest: InitramfsManifest) -> None:
         )
     if manifest.automount_rules:
         faults.append((Refusal.AUTOMOUNT_RULE_PRESENT, str(manifest.automount_rules)))
-    if not manifest.quarantine_persists_into_userspace:
+    if manifest.quarantine_persists_into_userspace is not True:
         faults.append(
             (
                 Refusal.QUARANTINE_NOT_PERSISTENT,
-                "a quarantine re-established in userspace starts after udev, LVM "
-                "and the filesystem drivers have already written",
+                "persistence into userspace is false or unverified; a quarantine "
+                "re-established in userspace starts after udev, LVM and the "
+                "filesystem drivers have already written",
             )
         )
 

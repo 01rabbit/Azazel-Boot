@@ -1,0 +1,9 @@
+[Unit]
+Description=Azazel C5 hotplug write-probe evidence for udev event %i
+After=systemd-udevd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/azazel-quarantine-block %i probe probe
+StandardOutput=journal+console
+StandardError=journal+console

@@ -67,7 +67,7 @@ COMPONENTS: tuple[Component, ...] = (
         "initramfs_quarantine",
         "absent",
         "decision logic and a pinned policy artifact exist "
-        "(azazel_boot.quarantine, config/quarantine/policy-v1.json); the "
+        "(azazel_boot.quarantine, config/quarantine/policy-v2.json); the "
         "no-host-write property is unverified on hardware",
     ),
     Component(

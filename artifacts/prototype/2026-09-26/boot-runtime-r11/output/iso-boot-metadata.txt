@@ -1,0 +1,54 @@
+xorriso 1.5.6 : RockRidge filesystem manipulator, libburnia project.
+
+xorriso : NOTE : ISO image bears MBR with  -boot_image any partition_offset=16
+xorriso : NOTE : Loading ISO image tree from LBA 0
+xorriso : UPDATE :     305 nodes read in 1 seconds
+xorriso : NOTE : Detected El-Torito boot information which currently is set to be discarded
+Drive current: -indev '/tmp/r11-remaster/final.iso'
+Media current: stdio file, overwriteable
+Media status : is written , is appendable
+Boot record  : El Torito , MBR isohybrid cyl-align-on GPT APM
+Media summary: 1 session, 193488 data blocks,  378m data, 1564m free
+Volume id    : 'Debian trixie 20260914-12:00'
+System area options: 0x00000102
+System area summary: MBR isohybrid cyl-align-on GPT APM
+ISO image size/512 : 774144
+Partition offset   : 16
+MBR heads per cyl  : 64
+MBR secs per head  : 32
+MBR partition table:   N Status  Type        Start       Blocks
+MBR partition      :   1   0x80  0x00           64       774080
+MBR partition      :   2   0x00  0xef          576         1280
+MBR partition path :   2  /boot/grub/efi.img
+GPT                :   N  Info
+GPT disk GUID      :      b6e2420206035643a071a98f722cf963
+GPT entry array    :      12  208  overlapping
+GPT lba range      :      64  774090  774143
+GPT partition name :   1  490053004f00480079006200720069006400
+GPT partname local :   1  ISOHybrid
+GPT partition GUID :   1  b6e2420206035643a070a98f722cf963
+GPT type GUID      :   1  a2a0d0ebe5b9334487c068b6b72699c7
+GPT partition flags:   1  0x1000000000000001
+GPT start and size :   1  64  774024
+GPT partition name :   2  490053004f004800790062007200690064003100
+GPT partname local :   2  ISOHybrid1
+GPT partition GUID :   2  b6e2420206035643a073a98f722cf963
+GPT type GUID      :   2  a2a0d0ebe5b9334487c068b6b72699c7
+GPT partition flags:   2  0x1000000000000001
+GPT start and size :   2  576  1280
+GPT partition path :   2  /boot/grub/efi.img
+APM                :   N  Info
+APM block size     :      2048
+APM gap fillers    :      0
+APM partition name :   1  EFI
+APM partition type :   1  Apple_HFS
+APM start and size :   1  144  320
+APM partition path :   1  /boot/grub/efi.img
+El Torito catalog  : 143  1
+El Torito cat path : /isolinux/boot.cat
+El Torito images   :   N  Pltf  B   Emul  Ld_seg  Hdpt  Ldsiz         LBA
+El Torito boot img :   1  BIOS  y   none  0x0000  0x00      4         464
+El Torito boot img :   2  UEFI  y   none  0x0000  0x00   1280         144
+El Torito img path :   1  /isolinux/isolinux.bin
+El Torito img opts :   1  boot-info-table isohybrid-suitable
+El Torito img path :   2  /boot/grub/efi.img
