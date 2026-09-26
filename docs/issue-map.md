@@ -1,9 +1,9 @@
 # Issue map and evidence policy
 
-This map records the issue inventory checked on 2026-09-24, with the measured
-prototype update below. It is not a closure record: reconcile the live issue,
-review, merged commit, and default-branch CI before closing or relabelling any
-row.
+This map records the live inventory checked on 2026-09-26 (**24 open issues**),
+with the measured prototype update below. It is not a closure record: reconcile
+the live issue, review, merged commit, and default-branch CI before closing or
+relabelling any row.
 
 ## Prototype measurement update (2026-09-25)
 
