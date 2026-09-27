@@ -10,6 +10,7 @@ from types import MappingProxyType, SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "src"))
 SPEC = importlib.util.spec_from_file_location("poc_attestation", ROOT / "tools/poc_attestation.py")
 assert SPEC and SPEC.loader
 module = importlib.util.module_from_spec(SPEC)
@@ -101,6 +102,37 @@ class AttestationTests(unittest.TestCase):
             module.sign_prototype(test_record(image_version="release-1"), self.private)
         with self.assertRaises(module.AttestationRefused):
             module.sign_prototype(test_record(compatibility_claim="hardware_verified"), self.private)
+
+    def test_poc_adapter_is_separate_from_default_product_verifier(self):
+        from azazel_boot.artifact import VerificationOutcome, parse, verify
+
+        record = parse(dict(test_record().fields))
+        self.assertFalse(record.is_signed)
+        payload_digest = record.unsigned_payload_digest
+        signature = module.sign_prototype(record, self.private)
+
+        # Product behavior remains fail-closed for an unsigned ArtifactRecord.
+        self.assertEqual(verify(record, payload_digest).outcome, VerificationOutcome.DIGEST_ONLY)
+
+        # The explicit local adapter can produce only a subject-bound writer
+        # value after checking the detached attestation and external key pin.
+        verified = module.verification_for_poc_writer(
+            record,
+            payload_digest,
+            signature,
+            public_key_path=self.public,
+            expected_public_key_fingerprint=self.pin,
+        )
+        self.assertTrue(verified.may_be_written)
+        self.assertTrue(verified.is_about(record, payload_digest))
+        rejected = module.verification_for_poc_writer(
+            record,
+            payload_digest,
+            signature,
+            public_key_path=self.public,
+            expected_public_key_fingerprint="sha256:" + "0" * 64,
+        )
+        self.assertFalse(rejected.may_be_written)
 
 
 if __name__ == "__main__":
