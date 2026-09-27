@@ -23,6 +23,7 @@ import ast
 import dataclasses
 import hashlib
 import json
+import stat
 from pathlib import Path
 
 import pytest
@@ -39,6 +40,7 @@ from azazel_boot.writer import (
     Refusal,
     TargetConfirmed,
     WriteAuthority,
+    WriteMayHaveStarted,
     WriteOutcome,
     WriteRefused,
     inspect,
@@ -104,8 +106,16 @@ class Device:
         self.path.write_bytes(b"")
         self._truncate_to = truncate_to
 
-    def write(self, identity: DeviceIdentity, artifact_path: str) -> int:
+    def write(
+        self,
+        identity: DeviceIdentity,
+        artifact_path: str,
+        expected_digest: str,
+        expected_bytes: int,
+    ) -> int:
         data = Path(artifact_path).read_bytes()
+        assert "sha256:" + hashlib.sha256(data).hexdigest() == expected_digest
+        assert len(data) == expected_bytes
         if self._truncate_to is not None:
             data = data[: self._truncate_to]
         self.path.write_bytes(data)
@@ -196,6 +206,93 @@ def test_a_verified_signed_artifact_is_written_and_read_back(
     )
     assert result.outcome is WriteOutcome.WRITTEN_AND_VERIFIED
     assert result.medium_is_valid is True
+    assert device.written == PAYLOAD
+
+
+def test_regular_file_only_end_to_end_write_dry_run(
+    tmp_path: Path, artifact: Path
+) -> None:
+    """Exercise listing through read-back using only a temporary regular file."""
+
+    authority, code = an_authority()
+    device = Device(tmp_path / "synthetic-removable-media.img")
+    assert stat.S_ISREG(device.path.stat().st_mode)
+    rec = record()
+    planned = authority.plan(
+        target_code=code,
+        record=rec,
+        verification=verified_for(rec, artifact),
+        artifact_path=str(artifact),
+    )
+    target_confirmed = authority.confirm_target(planned, code)
+    authorised = authority.confirm_destruction(
+        target_confirmed, DESTRUCTIVE_CONFIRMATION
+    )
+
+    result = authority.execute(
+        authorised,
+        probe=Probe(),
+        unmounter=Unmounter(),
+        raw_writer=device,
+        reader=device,
+    )
+    inspected = inspect(
+        candidate=candidate(),
+        record=rec,
+        length=len(PAYLOAD),
+        reader=device,
+    )
+
+    assert result.medium_is_valid
+    assert inspected.matches
+    assert device.written == PAYLOAD
+
+
+def test_interrupted_write_is_reported_as_unknown_not_as_refused(
+    tmp_path: Path, artifact: Path
+) -> None:
+    """A failed write may already have changed the selected medium."""
+
+    class InterruptedWriter:
+        def write(self, identity, artifact_path, expected_digest, expected_bytes):
+            Path(tmp_path / "device").write_bytes(PAYLOAD[:5])
+            raise WriteMayHaveStarted("synthetic interruption", bytes_attempted=5)
+
+    authority, code = an_authority()
+    device = Device(tmp_path / "device")
+    result = authority.execute(
+        authorised_write(artifact, authority, code),
+        probe=Probe(),
+        unmounter=Unmounter(),
+        raw_writer=InterruptedWriter(),
+        reader=device,
+    )
+
+    assert result.outcome is WriteOutcome.WRITE_STATE_UNKNOWN
+    assert result.medium_is_valid is False
+    assert result.written_bytes == 5
+    assert device.written == PAYLOAD[:5]
+
+
+def test_readback_failure_after_writer_returns_is_also_unknown(
+    tmp_path: Path, artifact: Path
+) -> None:
+    class BrokenReader:
+        def digest(self, identity, length):
+            raise OSError("synthetic read-back failure")
+
+    authority, code = an_authority()
+    device = Device(tmp_path / "device")
+    result = authority.execute(
+        authorised_write(artifact, authority, code),
+        probe=Probe(),
+        unmounter=Unmounter(),
+        raw_writer=device,
+        reader=BrokenReader(),
+    )
+
+    assert result.outcome is WriteOutcome.WRITE_STATE_UNKNOWN
+    assert result.medium_is_valid is False
     assert device.written == PAYLOAD
 
 
@@ -358,6 +455,68 @@ def test_an_artifact_that_did_not_pass_verify_is_refused_before_anything_else(
             verification=verification,
             artifact_path=str(artifact),
         )
+    assert refused.value.refusal is Refusal.ARTIFACT_NOT_VERIFIED
+
+
+def test_an_unsigned_r11_style_record_is_refused_before_target_claim(
+    artifact: Path,
+) -> None:
+    """Digest agreement on an unsigned prototype is not writer authorization."""
+
+    signed_shaped = record()
+    unsigned = parse(
+        {
+            **signed_shaped.fields,
+            "signature": None,
+            "signed_artifact_digest": None,
+        }
+    )
+    measured_digest, _ = Files().measure(str(artifact))
+    verification = verify_artifact(unsigned, measured_digest)
+    authority, code = an_authority()
+
+    with pytest.raises(WriteRefused) as refused:
+        authority.plan(
+            target_code=code,
+            record=unsigned,
+            verification=verification,
+            artifact_path=str(artifact),
+        )
+
+    assert verification.outcome is VerificationOutcome.DIGEST_ONLY
+    assert refused.value.refusal is Refusal.ARTIFACT_NOT_VERIFIED
+    # Refusal occurs before consuming the same-session target code.
+    assert authority._session.claim(code).identity == IDENTITY  # noqa: SLF001
+
+
+def test_a_forged_signature_verified_result_cannot_authorise_an_unsigned_record(
+    artifact: Path,
+) -> None:
+    signed_shaped = record()
+    unsigned = parse(
+        {
+            **signed_shaped.fields,
+            "signature": None,
+            "signed_artifact_digest": None,
+        }
+    )
+    measured_digest, _ = Files().measure(str(artifact))
+    forged = Verification(
+        VerificationOutcome.SIGNATURE_VERIFIED,
+        measured_digest,
+        unsigned.fingerprint(),
+    )
+    assert not forged.may_be_written
+
+    authority, code = an_authority()
+    with pytest.raises(WriteRefused) as refused:
+        authority.plan(
+            target_code=code,
+            record=unsigned,
+            verification=forged,
+            artifact_path=str(artifact),
+        )
+
     assert refused.value.refusal is Refusal.ARTIFACT_NOT_VERIFIED
 
 
@@ -646,6 +805,44 @@ def test_a_plan_whose_record_changed_after_verification_is_refused(
     assert device.written == b""
 
 
+def test_an_artifact_changed_after_confirmation_is_refused_before_device_write(
+    tmp_path: Path, artifact: Path
+) -> None:
+    authority, code = an_authority()
+    authorised = authorised_write(artifact, authority, code)
+    artifact.write_bytes(OTHER)
+    device = Device(tmp_path / "device")
+
+    with pytest.raises(WriteRefused) as refused:
+        authority.execute(
+            authorised,
+            probe=Probe(),
+            unmounter=Unmounter(),
+            raw_writer=device,
+            reader=device,
+        )
+
+    assert refused.value.refusal is Refusal.ARTIFACT_CHANGED_AFTER_PLAN
+    assert device.written == b""
+
+
+def test_artifact_larger_than_target_is_refused_before_any_confirmation(
+    artifact: Path,
+) -> None:
+    authority, code = an_authority(candidate(capacity_bytes=1))
+    rec = record()
+
+    with pytest.raises(WriteRefused) as refused:
+        authority.plan(
+            target_code=code,
+            record=rec,
+            verification=verified_for(rec, artifact),
+            artifact_path=str(artifact),
+        )
+
+    assert refused.value.refusal is Refusal.ARTIFACT_EXCEEDS_TARGET_CAPACITY
+
+
 def test_a_mistyped_code_costs_the_retype_and_nothing_else(artifact: Path) -> None:
     """Retiring the plan on a typo sent the operator back through `list-media`.
 
@@ -838,6 +1035,7 @@ def test_there_is_no_outcome_meaning_written_but_unchecked() -> None:
     assert {member.value for member in WriteOutcome} == {
         "written_and_verified",
         "verification_failed",
+        "write_state_unknown",
     }
 
 

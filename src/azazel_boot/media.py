@@ -36,6 +36,7 @@ code an operator had noted for a blank stick resolved to an evidence disk.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, fields
 from enum import Enum
 
@@ -43,7 +44,10 @@ from .refusals import Refused
 
 #: Fields the screen may carry: enough for a human to identify the object in
 #: front of them, and nothing that identifies it to anyone else.
-SCREEN_FIELDS = ("capacity_bytes", "bus_path", "physical_label")
+# Hardware location, labels, and stable identifiers remain backend-only. The
+# operator-facing list contains capacity plus the ephemeral target code, not a
+# serial, bus address, model, label, or kernel node.
+SCREEN_FIELDS = ("capacity_bytes",)
 
 
 class Eligibility(Enum):
@@ -89,6 +93,11 @@ class DeviceIdentity:
     __slots__ = ("_value",)
 
     def __init__(self, value: str) -> None:
+        if (
+            not isinstance(value, str)
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,255}", value) is None
+        ):
+            raise ValueError("device identity must be an opaque token, not a path")
         object.__setattr__(self, "_value", value)
 
     def __setattr__(self, name: str, value: object) -> None:
@@ -190,8 +199,8 @@ class MediaCandidate:
 
         return (
             f"MediaCandidate(identity=<redacted>, capacity_bytes={self.capacity_bytes}, "
-            f"partition_table={self.partition_table!r}, bus_path={self.bus_path!r}, "
-            f"physical_label={self.physical_label!r}, removable={self.removable}, "
+            f"partition_table={self.partition_table!r}, bus_path=<redacted>, "
+            f"physical_label=<redacted>, removable={self.removable}, "
             f"mounted={self.mounted}, internal={self.internal}, "
             f"holds_running_root={self.holds_running_root})"
         )

@@ -16,10 +16,11 @@ up unable to write, rather than writing something nobody checked. This mirrors
 
 **A digest match is not enough to write.** `VerificationOutcome` distinguishes a
 record whose digest matched from one whose signature also verified, and only the
-second may reach `write`. A digest proves the file matches its own record; it
-proves nothing about who produced that record. Since no signing exists yet, the
-practical consequence is that **nothing can currently be written**, which is the
-accurate state of this product rather than a limitation to work around.
+second may reach `write`, and only when that result object was issued by
+`verify()`. A digest proves the file matches its own record; it proves nothing
+about who produced that record. Since no signing exists yet, the practical
+consequence is that **nothing can currently be written**, which is the accurate
+state of this product rather than a limitation to work around.
 
 An evaluation build (`ADR-0009` D8.1) is not a release artifact and does not
 parse as one: its record has no signature field to verify, so it cannot become
@@ -31,6 +32,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import weakref
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
@@ -178,7 +180,7 @@ class ArtifactRecord:
         return isinstance(signature, str) and bool(signature.strip())
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class Verification:
     """The answer, the reason when the answer is no, and **what it is about**.
 
@@ -196,12 +198,24 @@ class Verification:
     #: A digest over every field of the record that was checked.
     record_fingerprint: str
     refusal: VerificationRefusal | None = None
+    #: Visible classification. Ordinary `verify()` results use the default;
+    #: the only alternate writer scope is the reviewed R11 PoC profile.
+    profile: str = "release-signature"
 
     @property
     def may_be_written(self) -> bool:
-        """Only a verified signature authorises a destructive write."""
+        """Only a verifier-issued signature result authorises a destructive write.
 
-        return self.outcome is VerificationOutcome.SIGNATURE_VERIFIED
+        Checking the public outcome alone would let a caller construct a
+        `signature_verified` value without ever calling a signature verifier.
+        Successful results are registered by object identity; constructed or
+        copied values are not authority.
+        """
+
+        return (
+            self.outcome is VerificationOutcome.SIGNATURE_VERIFIED
+            and self in _VERIFIED_RESULTS
+        )
 
     def is_about(self, record: ArtifactRecord, measured_digest: str) -> bool:
         """Whether this answer is about *this* record and *these* bytes."""
@@ -210,6 +224,9 @@ class Verification:
             self.record_fingerprint == record.fingerprint()
             and self.measured_digest == measured_digest
         )
+
+
+_VERIFIED_RESULTS: weakref.WeakSet[Verification] = weakref.WeakSet()
 
 
 #: A signature verifier: (record, signature) -> bool. There is no default
@@ -308,7 +325,35 @@ def verify(
             refusal=VerificationRefusal.SIGNATURE_INVALID,
             **about,
         )
-    return Verification(VerificationOutcome.SIGNATURE_VERIFIED, **about)
+    result = Verification(VerificationOutcome.SIGNATURE_VERIFIED, **about)
+    _VERIFIED_RESULTS.add(result)
+    return result
+
+
+def _issue_r11_poc_verification(
+    record: ArtifactRecord, measured_digest: str, *, profile: str
+) -> Verification:
+    """Issue a registered, visibly PoC-scoped result after detached verification.
+
+    Only the isolated R11 attestation adapter may import this private bridge.
+    It does not alter the default release verifier, trust roots, or records.
+    Arbitrary mutation of Python module state remains outside this API's claim.
+    """
+
+    if profile != "r11-hybrid-iso-whole-device":
+        raise ValueError("unsupported PoC verification profile")
+    if record.is_signed or record.compatibility_claim != "candidate":
+        raise ValueError("R11 PoC evidence requires an unsigned candidate record")
+    if measured_digest != record.unsigned_payload_digest:
+        raise ValueError("R11 PoC evidence does not match the record digest")
+    result = Verification(
+        outcome=VerificationOutcome.SIGNATURE_VERIFIED,
+        measured_digest=measured_digest,
+        record_fingerprint=record.fingerprint(),
+        profile=profile,
+    )
+    _VERIFIED_RESULTS.add(result)
+    return result
 
 
 def _require_reference_inside_the_artifact(name: str, value: object) -> None:
