@@ -44,7 +44,10 @@ from .refusals import Refused
 
 #: Fields the screen may carry: enough for a human to identify the object in
 #: front of them, and nothing that identifies it to anyone else.
-SCREEN_FIELDS = ("capacity_bytes", "bus_path", "physical_label")
+# Hardware location, labels, and stable identifiers remain backend-only. The
+# operator-facing list contains capacity plus the ephemeral target code, not a
+# serial, bus address, model, label, or kernel node.
+SCREEN_FIELDS = ("capacity_bytes",)
 
 
 class Eligibility(Enum):
@@ -196,8 +199,8 @@ class MediaCandidate:
 
         return (
             f"MediaCandidate(identity=<redacted>, capacity_bytes={self.capacity_bytes}, "
-            f"partition_table={self.partition_table!r}, bus_path={self.bus_path!r}, "
-            f"physical_label={self.physical_label!r}, removable={self.removable}, "
+            f"partition_table={self.partition_table!r}, bus_path=<redacted>, "
+            f"physical_label=<redacted>, removable={self.removable}, "
             f"mounted={self.mounted}, internal={self.internal}, "
             f"holds_running_root={self.holds_running_root})"
         )

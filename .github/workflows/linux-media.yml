@@ -1,0 +1,27 @@
+name: Linux media backend
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v5
+      - name: Install locked development dependencies
+        run: uv sync --locked --extra dev
+      - name: Run unit suite (synthetic and regular-file tests only)
+        run: uv run --locked --extra dev python -m pytest tests/unit -q
+      - name: Lint
+        run: uv run --locked --extra dev ruff check src tests tools
+      - name: Check patch whitespace
+        run: git diff --check

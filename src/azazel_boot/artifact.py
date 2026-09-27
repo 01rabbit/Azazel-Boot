@@ -198,6 +198,9 @@ class Verification:
     #: A digest over every field of the record that was checked.
     record_fingerprint: str
     refusal: VerificationRefusal | None = None
+    #: Visible classification. Ordinary `verify()` results use the default;
+    #: the only alternate writer scope is the reviewed R11 PoC profile.
+    profile: str = "release-signature"
 
     @property
     def may_be_written(self) -> bool:
@@ -323,6 +326,32 @@ def verify(
             **about,
         )
     result = Verification(VerificationOutcome.SIGNATURE_VERIFIED, **about)
+    _VERIFIED_RESULTS.add(result)
+    return result
+
+
+def _issue_r11_poc_verification(
+    record: ArtifactRecord, measured_digest: str, *, profile: str
+) -> Verification:
+    """Issue a registered, visibly PoC-scoped result after detached verification.
+
+    Only the isolated R11 attestation adapter may import this private bridge.
+    It does not alter the default release verifier, trust roots, or records.
+    Arbitrary mutation of Python module state remains outside this API's claim.
+    """
+
+    if profile != "r11-hybrid-iso-whole-device":
+        raise ValueError("unsupported PoC verification profile")
+    if record.is_signed or record.compatibility_claim != "candidate":
+        raise ValueError("R11 PoC evidence requires an unsigned candidate record")
+    if measured_digest != record.unsigned_payload_digest:
+        raise ValueError("R11 PoC evidence does not match the record digest")
+    result = Verification(
+        outcome=VerificationOutcome.SIGNATURE_VERIFIED,
+        measured_digest=measured_digest,
+        record_fingerprint=record.fingerprint(),
+        profile=profile,
+    )
     _VERIFIED_RESULTS.add(result)
     return result
 

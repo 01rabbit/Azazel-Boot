@@ -84,6 +84,8 @@ class Refusal(Enum):
     AUTHORISATION_ALREADY_SPENT = "authorisation_already_spent"
     TARGET_DISAPPEARED = "target_disappeared"
     TARGET_SUBSTITUTED = "target_substituted"
+    ARTIFACT_CHANGED_AFTER_PLAN = "artifact_changed_after_plan"
+    ARTIFACT_EXCEEDS_TARGET_CAPACITY = "artifact_exceeds_target_capacity"
     NOW_INELIGIBLE = "now_ineligible"
     UNMOUNT_FAILED = "unmount_failed"
     PORT_MISBEHAVED = "port_misbehaved"
@@ -107,6 +109,20 @@ class WriteOutcome(Enum):
 
     WRITTEN_AND_VERIFIED = "written_and_verified"
     VERIFICATION_FAILED = "verification_failed"
+    WRITE_STATE_UNKNOWN = "write_state_unknown"
+
+
+class WriteMayHaveStarted(RuntimeError):
+    """A destructive port failed after entering its write phase.
+
+    This is intentionally not a :class:`WriteRefused`: callers must not report
+    that nothing was written. The medium may be partially overwritten and must
+    be treated as unusable until independently inspected or rewritten.
+    """
+
+    def __init__(self, message: str, *, bytes_attempted: int) -> None:
+        super().__init__(message)
+        self.bytes_attempted = bytes_attempted
 
 
 class DeviceProbe(Protocol):
@@ -132,7 +148,13 @@ class Unmounter(Protocol):
 class RawWriter(Protocol):
     """Writes the artifact to the device. The only thing here that destroys data."""
 
-    def write(self, identity: DeviceIdentity, artifact_path: str) -> int: ...
+    def write(
+        self,
+        identity: DeviceIdentity,
+        artifact_path: str,
+        expected_digest: str,
+        expected_bytes: int,
+    ) -> int: ...
 
 
 class MediumReader(Protocol):
@@ -167,6 +189,7 @@ class Planned:
     #: Re-asserted in `execute`: a binding checked only at plan time is a
     #: ceremony, and a review edited the record afterwards.
     record_fingerprint: str
+    verification_profile: str = "release-signature"
 
     def __repr__(self) -> str:
         """Redacted: the enumerated device's identity and the host path stay out."""
@@ -208,6 +231,7 @@ class WriteResult:
     measured_digest: str | None
     expected_bytes: int
     written_bytes: int
+    verification_profile: str = "release-signature"
 
     @property
     def medium_is_valid(self) -> bool:
@@ -297,6 +321,11 @@ class WriteAuthority:
         eligibility = assess(enumerated)
         if eligibility is not Eligibility.ELIGIBLE:
             raise WriteRefused(Refusal.TARGET_NOT_ELIGIBLE, eligibility.value)
+        if size > enumerated.capacity_bytes:
+            raise WriteRefused(
+                Refusal.ARTIFACT_EXCEEDS_TARGET_CAPACITY,
+                "the verified artifact does not fit on the selected medium",
+            )
 
         planned = Planned(
             target_code=target_code,
@@ -306,6 +335,7 @@ class WriteAuthority:
             artifact_bytes=size,
             artifact_digest=digest,
             record_fingerprint=record.fingerprint(),
+            verification_profile=verification.profile,
         )
         self._issued.append(planned)
         return planned
@@ -393,6 +423,13 @@ class WriteAuthority:
                 "the record is not the one the verification was about",
             )
 
+        digest, size = _port(self._artifact_reader.measure, planned.artifact_path)
+        if digest != planned.artifact_digest or size != planned.artifact_bytes:
+            raise WriteRefused(
+                Refusal.ARTIFACT_CHANGED_AFTER_PLAN,
+                "artifact bytes changed after verification or confirmation",
+            )
+
         current = _port(probe.reread, planned.enumerated.identity)
         if current is None:
             raise WriteRefused(
@@ -419,21 +456,57 @@ class WriteAuthority:
                 "corrupts whatever is using it",
             )
 
-        written = _port(raw_writer.write, current.identity, planned.artifact_path)
-        # The extent verified is the artifact's own length, measured here, not
-        # the number the writer reports about its own work.
-        measured = _port(reader.digest, current.identity, planned.artifact_bytes)
+        write_error: WriteMayHaveStarted | None = None
+        try:
+            written = _port(
+                raw_writer.write,
+                current.identity,
+                planned.artifact_path,
+                planned.artifact_digest,
+                planned.artifact_bytes,
+            )
+        except WriteMayHaveStarted as error:
+            # Attempt read-back where the backend retained its target handle.
+            # Even a matching prefix cannot make an interrupted write valid.
+            written = error.bytes_attempted
+            write_error = error
+        try:
+            # The extent verified is the artifact's own length, measured here,
+            # not the number the writer reports about its own work.
+            measured = _port(reader.digest, current.identity, planned.artifact_bytes)
+        except WriteMayHaveStarted:
+            measured = None
+            write_error = write_error or WriteMayHaveStarted(
+                "read-back failed after a write attempt", bytes_attempted=written
+            )
+        except WriteRefused:
+            if write_error is None:
+                # The writer returned, so the destructive phase completed or
+                # may have changed the medium. A failed read-back cannot be
+                # represented as a refusal meaning nothing was written.
+                write_error = WriteMayHaveStarted(
+                    "read-back failed after writer returned",
+                    bytes_attempted=written,
+                )
+            measured = None
         expected = planned.record.unsigned_payload_digest
         verified = measured == expected and written == planned.artifact_bytes
         return WriteResult(
             outcome=(
-                WriteOutcome.WRITTEN_AND_VERIFIED if verified else WriteOutcome.VERIFICATION_FAILED
+                WriteOutcome.WRITE_STATE_UNKNOWN
+                if write_error is not None
+                else (
+                    WriteOutcome.WRITTEN_AND_VERIFIED
+                    if verified
+                    else WriteOutcome.VERIFICATION_FAILED
+                )
             ),
             target_code=planned.target_code,
             expected_digest=expected,
             measured_digest=measured,
             expected_bytes=planned.artifact_bytes,
             written_bytes=written,
+            verification_profile=planned.verification_profile,
         )
 
 
@@ -449,6 +522,8 @@ def _port(call, *arguments):
 
     try:
         return call(*arguments)
+    except WriteMayHaveStarted:
+        raise
     except WriteRefused:
         raise
     except Exception as error:  # noqa: BLE001 - a port may raise anything

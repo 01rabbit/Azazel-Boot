@@ -22,6 +22,7 @@ dev = ["pytest==8.3.4", "ruff==0.8.4"]
 
 [project.scripts]
 azazel-boot = "azazel_boot.cli:main"
+azazel-boot-media = "azazel_boot.media_cli:main"
 # The builder console. Two verbs: `doctor` reports and changes nothing, and
 # `prepare-host` shows its plan and asks before each of the three acts. It is
 # not packaged from `src/`: `tools/` is developer-facing tooling, and the

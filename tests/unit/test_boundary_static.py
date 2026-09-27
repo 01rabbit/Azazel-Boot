@@ -80,13 +80,20 @@ OPERATIONAL_MODULES = {
     "io", "fcntl", "mmap", "glob", "tempfile", "importlib", "pty", "termios",
 }
 
-#: The one exemption, named per file rather than dropped from the set above.
+#: The narrowly scoped exceptions, named per file rather than dropped from
+#: the set above.
 #:
 #: The Fabric boundary asks `importlib.util.find_spec` whether the optional
-#: extra is installed, which is how it reports the absence instead of failing
-#: on it — the whole reason that module exists. Removing `importlib` from the
-#: set would have exempted every file; this exempts one, and says which.
-ALLOWED_IN: dict[str, frozenset[str]] = {FABRIC_BOUNDARY: frozenset({"importlib"})}
+#: extra is installed. Linux media is the separately scoped read-only host
+#: inventory boundary; `lsblk` is its only subprocess and never opens a device.
+#: Keep exemptions per-file so neither capability spreads across the package.
+ALLOWED_IN: dict[str, frozenset[str]] = {
+    FABRIC_BOUNDARY: frozenset({"importlib"}),
+    "linux_media.py": frozenset({"subprocess"}),
+    # The isolated Linux writer snapshots the verified artifact to an unlinked
+    # temporary file before its first block write, closing source mutation.
+    "linux_writer.py": frozenset({"tempfile"}),
+}
 
 
 def test_the_bootstrap_contains_no_operational_code():
@@ -121,3 +128,39 @@ def test_the_bootstrap_cannot_import_something_without_naming_it():
         f"dynamic import or evaluation found: {offenders}. A module that can name "
         f"an import at runtime is not bounded by any list of module names"
     )
+
+
+def test_only_the_r11_poc_adapter_can_issue_poc_verifier_results():
+    tooling_root = Path(__file__).resolve().parents[2] / "tools"
+    issuers = []
+    for path in sorted(tooling_root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module == "azazel_boot.artifact":
+                if any(alias.name == "_issue_r11_poc_verification" for alias in node.names):
+                    issuers.append(path.relative_to(tooling_root).as_posix())
+    assert issuers == ["poc_r11_attestation.py"]
+
+
+def test_direct_block_io_apis_are_confined_to_linux_writer_backend():
+    allowed = {
+        "linux_writer.py": {"open", "pread", "pwrite", "write", "fsync"},
+        "linux_media.py": {"open", "pread"},
+    }
+    forbidden = set().union(*allowed.values())
+    offenders = {}
+    for path in sorted(PACKAGE_ROOT.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        used = {
+            node.func.attr
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "os"
+            and node.func.attr in forbidden
+        }
+        excess = used - allowed.get(path.name, set())
+        if excess:
+            offenders[path.name] = sorted(excess)
+    assert offenders == {}
