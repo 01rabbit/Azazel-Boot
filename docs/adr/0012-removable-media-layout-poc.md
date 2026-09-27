@@ -8,7 +8,7 @@ This record narrows ADR-0008 D4.1 to one PoC image. It does not change the three
 
 ## Layout
 
-GPT partition order is fixed. Align each partition start to 1 MiB and require at least 32 GiB of removable capacity for this PoC profile.
+GPT partition order is fixed. This PoC profile requires 512-byte logical sectors. Align each partition start to 1 MiB and require at least 32 GiB of removable capacity. A different logical sector size needs a reviewed profile, not arithmetic guessed by a writer.
 
 | Role | PoC size | Format | Purpose |
 | --- | ---: | --- | --- |
@@ -28,4 +28,4 @@ The password entry and binding check belong to the initramfs-only helper in ADR-
 
 At initramfs entry, quarantine host storage first. Then classify and bind the boot medium, verify the image and commissioning state, and only then attempt a local hidden prompt. An absent/malformed P3, missing key, failed binding, or failed unlock settles an allowed ephemeral CORE session without writing to internal storage. When the boot SSD disappears, services stop/fence; continued operation from cached squashfs pages is not evidence of a healthy session. Reboot/recovery is required. No automatic fsck or journal replay of a quarantined P3 is allowed.
 
-The PoC can use an unsigned boot chain only if explicitly labelled `unsigned prototype`. Secure Boot HIL, full no-host-write measurement, recovery, and independent build reproduction remain Stage B/C gates in #57. This record asserts no hardware result.
+The image digest in the media binding still needs authenticated signed metadata even when firmware Secure Boot is disabled for a PoC. An unsigned boot chain must be explicitly labelled `unsigned prototype` and cannot claim a verified firmware chain. Secure Boot HIL, full no-host-write measurement, recovery, and independent build reproduction remain Stage B/C gates in #57. This record asserts no hardware result.
