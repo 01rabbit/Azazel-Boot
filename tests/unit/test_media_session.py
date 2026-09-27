@@ -198,6 +198,14 @@ def test_an_identity_is_immutable_and_refuses_to_be_pickled() -> None:
     assert identity.disclose() == "WWN-0x5001234"
 
 
+@pytest.mark.parametrize(
+    "raw_path", ["/dev/disk7", "/dev/sda", "dev\\disk7", "..", "C:disk"]
+)
+def test_a_device_path_cannot_be_used_as_a_public_identity(raw_path: str) -> None:
+    with pytest.raises(ValueError, match="opaque token"):
+        DeviceIdentity(raw_path)
+
+
 def test_the_screen_carries_what_a_human_needs_to_pick_the_right_object() -> None:
     session = MediaSession("m1")
     screen = session.offer([candidate()])[0].describe_for_screen()

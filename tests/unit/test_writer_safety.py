@@ -23,6 +23,7 @@ import ast
 import dataclasses
 import hashlib
 import json
+import stat
 from pathlib import Path
 
 import pytest
@@ -199,6 +200,45 @@ def test_a_verified_signed_artifact_is_written_and_read_back(
     assert device.written == PAYLOAD
 
 
+def test_regular_file_only_end_to_end_write_dry_run(
+    tmp_path: Path, artifact: Path
+) -> None:
+    """Exercise listing through read-back using only a temporary regular file."""
+
+    authority, code = an_authority()
+    device = Device(tmp_path / "synthetic-removable-media.img")
+    assert stat.S_ISREG(device.path.stat().st_mode)
+    rec = record()
+    planned = authority.plan(
+        target_code=code,
+        record=rec,
+        verification=verified_for(rec, artifact),
+        artifact_path=str(artifact),
+    )
+    target_confirmed = authority.confirm_target(planned, code)
+    authorised = authority.confirm_destruction(
+        target_confirmed, DESTRUCTIVE_CONFIRMATION
+    )
+
+    result = authority.execute(
+        authorised,
+        probe=Probe(),
+        unmounter=Unmounter(),
+        raw_writer=device,
+        reader=device,
+    )
+    inspected = inspect(
+        candidate=candidate(),
+        record=rec,
+        length=len(PAYLOAD),
+        reader=device,
+    )
+
+    assert result.medium_is_valid
+    assert inspected.matches
+    assert device.written == PAYLOAD
+
+
 # --- an authorisation is issued, not asserted -----------------------------
 
 
@@ -358,6 +398,68 @@ def test_an_artifact_that_did_not_pass_verify_is_refused_before_anything_else(
             verification=verification,
             artifact_path=str(artifact),
         )
+    assert refused.value.refusal is Refusal.ARTIFACT_NOT_VERIFIED
+
+
+def test_an_unsigned_r11_style_record_is_refused_before_target_claim(
+    artifact: Path,
+) -> None:
+    """Digest agreement on an unsigned prototype is not writer authorization."""
+
+    signed_shaped = record()
+    unsigned = parse(
+        {
+            **signed_shaped.fields,
+            "signature": None,
+            "signed_artifact_digest": None,
+        }
+    )
+    measured_digest, _ = Files().measure(str(artifact))
+    verification = verify_artifact(unsigned, measured_digest)
+    authority, code = an_authority()
+
+    with pytest.raises(WriteRefused) as refused:
+        authority.plan(
+            target_code=code,
+            record=unsigned,
+            verification=verification,
+            artifact_path=str(artifact),
+        )
+
+    assert verification.outcome is VerificationOutcome.DIGEST_ONLY
+    assert refused.value.refusal is Refusal.ARTIFACT_NOT_VERIFIED
+    # Refusal occurs before consuming the same-session target code.
+    assert authority._session.claim(code).identity == IDENTITY  # noqa: SLF001
+
+
+def test_a_forged_signature_verified_result_cannot_authorise_an_unsigned_record(
+    artifact: Path,
+) -> None:
+    signed_shaped = record()
+    unsigned = parse(
+        {
+            **signed_shaped.fields,
+            "signature": None,
+            "signed_artifact_digest": None,
+        }
+    )
+    measured_digest, _ = Files().measure(str(artifact))
+    forged = Verification(
+        VerificationOutcome.SIGNATURE_VERIFIED,
+        measured_digest,
+        unsigned.fingerprint(),
+    )
+    assert not forged.may_be_written
+
+    authority, code = an_authority()
+    with pytest.raises(WriteRefused) as refused:
+        authority.plan(
+            target_code=code,
+            record=unsigned,
+            verification=forged,
+            artifact_path=str(artifact),
+        )
+
     assert refused.value.refusal is Refusal.ARTIFACT_NOT_VERIFIED
 
 

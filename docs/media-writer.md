@@ -8,6 +8,18 @@ ones belong to the write service, which does not exist. No medium has been
 written, no device has been enumerated on real hardware, and nothing here has
 run outside a test.
 
+`DeviceIdentity` accepts only 1–256 character ASCII opaque tokens matching
+`[A-Za-z0-9][A-Za-z0-9._-]*`; device paths and path-like values are rejected.
+The executable CLI currently exposes only `status`; native media enumeration,
+`list-media`, `write`, `inspect`, and an OS block-device backend are not
+implemented. The authority below is exercised with regular-file fixtures and
+mocks only. Do not connect a physical backend before independent safety review.
+For unsigned R11, a digest match returns `digest_only`, not
+`signature_verified`, and the writer refuses it. A caller-constructed
+`Verification(signature_verified)` is also refused; only the verifier-issued
+result object is eligible for a write. This is API provenance checking, not a
+defence against malicious mutation of Python internals in the same process.
+
 Related: [Builder and writer contract](builder-writer-contract.md) ·
 [ADR-0009](adr/0009-builder-and-writer-contract.md) ·
 [Threat model](threat-model.md) · [Release policy](release-policy.md)

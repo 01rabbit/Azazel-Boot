@@ -36,6 +36,7 @@ code an operator had noted for a blank stick resolved to an evidence disk.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, fields
 from enum import Enum
 
@@ -89,6 +90,11 @@ class DeviceIdentity:
     __slots__ = ("_value",)
 
     def __init__(self, value: str) -> None:
+        if (
+            not isinstance(value, str)
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,255}", value) is None
+        ):
+            raise ValueError("device identity must be an opaque token, not a path")
         object.__setattr__(self, "_value", value)
 
     def __setattr__(self, name: str, value: object) -> None:
