@@ -1,0 +1,51 @@
+# Static PoC allowlist. This file does not authorize a mount by itself.
+version = 1
+
+[[mount]]
+name = "config"
+source = "config"
+destination = "/var/lib/azazel/config"
+mode = "0700"
+required = true
+
+[[mount]]
+name = "state"
+source = "state"
+destination = "/var/lib/azazel/state"
+mode = "0700"
+required = true
+
+[[mount]]
+name = "evidence"
+source = "evidence"
+destination = "/var/lib/azazel/evidence"
+mode = "0700"
+required = false
+
+[[mount]]
+name = "logs"
+source = "logs"
+destination = "/var/lib/azazel/logs"
+mode = "0700"
+required = false
+
+[[mount]]
+name = "knowledge"
+source = "knowledge"
+destination = "/var/lib/azazel/knowledge"
+mode = "0700"
+required = false
+
+[[mount]]
+name = "snapshots"
+source = "snapshots"
+destination = "/var/lib/azazel/snapshots"
+mode = "0700"
+required = false
+
+[[mount]]
+name = "operator"
+source = "operator"
+destination = "/var/lib/azazel/operator"
+mode = "0700"
+required = false
