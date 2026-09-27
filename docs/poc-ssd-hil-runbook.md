@@ -1,12 +1,12 @@
 # Azazel-Boot removable SSD PoC: physical HIL record
 
-Status: procedure draft for #63. Running this document is not evidence; record actual results under #57.
+Status: procedure draft for #63. Physical SSD boot is the primary PoC validation path. QEMU is supplemental and may run in parallel; passing QEMU is not a precondition for the first physical boot. Running this document is not evidence; record actual results under #57.
 
 ## Preconditions
 
 Use a disposable removable SSD and a test laptop whose internal storage can be independently monitored. Preserve an external backup of any data on the SSD: provisioning destroys it. Record the laptop/firmware/USB bridge model in a restricted local evidence record; publish only a redacted identifier. Record the exact build digest, writer version, ADR profile, manifest digest, and firmware Secure Boot state. An unsigned prototype must be called unsigned even if UEFI boot succeeds.
 
-Before a destructive operation, independently inspect the candidate through #27 `list-media` and record its short-lived target code in the operator session only. Re-check capacity, removability, mounted partitions, root-disk relation and stable identity immediately before writing. Give a separate confirmation for artifact write and P3 creation. Never substitute a `/dev/...` argument or a shell script that guesses the USB disk. Stop when the writer refuses any check. Do not place a secret, serial, WWN, raw device path, or header backup in shared logs or issues.
+Before a destructive operation, independently inspect the candidate through #27 `list-media` and record its short-lived target code in the operator session only. Re-check capacity, removability, mounted partitions, root-disk relation and stable identity immediately before writing. Give a separate confirmation for artifact write and P3 creation. Never substitute a `/dev/...` argument or a shell script that guesses the USB disk. Stop when the writer refuses any check. Do not place a secret, serial, WWN, raw device path, or header backup in shared logs or issues. Do not write a physical SSD until #58's custom P2 root/overlay boot path is verified against the artifact and the reviewed #27 target-code writer is available.
 
 ## Evidence sequence
 
