@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import tempfile
 from collections.abc import Mapping
@@ -85,7 +86,7 @@ def _read_public_key(path: str | os.PathLike[str]) -> bytes:
     try:
         fd = os.open(path, flags)
         with os.fdopen(fd, "rb") as stream:
-            if not os.path.isfile(path):
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
                 raise AttestationRefused("public key is not a regular file")
             key = stream.read(_MAX_PUBLIC_KEY_BYTES + 1)
     except (OSError, AttestationRefused):
@@ -115,7 +116,12 @@ def sign_prototype(
     *,
     openssl: str = "openssl",
 ) -> str:
-    """Sign a fixed-profile prototype record; the key is read only by OpenSSL."""
+    """Make a detached PoC attestation; this does not alter the artifact record.
+
+    The returned value belongs in a separate local evidence sidecar. It is not
+    the artifact record's production ``signature`` field and does not by itself
+    authorize a write through the default #27 verifier.
+    """
 
     fields = _record_fields(record)
     if fields.get("signature") is not None:
@@ -125,7 +131,7 @@ def sign_prototype(
         key_stat = os.stat(private_key_path, follow_symlinks=False)
     except OSError:
         raise AttestationRefused("local PoC signing key unavailable") from None
-    if not os.path.isfile(private_key_path) or key_stat.st_mode & 0o077:
+    if not stat.S_ISREG(key_stat.st_mode) or key_stat.st_mode & 0o077:
         raise AttestationRefused("local PoC signing key permissions refused")
     # Ed25519 OpenSSL's one-shot interface requires a seekable input file.
     # The signed message contains only public record metadata and digests.
@@ -202,3 +208,51 @@ def verify_prototype(
         return result.returncode == 0
     except (AttestationRefused, ValueError, OSError):
         return False
+
+
+def verification_for_poc_writer(
+    record: object,
+    measured_digest: str,
+    detached_attestation: str,
+    *,
+    public_key_path: str | os.PathLike[str],
+    expected_public_key_fingerprint: str,
+    openssl: str = "openssl",
+) -> object:
+    """Adapt a valid detached PoC attestation to writer.py's subject-bound value.
+
+    This function is only for the explicit PoC tool. The default product
+    verifier remains unchanged and refuses unsigned records. Production CLI
+    code must not import this adapter. The caller still passes the resulting
+    value through WriteAuthority.plan and its two confirmations.
+    """
+
+    from azazel_boot.artifact import Verification, VerificationOutcome, VerificationRefusal
+
+    digest_matches = (
+        type(measured_digest) is str
+        and measured_digest == getattr(record, "unsigned_payload_digest", None)
+    )
+    about = {
+        "measured_digest": measured_digest,
+        "record_fingerprint": getattr(record, "fingerprint")(),
+    }
+    if not digest_matches:
+        return Verification(
+            VerificationOutcome.REFUSED,
+            refusal=VerificationRefusal.DIGEST_MISMATCH,
+            **about,
+        )
+    if not verify_prototype(
+        record,
+        detached_attestation,
+        public_key_path=public_key_path,
+        expected_public_key_fingerprint=expected_public_key_fingerprint,
+        openssl=openssl,
+    ):
+        return Verification(
+            VerificationOutcome.REFUSED,
+            refusal=VerificationRefusal.SIGNATURE_INVALID,
+            **about,
+        )
+    return Verification(VerificationOutcome.SIGNATURE_VERIFIED, **about)
