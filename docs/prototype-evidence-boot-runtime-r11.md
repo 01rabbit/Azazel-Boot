@@ -6,7 +6,7 @@ firmware, Secure Boot, or writer safety evidence.
 
 ## Artifact and inputs
 
-- ISO: `artifacts/prototype/2026-09-26/boot-runtime-r11/output/payload.iso`
+- ISO artifact: **not retained locally** (removed 2026-09-28 as a generated build product)
 - Size: 396,689,408 bytes
 - SHA-256: `3aa21d1c9c97dd74a5d981d17216738e16c2c066cb01dba454cd30e76a297dfa`
 - Input manifest: `artifacts/prototype/2026-09-26/boot-runtime-r11/input/build-input-manifest.json`
@@ -17,10 +17,12 @@ firmware, Secure Boot, or writer safety evidence.
 - Tool versions and build disposition: `output/build-result.json` and
   `input/toolchain-lock.json`.
 
-The ISO remains at the local artifact path above and is intentionally not
-tracked in Git: it is 396,689,408 bytes, exceeding GitHub's ordinary per-file
-limit. The commit carries its SHA-256, manifest, and inspection/QEMU evidence;
-the remote repository does not host the ISO binary.
+The ISO was verified at that path when this measurement was recorded, but it
+has since been deleted. Its recorded size and SHA-256 are historical values;
+the original binary is unavailable for a fresh hash check or hardware writing.
+The repository retains the input manifest and compact inspection/QEMU result
+records, not the payload binary, kernel, or initramfs. Rebuild from the pinned
+inputs before any future artifact inspection or device test.
 
 The clean live-build attempt was stopped during the chroot `apt-get update`
 after more than 20 minutes without package-index progress. No second clean

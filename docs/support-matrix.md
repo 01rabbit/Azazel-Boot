@@ -56,7 +56,7 @@ apart throughout:
 
 | Object | What it is | What exists |
 | --- | --- | --- |
-| **The product** | a signed immutable image on removable USB SSD media, booted on a borrowed laptop | **not available** — an unsigned QEMU-tested prototype exists, but no supported/released image, production builder ([ADR-0002](adr/0002-image-builder.md)), or hardware evidence exists ([R11 evidence](prototype-evidence-boot-runtime-r11.md)) |
+| **The product** | a signed immutable image on removable USB SSD media, booted on a borrowed laptop | **not available** — an unsigned prototype was QEMU-tested, but its binary is not retained locally; no supported/released image, production builder ([ADR-0002](adr/0002-image-builder.md)), or hardware evidence exists ([R11 evidence](prototype-evidence-boot-runtime-r11.md)) |
 | **The status scaffold** | the `azazel-boot` Python package in this repository, which reports that the product does not exist | a package, a CLI, and CI that tests it on a declared Python matrix |
 
 Only the second has a support matrix that can be checked today, and what it

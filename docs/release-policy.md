@@ -1,7 +1,8 @@
 # Release, SBOM, and Provenance Policy
 
 Status: **target contract**. Azazel-Boot has **never produced a release**. An
-unsigned R11 prototype ISO exists, but there is no release tag, signing key,
+R11 was generated as an unsigned prototype ISO, but its binary has been
+removed locally. There is no release tag, signing key,
 SBOM, provenance attestation, or production image. This document states what a
 release will have to carry when one becomes possible, and marks what nobody has
 decided yet.
@@ -22,14 +23,14 @@ Related: [ADR index](adr/README.md) · [ADR-0002 image builder](adr/0002-image-b
 | Thing | State |
 | --- | --- |
 | A released artifact of any kind | **none, ever** |
-| Boot media, signed or unsigned | **one unsigned R11 prototype ISO exists locally**; it is not a release artifact, and no production builder is selected ([R11 evidence](prototype-evidence-boot-runtime-r11.md), [ADR-0002](adr/0002-image-builder.md)) |
+| Boot media, signed or unsigned | **no ISO is retained locally**; the unsigned R11 measurement was not a release artifact, and no production builder is selected ([R11 evidence](prototype-evidence-boot-runtime-r11.md), [ADR-0002](adr/0002-image-builder.md)) |
 | A signing key, root, or delegated role for Boot | **none** |
 | An SBOM for anything in this repository | **none** |
 | A provenance attestation | **none** |
 | A release channel or update server | **none** — the policy is written in [update channel](update-channel.md); no channel, key, or published manifest exists |
 | A support matrix | **published and empty of support** — [support matrix](support-matrix.md); nothing is supported, and [compatibility](compatibility.md) §4 has no rows |
 | A recovery procedure | **written, never exercised** — [recovery](recovery.md); no recovery path has been built or run |
-| Reproducibility evidence | **none** — no build has been reproduced, because no build has been performed |
+| Reproducibility evidence | **not retained as a reviewable artifact set** — earlier local measurements were performed, but the generated build outputs have been removed; do not claim independent-builder reproducibility |
 
 The R0 exit criteria require that "Nexus and Boot publish their own security
 policy, support matrix, license, update channel, and recovery procedure before a
