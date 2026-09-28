@@ -1,160 +1,21 @@
-"""The deterministic status scaffold: what Azazel-Boot is, and is not.
-
-This module is the whole of Boot's non-operational surface. It reports what
-exists in this repository and what does not, and it **never reports a
-capability**. Boot performs no enforcement, opens no device, writes no medium
-and has no network, so every capability dimension reads as *not assessed* —
-which is not the same as "absent" and is emphatically not "available". What
-does exist is decision logic: `azazel_boot.inventory` reads a sysfs tree,
-`azazel_boot.confirmation` shapes an operator confirmation, and neither
-assigns a role, opens anything or confirms anything on its own. This module
-said they did not exist, which was true when it was written and stopped being
-true without it noticing.
-
-Three properties matter more than anything this module computes:
-
-1.  **Stdlib only.** Nothing here imports `azazel_fabric`, and nothing here
-    imports a third-party package. The scaffold must stand with no optional
-    dependency installed, because that is the state a responder's machine is
-    most likely to be in.
-2.  **Deterministic.** The same inputs produce the same `BootStatus`. No
-    wall-clock read, no randomness, no environment lookup, no filesystem
-    enumeration. A caller that wants a timestamp passes one in.
-3.  **No authority.** Azazel-Edge's deterministic arbiter is the only decision
-    and enforcement authority in any configuration of Azazel-Boot. Nothing
-    here decides anything; it describes.
-"""
+"""Non-operational statement of Boot's current implementation scope."""
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass, field
-
-#: Capability states, weakest first. These are **capability** states, never
-#: authority levels: a `FULL` Boot has exactly the authority a `CORE` Boot has,
-#: which is none. Boot cannot assess any of them yet, hence `UNASSESSED`.
-CAPABILITY_STATES = ("UNASSESSED", "CORE", "LITE", "FULL")
-
-#: The dimensions whose intersection would give effective capability. Boot
-#: measures none of them today; the tuple exists so the absence is enumerated
-#: rather than implied.
-CAPABILITY_DIMENSIONS = ("resource", "topology", "verified_assets", "trust_health")
-
-
-@dataclass(frozen=True)
-class Component:
-    """One thing Boot will need, and whether this repository has it."""
-
-    name: str
-    #: Series status vocabulary (handoff §7). Everything here is
-    #: `target_contract` or `absent`; nothing is `implemented` or `verified`.
-    status: str
-    detail: str
-
-
-#: Every component issue #1 scopes, with its real state. Adding a row that
-#: claims more than the repository holds is the failure this table exists to
-#: prevent, so `tests/unit/test_status.py` pins the vocabulary.
-COMPONENTS: tuple[Component, ...] = (
-    Component(
-        "image_builder",
-        "absent",
-        "tools/builder/ holds a candidate-evaluation harness (closure pinning, "
-        "reproducibility measurement, host-bootstrap probing); no builder is "
-        "chosen, no product image is built and none is signed",
-    ),
-    Component(
-        "initramfs_quarantine",
-        "absent",
-        "decision logic and a pinned policy artifact exist "
-        "(azazel_boot.quarantine, config/quarantine/policy-v2.json); the "
-        "no-host-write property is unverified on hardware",
-    ),
-    Component(
-        "media_writer",
-        "absent",
-        "decision logic only: it opens no device, and no medium has been written",
-    ),
-    Component(
-        "persistence",
-        "absent",
-        "decision logic only: sittings, a layout it is told about, dirty-write "
-        "classification and a media binding; it creates, unlocks, mounts and "
-        "writes no volume, and no encrypted persistence exists",
-    ),
-    Component(
-        "snapshot_and_recovery",
-        "absent",
-        "decision logic only: a preflight that refuses and a recovery that "
-        "yields a candidate; no snapshot has been written, no migration run "
-        "and no volume restored, on any device",
-    ),
-    Component(
-        "commissioning",
-        "absent",
-        "decision logic only: it reads a sysfs tree and states what an "
-        "operator would have to settle; it assigns no role and confirms nothing",
-    ),
-    Component("networking", "absent", "no NIC roles, no capture, no enforcement"),
-    Component("deception", "absent", "no Deception isolation"),
-    Component("architecture_contract", "target_contract", "docs/architecture.md"),
-    Component("threat_model", "target_contract", "docs/threat-model.md"),
-    Component(
-        "compatibility_envelope",
-        "target_contract",
-        "docs/compatibility.md; the table is empty",
-    ),
-)
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
 class BootStatus:
-    """What this repository is, stated so it cannot be mistaken for a product."""
+    """The package records no host capability or installation success."""
 
     product: str = "Azazel-Boot Responder"
     product_code: str = "AZ-03"
-    #: Always `UNASSESSED`: Boot has no code that could assess a dimension.
-    capability: str = "UNASSESSED"
-    #: Always empty. Boot asserts no authority in any configuration; the field
-    #: exists so that "none" is stated rather than left to inference.
+    operational: bool = False
+    installer: str = "not implemented"
+    supported_host_environments: tuple[str, ...] = ()
     authority: tuple[str, ...] = ()
-    components: tuple[Component, ...] = COMPONENTS
-    #: Why the capability is unassessed, one entry per dimension, always
-    #: complete -- a dimension missing from this map would read as assessed.
-    capability_reasons: Mapping[str, str] = field(
-        default_factory=lambda: {
-            "resource": "no resource probe exists",
-            # An inventory **is** read — `azazel_boot.inventory` walks a
-            # sysfs tree it is handed — and reading one is not assessing a
-            # topology: no NIC role is assigned, no segment is identified and
-            # nothing here decides what the network is. The row used to say no
-            # inventory existed, which stopped being true and read as a
-            # smaller claim than it was.
-            "topology": (
-                "an interface inventory is read, but no NIC role is assigned "
-                "and no topology is assessed"
-            ),
-            # Decision logic **is** read — `azazel_boot.artifact` verifies a
-            # record's digest and signature — and a fitting verified asset is
-            # not thereby carried: nothing here has been run against a real
-            # medium, and this dimension is unassessed for the same reason
-            # `topology` is. The row used to say none of this existed.
-            "verified_assets": (
-                "artifact verification decision logic exists, unrun against "
-                "any real medium"
-            ),
-            "trust_health": (
-                "media eligibility and quarantine disposition decision logic "
-                "exist, unrun against any real device"
-            ),
-        }
-    )
-
-    def is_operational(self) -> bool:
-        """Always False. Kept as a method so a caller must ask, not assume."""
-        return False
 
 
 def current_status() -> BootStatus:
-    """The repository's status. Takes no input because nothing varies yet."""
     return BootStatus()

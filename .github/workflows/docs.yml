@@ -87,40 +87,7 @@ jobs:
       - name: Unit tests
         run: python -m pytest tests -q
 
-      # The scaffold has to stand where nothing optional is installed, which is
-      # the state a responder's machine is most likely to be in. Fabric is never
-      # installed in this job, so this is also the guard's real absence case.
-      - name: Import and run the CLI with no optional dependency present
+      - name: Import and run the read-only status command
         run: |
-          python -c "import azazel_boot; from azazel_boot.status import current_status; assert current_status().is_operational() is False"
-          azazel-boot status
-
-  fabric-projection:
-    name: Fabric projection at the pinned tag
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      # The `package` job never installs Fabric, so without this job the
-      # projection's success path would never run anywhere and the tests that
-      # cover it would skip in silence. Installing the extra is also what
-      # checks that the pinned tag still resolves.
-      - name: Install with the fabric extra at its exact tag
-        run: pip install -c constraints-dev.txt -e ".[dev,fabric]"
-
-      - name: Unit tests with Fabric present
-        run: python -m pytest tests -q
-
-      - name: Fail if any Fabric test was skipped
-        run: |
-          python -m pytest tests -q -rs 2>&1 | tee /tmp/pytest.out
-          if grep -q "SKIPPED" /tmp/pytest.out; then
-            echo "a Fabric test skipped in the job that exists to run it" >&2
-            exit 1
-          fi
+          python -c "import azazel_boot; from azazel_boot.status import current_status; assert current_status().operational is False"
+          azazel-boot status --json

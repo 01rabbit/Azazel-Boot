@@ -1,5 +1,0 @@
-{
-  "schema": "azazel-boot/build-pins@1",
-  "comment": "Immutable pins for the inputs a profile names. Deliberately empty: nothing has been pinned, so every profile refuses to resolve. A pin is 'sha256:<64 hex>' or 'snapshot:<YYYYMMDDTHHMMSSZ>'; no other form is accepted.",
-  "pins": {}
-}
