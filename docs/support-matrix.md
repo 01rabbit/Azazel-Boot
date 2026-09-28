@@ -2,12 +2,13 @@
 
 | Area | Current declaration |
 | --- | --- |
-| Operating environment | None selected or supported for future helper installation |
-| Architecture | None declared for an operational product |
-| Installer | Not implemented |
-| OS image / removable-media writer | Not part of Boot scope |
+| Operating environment | User-supplied Debian Live; exact image and persistence support must be checked per image |
+| Architecture | Intended Debian Live / amd64 path; no exact image or PC combination verified yet |
+| Nexus tools installer | Existing Nexus-owned `packaging/install.sh`; Boot does not replace it |
+| Persistence | User-configured Debian Live persistence; Boot guidance only, no Boot-owned volume or lifecycle |
+| OS image / removable-media writer | Not implemented or part of Boot scope; user prepares/writes their own SSD |
 | Firmware / Secure Boot | Boot does not manage or attest host firmware |
-| Hardware compatibility | No supported hardware list; no Boot hardware verification |
+| Separate-PC boot verification | In scope; pending a user-prepared SSD and designated PC |
 | Authority | No Boot decision/enforcement authority; Azazel-Edge remains authoritative |
 
 Future rows require a reviewed proposal and measured evidence. A package

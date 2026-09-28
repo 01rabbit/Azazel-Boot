@@ -4,11 +4,13 @@ Status: **owner-approved direction; implementation not specified**.
 
 ## Product role
 
-Azazel-Boot is a user-assistance and optional tool-installation companion that
-runs within an operating environment supplied and started by the user. Boot
-does not produce that environment. It does not build or remaster Debian Live,
-select an image builder, create boot media, write an image, or own a boot-time
-initramfs path.
+Azazel-Boot assists a user operating an environment they supplied and started.
+The intended workflow is to use a user-prepared Debian Live SSD, configure its
+persistence themselves, use the existing Nexus tools installer, and check boot
+on a separate PC. Boot may provide guidance and a verification runbook for
+those steps. Boot does not install Debian, build/remaster LiveOS, select an
+image builder, partition/format/write media, or own a boot-time initramfs path
+or persistence volume.
 
 Boot is not a second Nexus installer. Nexus owns installation and integration
 of the persistent gateway appliance. A future Boot helper may guide the user
@@ -24,7 +26,7 @@ does not create another decision, trust, provider-admission, or enforcement
 authority. A Boot user interface can present a plan and record a user's choice;
 it cannot turn that choice into Edge policy or activate an Edge workload.
 
-No image or media writer belongs in Boot. A future tool installer must declare
+No image builder or media writer belongs in Boot. A future tool installer must declare
 its exact package inputs, target paths, privilege needs, network behavior, and
 rollback limits before implementation. It may not silently modify unrelated
 host state. Explicit user authorization is required for any host changes.
@@ -54,7 +56,8 @@ These are implementation prerequisites, not permission to invent a solution:
 5. What evidence proves that an installation succeeded without implying
    provider admission, model acquisition, or Edge activation?
 
-The next work is to answer only the questions needed for one concrete helper,
-then implement and test that helper. No builder, writer, disk-layout, firmware,
-Secure Boot, initramfs-quarantine, or encrypted-Boot-persistence work is in the
-current backlog.
+The current guidance must cover the user's persistence choice, the Nexus-owned
+installer prerequisites/effects, and a separate-PC boot check without
+prescribing a Boot-owned disk layout or writing operation. A future helper
+still requires a concrete proposal. No builder, writer, firmware mutation,
+initramfs quarantine, or Boot-owned persistence implementation is in scope.
