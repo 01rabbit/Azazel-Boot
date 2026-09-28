@@ -101,120 +101,21 @@ artifact is touched by an evaluation.**
 }
 ```
 
-This compact result reflects the **static inspection only**. The latest
-machine-readable output's top-level C5 inspection verdict is `pass`, but its
-nested boot-image policy result is `fail` pending runtime persistence evidence.
-The bounded QEMU runtime fixture result is separately recorded as `pass`; it
-does not retroactively rewrite the static result or prove full C5/hardware
-behavior.
+The R11 record is the retained prototype measurement. Its static C5 inspection
+reported no ordering/content faults, while the nested boot-image policy result
+retained `quarantine_not_persistent` pending runtime evidence. Manifest-bound
+QEMU reconciliation then observed the userspace handoff, read-only state,
+`EPERM` write denial, and unchanged regular-file fixture digests. The initial
+scan saw zero registered devices, so pre-registration quarantine remains
+**NOT_OBSERVED**. No persistence filesystem was mounted. The generated ISO,
+kernel, and initramfs were removed locally; the [R11 report](prototype-evidence-boot-runtime-r11.md)
+and compact JSON results remain. The recorded ISO digest cannot be rechecked
+without rebuilding.
 
-The latest measurement is bytepin-next11-r10. It pinned the predecessor
-`quarantine.v1` artifact and selected `azazel_boot.quarantine`, not
-`session_mode.py`, as Boot source. The current local policy is `quarantine.v2`,
-so r10's measurements are evidence for its own frozen v1 inputs only and are
-not evidence that a built image implements the v2 all-device/all-action scope.
-Its [input manifest](../artifacts/prototype/2026-09-26/bytepin-next11-r10/input/prepared/build-input-manifest.json)
-has SHA-256
-`5a336d28693ad19dad7355c4823e518f090475c0be355828aa86dda10feb72bc`. Build A
-and B produced identical unsigned ISO SHA-256
-`4520a6aa7a98a0b849f87f39dbcfb42fb84cb955a1bb127e1fe4bb937033321a`; their
-strict component comparison reports reproduced. The [static result](../artifacts/prototype/2026-09-26/bytepin-next11-r10/build-a/output/c5-result.json)
-contains the nested `quarantine_not_persistent` failure. The [QEMU runtime
-fixture result](../artifacts/prototype/2026-09-26/bytepin-next11-r10/qemu/c5-a/result.json)
-is bounded to regular files and passes its runtime checks: initramfs `/dev/vda`
-is made read-only before a one-byte write is attempted; `openat` succeeds and
-the actual `write()` returns `-1 EPERM` while sysfs/blockdev RO are set. The
-initial marker reported zero devices, so quarantine before kernel registration
-is `NOT_OBSERVED`; the fixture was quarantined after registration and before
-the probe. After multi-user, QMP hotplug of `/dev/vdb` was recognized through
-udev and the quarantine helper; RO transitioned `0→1` and the subsequent write
-returned `EPERM`. Raw enforcement ioctl tracing was not observed.
-
-The userspace handoff marker and session/boot ID validation pass in this
-fixture, but its device is explicitly `not_mounted`; no persistence filesystem
-or encrypted persistence-media mount is demonstrated. QEMU write traces cover
-only selected tracepoints, not all possible host I/O. Firmware, Secure Boot,
-hardware HIL, stable physical-media identity, full-lifecycle no-write behavior,
-and production-builder selection remain open. A separate
-[post-build policy reconciliation](../artifacts/prototype/2026-09-26/bytepin-next11-r10/qemu/c5-policy-reconciliation.json)
-re-ran the pinned Boot policy with the measured handoff fact and passed; the
-original build-time manifest/result remain unchanged and retain the
-`quarantine_not_persistent` pending-runtime finding. This does not establish a
-persistence filesystem mount or any hardware-only property. See the [complete
-prototype evidence report](prototype-evidence-bytepin-next11-r10.md).
-
-The previous measured candidate was bytepin-next11-r8. Its frozen
-[input manifest](../artifacts/prototype/2026-09-25/bytepin-next11-r8/build-a/output/build-input-manifest.json)
-has SHA-256
-`9f01979e8dd7e107cbaa88481bd7c96eb40ab13214bd4865f5cca51297d55c098`.
-Its [static C5 manifest](../artifacts/prototype/2026-09-25/bytepin-next11-r8/build-a/output/c5-manifest.json)
-has SHA-256
-`2e1c05ef13bd3b7c4c5491b4e7631af1dd2bd8426f65be677a72750398f9faf5`, and
-the [static result](../artifacts/prototype/2026-09-25/bytepin-next11-r8/build-a/output/c5-result.json)
-is **pass** with no faults. The pinned initramfs execution sequence is:
-`az-quarantine-block-devices`, `az-disable-resume`,
-`az-disable-automount`, `az-disable-volume-assembly`,
-`az-mark-boot-medium`, `az-start-udev`, `az-handoff-udev`. The manifest records
-all seven hooks as `pinned_by_boot`, with per-hook digests and ordered execution
-indices; the last hook is in `init-bottom`. Static manifest field
-`quarantine_persists_into_userspace` is null and
-`runtime_persistence_evidence_required` is true, so static inspection alone
-does not claim persistence.
-
-The [r8 QEMU regular-file fixture result](../artifacts/prototype/2026-09-25/bytepin-next11-r8/qemu/c5-build-b/result.json)
-is **fail**. The guest reached `multi-user.target`; the initramfs `/dev/vda`
-write probe and userspace persistence probe both reported read-only denial, and
-the userspace handoff marker verified the quarantine state. However, the
-hotplug `/dev/vdb` path set read-only state but emitted no write-probe event:
-the helper logged `quarantine/probe origin and mode do not match` after being
-invoked with origin/mode arguments it rejected, and the runner timed out waiting
-for that event. Therefore the hotplug write-denial evidence is missing and the
-runtime C5 verdict remains **fail**. The initial quarantine marker recorded
-`devices=0` before fixture registration; pre-registration quarantine of the
-fixture is **NOT_OBSERVED** (it was only seen after kernel registration).
-The r8 inputs froze before the source-level fail-closed change that rejects
-missing (`None`) userspace-persistence evidence; that change was tested
-separately and is not part of this r8 payload. Hardware and Secure Boot remain
-unverified.
-
-The following bytepin-next4 record is **historical**, superseded as the latest
-measurement by r8, and retained for comparison. Its
-[input manifest](../artifacts/prototype/2026-09-25/bytepin-next4/input/prepared/build-input-manifest.json)
-has SHA-256
-`75c72c1061507b6aca8f70a04e894cec79622340388bb26254de1d12a81ccef4`.
-Build A's machine-readable
-[C5 manifest](../artifacts/prototype/2026-09-25/bytepin-next4/build-a/c5-manifest.json)
-records initramfs SHA-256
-`97f4f96021fe6cafd8c5922d79f30e005b8581913e76eac0aeba5bcfb3cb4469` and
-payload SHA-256
-`5bf6f0e13c9fff2ef0d5dd25fc1569113b2efc54d4224bc365f9ae04b539ce45`. The
-[static result](../artifacts/prototype/2026-09-25/bytepin-next4/build-a/c5-result.json)
-is **fail**, with faults `hook_order_changed`, `order_changed`,
-`quarantine_not_persistent`, and `unpinned_hook`. In the inspected initrd,
-the observed init-top sequence is `00-az-quarantine-block-devices` (pinned),
-`10-resume`, `20-automount`, `30-volume assembly`, `40-mark-medium`, followed
-by the builder-default hooks `all_generic_ide`, `blacklist`, `keymap`, and
-`udev`. The quarantine hook being present and first among the pinned hooks
-does not make the full sequence pinned or satisfy C5. In particular, the
-manifest reports `quarantine_persists_into_userspace: false`.
-
-The separate
-[QEMU regular-file fixture result](../artifacts/prototype/2026-09-25/bytepin-next4/qemu/c5-a/result.json)
-also says **fail**. Under q35 TCG, direct kernel/initramfs boot reached
-`multi-user.target`, but the serial log reports “C5 fixture write failed for
-an unverified reason”; there is no structured initramfs event, no persistence
-marker, and the report does not establish read-only state or denial of writes.
-The fixture hook loads `virtio_blk`, waits for `/dev/vda`, and then applies
-`blockdev --setro`; this does not prove quarantine before kernel device
-registration. The 32 MiB regular-file fixture attached as `/dev/vda` had an
-unchanged digest, which is not proof of write denial. No host block device was
-passed through; no USB or NIC was attached. This is not physical-device,
-firmware/bootloader, or Secure Boot verification. The result explicitly records
-`hardware_verified: false` and `secure_boot_verified: false`.
-
-These next4 results are historical prototype evidence, not a change to an ADR
-or to the C5 success criteria. The historical bytepin-next3 evidence is
-retained at its existing paths and is not overwritten by the next4 record.
+These observations are limited to the measured prototype. QEMU does not prove
+firmware/bootloader behavior, Secure Boot, physical-media safety, full-lifecycle
+no-host-write behavior, or production-builder suitability. Do not promote the
+result to hardware or release evidence.
 
 The measured `fail` is a first-class result, not a production-builder decision.
 It must not be upgraded to pass based on a successful boot, matching A/B

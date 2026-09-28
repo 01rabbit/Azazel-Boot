@@ -1,5 +1,0 @@
-bdrv_open_common bs 0x9f2c76000 filename "/Users/mao/Developer/GitHub/Azazel/artifacts/prototype/2026-09-26/boot-runtime-r11/output/payload.iso" flags 0x28000 format_name "file"
-bdrv_open_common bs 0x9f2c71000 filename "/Users/mao/Developer/GitHub/Azazel/artifacts/prototype/2026-09-26/boot-runtime-r11/output/payload.iso" flags 0x20000 format_name "raw"
-bdrv_open_common bs 0x9f2c7ec00 filename "/Users/mao/Developer/GitHub/Azazel/artifacts/prototype/2026-09-26/boot-runtime-r11/output/c5-qemu/quarantine-fixture-vda.raw" flags 0x2a022 format_name "file"
-bdrv_open_common bs 0x9f2c79c00 filename "/Users/mao/Developer/GitHub/Azazel/artifacts/prototype/2026-09-26/boot-runtime-r11/output/c5-qemu/quarantine-fixture-vda.raw" flags 0x22022 format_name "raw"
-bdrv_open_common bs 0x9f2c6c000 filename "/Users/mao/Developer/GitHub/Azazel/artifacts/prototype/2026-09-26/boot-runtime-r11/output/c5-qemu/quarantine-fixture-vdb.raw" flags 0xa002 format_name "file"

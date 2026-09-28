@@ -5,22 +5,19 @@ with the measured prototype update below. It is not a closure record: reconcile
 the live issue, review, merged commit, and default-branch CI before closing or
 relabelling any row.
 
-## Prototype measurement update (2026-09-25)
+## Prototype measurement summary
 
-Azazel-Boot's [`bytepin-next4` evidence](prototype-evidence-bytepin-next4.md)
-now records a built Debian 13 amd64 initramfs, C5 static inspection, and one
-QEMU C5 fixture run. Static C5 and that fixture both **fail**; only the static
-inspection was repeated on Build B. The two digest-matched builds ran in
-separate clean QEMU builder VMs on one Apple Silicon host, so they are not two
-independent builder hosts and do not satisfy the stronger host-diversity gate.
-This measurement updates what exists below but does not close an issue or
-change an ADR.
+The retained [R11 evidence](prototype-evidence-boot-runtime-r11.md) records an
+unsigned prototype and bounded QEMU fixture results. Its ISO and bulky build
+outputs were removed from the local workspace; recorded hashes and machine
+results are historical evidence, not a currently available artifact. No
+prototype result closes hardware-only or production-builder gates.
 
 | Issue | Local classification | What exists | What still prevents closure |
 | --- | --- | --- | --- |
 | #1 | complete (bootstrap scope; close candidate) | The issue's latest comment says all bootstrap acceptance criteria were met after PR #3; governance, package scaffold, CI, and follow-up links are present. This is not product/HIL completion. | Its checkboxes remain unchecked and current Docs jobs have runner-allocation failures; reconcile the issue record and current CI evidence before any closure. |
-| #4 | design decision required | ADR-0002/0009 and a refusal-first evaluation harness define the criteria; `build` does not select a tool. bytepin-next11-r10 reproduced unsigned payload components in two clean VMs on one host and measured bounded QEMU C5 fixtures; no production builder was selected. | Remaining C1–C9 evaluation, two independent builder hosts/digest pair, and Linux/macOS record parity; do not select a production builder from this prototype. |
-| #6 | active implementation | bytepin-next11-r10 static hook ordering/content inspection passed; nested boot-image policy remains fail/pending `quarantine_not_persistent`. Bounded QEMU regular-file fixtures measured read-only transitions and write denial (`EPERM`) for boot-time and udev hotplug paths. | Actual persistence-media discovery/mount and session lifecycle, per-target approval, comprehensive zero-host-write observation through shutdown, and laptop HIL. |
+| #4 | design decision required | ADR-0002/0009 and a refusal-first evaluation harness define the criteria; `build` does not select a tool. R11 is an unsigned QEMU-tested prototype; no production builder was selected. | Remaining C1–C9 evaluation, two independent builder hosts/digest pair, and Linux/macOS record parity; do not select a production builder from this prototype. |
+| #6 | active implementation | R11 static hook ordering/content inspection and bounded regular-file QEMU probes are recorded; the initial scan observed zero devices, so pre-registration quarantine remains unobserved. | Actual persistence-media discovery/mount and session lifecycle, per-target approval, comprehensive zero-host-write observation through shutdown, and laptop HIL. |
 | #7 | active implementation | Persistence, session-mode, dirty-write, and recovery decision logic; child issues #40–42 carry the narrower software boundaries. | Real USB/LUKS/key acquisition and recovery/HIL; #47 is also an unresolved software budget boundary. |
 | #8 | blocked by external hardware | The selector logic follows the program's revised tier table. | Core reserve measurement on removable media and application of the measured reserve require an x86_64 laptop and USB SSD. |
 | #9 | active implementation | Inventory and commissioning parsing/refusal logic; unit tests cover composite identity and fail-closed cases. | Real NIC identity read, operator role confirmation, host/session binding and target reboot evidence on a compatible laptop. |
@@ -29,7 +26,7 @@ change an ADR.
 | #12 | blocked by external hardware | Isolation boundary is documented. | Borrowed-hardware Deception isolation with approved Edge package/runtime and actual host/storage/network gates. |
 | #16 | active implementation | Knowledge Lite admission decision logic and default-deny cache boundary. | Real verifier, artifact/cache implementation, offline bundle import and serving evidence. |
 | #17 | active implementation | Service-objective definitions and software-side status scaffolding. | SO-01/SO-09/SO-10 require field measurements; SO-06 consumer and independent measurement evidence remain. Keep hardware status unverified. |
-| #26 | active implementation | Host doctor, preparation plan, closure/evaluation decision logic, and a CLI that honestly refuses to build without selected inputs/builder. Prototype tooling produced R11 from a prior measured ISO after clean live-build stalled; r10 remains the latest clean-VM A/B run on one host. | Integrate approved builder contract, maintain C5 measurement before other criteria, two independent builder hosts/digest pair, and Linux/macOS record-equality evidence. |
+| #26 | active implementation | Host doctor, preparation plan, closure/evaluation decision logic, and a CLI that honestly refuses to build without selected inputs/builder. R11 was a remaster after clean live-build stalled; generated build outputs are no longer retained locally. | Integrate approved builder contract, maintain C5 measurement before other criteria, two independent builder hosts/digest pair, and Linux/macOS record-equality evidence. |
 | #27 | active implementation | Artifact record/verification logic and writer authority state machine, tested with synthetic ports. | Host media enumeration, a session-bound user flow, real verifier, isolated privileged write service, read-back/inspect command, and real USB SSD write/boot HIL. |
 | #28 | active implementation | R11 static C5 ordering/content inspection passed; manifest-bound QEMU evidence reconciles the static `quarantine_not_persistent` finding with same-boot userspace handoff. Cold-boot-attached regular-file vda and hotplug vdb were read-only before tested writes, which returned `EPERM`, and fixture digests stayed unchanged. The initial scan still saw zero devices; pre-registration quarantine is NOT_OBSERVED. | Observe pre-registration devices; persistence-media handoff/mount, stable physical identity, full lifecycle no-host-write HIL and approval workflow. |
 | #40 | software-complete / hardware-unverified | Session-mode and passphrase attempt decision boundary. | Real key acquisition, LUKS and encrypted-volume/operator exercise. |
