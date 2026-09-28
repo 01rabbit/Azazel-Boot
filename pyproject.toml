@@ -5,38 +5,23 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "azazel-boot"
 version = "0.0.0"
-description = "Azazel-Boot Responder (AZ-03) -- non-operational status scaffold"
+description = "Azazel-Boot Responder (AZ-03) -- existing-environment user assistance"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"
-# The scaffold is stdlib-only on purpose: it has to stand on a machine where
-# nothing optional is installed. Everything else is an extra.
+# The current scope is a non-operational status and design scaffold. A concrete
+# host-side installer has not been specified or implemented.
 dependencies = []
 
 [project.optional-dependencies]
-# Exactly one verified tag, no branch pin, no submodule, no copied source
-# (issue #1; ADR-0004). Boot imports it in one module only, and its absence
-# degrades the reported status rather than failing anything.
-fabric = ["azazel-fabric @ git+https://github.com/01rabbit/Azazel-Fabric.git@v0.9.0rc1"]
 dev = ["pytest==8.3.4", "ruff==0.8.4"]
 
 [project.scripts]
 azazel-boot = "azazel_boot.cli:main"
-azazel-boot-media = "azazel_boot.media_cli:main"
-# The builder console. Two verbs: `doctor` reports and changes nothing, and
-# `prepare-host` shows its plan and asks before each of the three acts. It is
-# not packaged from `src/`: `tools/` is developer-facing tooling, and the
-# product package stays free of anything that can reach a machine.
-azazel-boot-builder = "tools.builder.cli:main"
 
-# Two roots. `azazel_boot` is the product; `tools.builder` decides and
-# `tools.hostprobe` reads the host, and they are separate packages because
-# `tests/unit/test_builder_tooling_boundary.py` refuses `subprocess`, `os`,
-# `socket` and `urllib` anywhere under `tools/builder/` — the probe lives
-# outside it rather than that guard being relaxed.
 [tool.setuptools.packages.find]
 where = ["src", "."]
-include = ["azazel_boot*", "tools*"]
+include = ["azazel_boot*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
