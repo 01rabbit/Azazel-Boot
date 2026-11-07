@@ -21,6 +21,8 @@ claim that a tool has been installed or verified on a host.
    combination is hardware-qualified by Boot.
 2. Review the [Live and Nexus guide](docs/user-prepared-live.md) for verified
    inputs, prerequisites, installation effects, and recovery before proceeding.
+   Its reference is Nexus `3d9a2a68`, whose optional MIO pin is source
+   `989dd959` and version `0.1.0.dev20261107+gited860f2`.
 3. After an independently authorized Nexus installation, use its read-only
    `azazel-nexus setup` and `azazel-nexus status` to inspect reported state.
    A successful command does not establish commissioning or production readiness.
