@@ -71,6 +71,15 @@ offline bundle and platform checks. The installer itself generates and checks
 the fixed runtime wrappers before account, state-directory and systemd changes;
 it does not create the Python environment or install its packages.
 
+The Python 3.11 floor is a package/test requirement, not the complete systemd
+installation requirement. For the normal service-manager stage, the staged
+wrappers must resolve to interpreter `/usr/bin/python3.13` and import paths
+under `/usr/lib/python3.13` or `/opt/azazel-nexus/venv`, as required by the
+AppArmor profiles. The example venv must resolve to these actual paths; an
+arbitrary Python 3.13 installation is not sufficient. See the fixed Nexus
+[operations deception section, AppArmor profiles](https://github.com/01rabbit/Azazel-Nexus/blob/3d9a2a68d9e60105b183e33d0d1ee5040796616d/docs/operations.md#deception-lite-decoy-network-196)
+for the full conditions.
+
 Once the operator has independently approved host integration and satisfied
 those prerequisites, follow the Nexus guide's installation command. The
 installer creates accounts and state/configuration, installs units, masks

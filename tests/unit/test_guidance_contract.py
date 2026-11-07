@@ -19,7 +19,13 @@ def test_guidance_matches_the_referenced_nexus_pin():
     # tools/build_wheelhouse.py describe this source/version pair.
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     guide = (ROOT / "docs" / "user-prepared-live.md").read_text(encoding="utf-8")
+    assert "[Live and Nexus guide](docs/user-prepared-live.md)" in readme
+    assert (
+        "[Nexus main `3d9a2a68`]"
+        "(https://github.com/01rabbit/Azazel-Nexus/blob/"
+        "3d9a2a68d9e60105b183e33d0d1ee5040796616d/docs/debian-live-install.md)"
+    ) in guide
     for text in (readme, guide):
-        assert "3d9a2a68" in text
-        assert "989dd959" in text
-        assert "0.1.0.dev20261107+gited860f2" in text
+        assert "`3d9a2a68`" in text
+        assert "`989dd959`" in text
+        assert "`0.1.0.dev20261107+gited860f2`" in text
