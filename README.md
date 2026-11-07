@@ -14,6 +14,21 @@ exact tool set, supported host environments, effects and trust/update model are
 not specified. This repository contains no operational installer and makes no
 claim that a tool has been installed or verified on a host.
 
+## Quick start
+
+1. Start your own Debian Live system and confirm its persistence support. The
+   Nexus installer currently selects Debian 13 profiles; no Live image or PC
+   combination is hardware-qualified by Boot.
+2. Review the [Live and Nexus guide](docs/user-prepared-live.md) for verified
+   inputs, prerequisites, installation effects, and recovery before proceeding.
+   Its reference is Nexus `3d9a2a68`, whose optional MIO pin is source
+   `989dd959` and version `0.1.0.dev20261107+gited860f2`.
+3. After an independently authorized Nexus installation, use its read-only
+   `azazel-nexus setup` and `azazel-nexus status` to inspect reported state.
+   A successful command does not establish commissioning or production readiness.
+4. Check the same SSD on the designated separate PC and record the result.
+   Container evidence is not a physical boot test.
+
 ## Current state
 
 - Boot-owned image-building, media-writing, initramfs quarantine, and

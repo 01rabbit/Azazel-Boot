@@ -52,33 +52,58 @@ allowlist or a host-storage no-write guarantee.
 
 ## 3. Use the existing Nexus tools installer
 
-Boot does not package or replace the Nexus installer. Follow the matching
-Nexus release's own instructions and use its existing
-[`packaging/install.sh`](https://github.com/01rabbit/Azazel-Nexus/blob/36a4759079c6eccd8ba2dfa894ed0dac005ff5c0/packaging/install.sh)
-only after its prerequisites are satisfied. At the source checked for this
-guide (Azazel-Nexus `main` commit
-`36a4759079c6eccd8ba2dfa894ed0dac005ff5c0`, package version
-`0.0.1.dev0`), the script expects Nexus runtime entrypoints to have already
-been staged under `/usr/libexec/azazel`; it also requires Python 3.11 or
-newer. Creating the
-declared service accounts and ownership requires root, and applying the
-service-manager stage requires systemd to be running. A run with
-`--without-service-manager` explicitly skips masking/enabling units and is not
-evidence of a fully configured installation.
+Boot does not package or replace the Nexus installer. For this guide the
+reference is [Nexus main `3d9a2a68`](https://github.com/01rabbit/Azazel-Nexus/blob/3d9a2a68d9e60105b183e33d0d1ee5040796616d/docs/debian-live-install.md).
+Its optional MIO dependency pins source `989dd959`, version
+`0.1.0.dev20261107+gited860f2`. This identifies the reference tuple, not a
+production admission or a claim that another version is compatible. Obtain
+and verify the exact packages and their dependencies independently. Public
+source availability is not authorization to deploy or enable services.
 
-The installer writes configuration/state under `/etc/azazel` and
-`/var/lib/azazel`, installs unit files under `/lib/systemd/system`, and installs
-a systemd preset under `/lib/systemd/system-preset`. Review the current Nexus
-installer and package manifest for the exact release before deciding which
-paths the user's persistence configuration must retain. Persisting `/home`
-alone may not retain a system-wide installation. Do not copy an old path list
-without checking the current Nexus release.
+The reviewed install profile is Debian 13, with amd64 as the deployment
+baseline and arm64 restricted to lab software verification; neither is a
+hardware qualification. The installer needs Python 3.11 or newer, both Nexus
+and Nexus runtime distributions installed as regular packages in the same
+stable environment, a verified source tree, root and a running systemd for the
+full integration stage. Runtime includes a Linux native extension and requires a
+matching wheel. See the linked Nexus guide for the complete prerequisites,
+offline bundle and platform checks. The installer itself generates and checks
+the fixed runtime wrappers before account, state-directory and systemd changes;
+it does not create the Python environment or install its packages.
 
-The current installer masks governed operational units and enables only its
-activation controller; it does not start the operational network during
-installation. Boot does not admit providers, fetch models, commission a
-network, or activate Edge. Follow Nexus-owned instructions for any later
-operator-authorized steps.
+The Python 3.11 floor is a package/test requirement, not the complete systemd
+installation requirement. For the normal service-manager stage, the staged
+wrappers must resolve to interpreter `/usr/bin/python3.13` and import paths
+under `/usr/lib/python3.13` or `/opt/azazel-nexus/venv`, as required by the
+AppArmor profiles. The example venv must resolve to these actual paths; an
+arbitrary Python 3.13 installation is not sufficient. See the fixed Nexus
+[operations deception section, AppArmor profiles](https://github.com/01rabbit/Azazel-Nexus/blob/3d9a2a68d9e60105b183e33d0d1ee5040796616d/docs/operations.md#deception-lite-decoy-network-196)
+for the full conditions.
+
+Once the operator has independently approved host integration and satisfied
+those prerequisites, follow the Nexus guide's installation command. The
+installer creates accounts and state/configuration, installs units, masks
+governed units and enables the activation controller. It does not start the
+operational network during installation. `--without-service-manager` omits
+the manager stage and is not a completed systemd installation.
+
+Inspect the installed environment using the read-only commands shown by Nexus:
+
+```sh
+/opt/azazel-nexus/venv/bin/azazel-nexus setup
+/opt/azazel-nexus/venv/bin/azazel-nexus status
+```
+
+A successful `setup` command means guidance was produced, not that installation,
+commissioning or admission succeeded. Preserve the output with sensitive data
+removed and investigate any refusal or unknown state. If prerequisites fail,
+stop and preserve the existing system and installer output; do not retry with
+weakened checks. A failed installer can leave staged wrappers or other partial
+changes: consult the Nexus guide and its operations recovery instructions
+before any retry or restoration. Boot has no automatic rollback or uninstall.
+Review Nexus's path inventory before choosing persistence; `/home` alone may
+not retain a system-wide installation. Boot does not admit providers, fetch
+models, commission a network, or activate Edge.
 
 ## 4. Separate-PC boot check
 
